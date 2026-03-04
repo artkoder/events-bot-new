@@ -102,6 +102,8 @@ class GoogleAIClient:
     LOCAL_TPM_ENV = "GOOGLE_AI_LOCAL_TPM"
     LOCAL_RPD_ENV = "GOOGLE_AI_LOCAL_RPD"
     RESERVE_RPC_RECHECK_ENV = "GOOGLE_AI_RESERVE_RPC_RECHECK_SECONDS"
+    RESERVE_RPC_RETRY_ATTEMPTS_ENV = "GOOGLE_AI_RESERVE_RPC_RETRY_ATTEMPTS"
+    RESERVE_RPC_RETRY_BASE_DELAY_MS_ENV = "GOOGLE_AI_RESERVE_RPC_RETRY_BASE_DELAY_MS"
     INCIDENT_NOTIFICATIONS_ENV = "GOOGLE_AI_INCIDENT_NOTIFICATIONS"
     INCIDENT_COOLDOWN_ENV = "GOOGLE_AI_INCIDENT_COOLDOWN_SECONDS"
     TEXT_PRIMARY_MODEL = "gemma-3-27b"
@@ -264,6 +266,66 @@ class GoogleAIClient:
             except Exception:
                 continue
         return out or list(self.RETRY_DELAYS_MS)
+
+    async def _call_supabase_rpc_with_retries(
+        self,
+        fn_name: str,
+        payload: dict[str, Any],
+        *,
+        log_label: str,
+    ) -> Any:
+        """Call a Supabase RPC with short retries on transient transport errors."""
+        retry_attempts = self._read_int_env(self.RESERVE_RPC_RETRY_ATTEMPTS_ENV, 2)
+        retry_attempts = max(1, min(retry_attempts, 6))
+        retry_base_delay_ms = self._read_int_env(
+            self.RESERVE_RPC_RETRY_BASE_DELAY_MS_ENV,
+            350,
+        )
+        retry_base_delay_ms = max(50, min(retry_base_delay_ms, 5000))
+        last_exc: Exception | None = None
+        for rpc_attempt in range(1, retry_attempts + 1):
+            try:
+                return self.supabase.rpc(fn_name, payload).execute()
+            except Exception as exc:
+                last_exc = exc
+                transient = self._is_transient_reserve_rpc_error(exc)
+                if not transient or rpc_attempt >= retry_attempts:
+                    raise
+                delay_ms = int(retry_base_delay_ms * (2 ** (rpc_attempt - 1)))
+                delay_ms += random.randint(0, max(30, retry_base_delay_ms // 2))
+                delay_ms = min(delay_ms, 7000)
+                logger.warning(
+                    "google_ai.%s_rpc_transient_retry fn=%s attempt=%s/%s delay_ms=%s err=%s",
+                    log_label,
+                    fn_name,
+                    rpc_attempt,
+                    retry_attempts,
+                    delay_ms,
+                    exc,
+                )
+                await asyncio.sleep(delay_ms / 1000.0)
+        raise last_exc or RuntimeError(f"RPC failed: {fn_name}")
+
+    @staticmethod
+    def _is_transient_reserve_rpc_error(exc: Exception) -> bool:
+        cls_name = exc.__class__.__name__.lower()
+        msg = str(exc or "").lower()
+        if "timeout" in cls_name or "ssl" in cls_name or "connection" in cls_name:
+            return True
+        markers = (
+            "timed out",
+            "timeout",
+            "handshake",
+            "server disconnected",
+            "connection reset",
+            "connection aborted",
+            "eof",
+            "unexpected eof",
+            "temporarily unavailable",
+            "tls",
+            "ssl",
+        )
+        return any(token in msg for token in markers)
 
     def _read_fallback_models(self) -> list[str]:
         raw = (os.getenv("GOOGLE_AI_FALLBACK_MODELS") or "").strip()
@@ -477,6 +539,11 @@ class GoogleAIClient:
                     raise
                 except ProviderError as e:
                     last_error = e
+                    # Keep provider-side 429 fail-fast here. Higher-level flows
+                    # already decide whether to wait, defer, or retry, and an
+                    # extra retry loop in the client multiplies end-to-end delay.
+                    if int(getattr(e, "status_code", 0) or 0) == 429:
+                        raise
                     can_retry = bool(e.retryable) and local_attempt_no < self.max_retries
                     if can_retry:
                         delay_ms = self.retry_delays_ms[
@@ -559,7 +626,7 @@ class GoogleAIClient:
             raise ReservationError(f"API key not found: {reserve_result.env_var_name}")
         
         # 3. Mark as sent (before actual call)
-        await self._mark_sent(ctx.request_uid, attempt_no)
+        await self._mark_sent(ctx, attempt_no)
         
         # 4. Call provider
         start_time = _monotonic()
@@ -694,7 +761,39 @@ class GoogleAIClient:
         }
 
         try:
-            result = self.supabase.rpc("google_ai_reserve", payload).execute()
+            retry_attempts = self._read_int_env(self.RESERVE_RPC_RETRY_ATTEMPTS_ENV, 2)
+            retry_attempts = max(1, min(retry_attempts, 6))
+            retry_base_delay_ms = self._read_int_env(self.RESERVE_RPC_RETRY_BASE_DELAY_MS_ENV, 350)
+            retry_base_delay_ms = max(50, min(retry_base_delay_ms, 5000))
+            rpc_error: Exception | None = None
+            result = None
+            for rpc_attempt in range(1, retry_attempts + 1):
+                try:
+                    result = self.supabase.rpc("google_ai_reserve", payload).execute()
+                    rpc_error = None
+                    break
+                except Exception as exc:
+                    rpc_error = exc
+                    transient = self._is_transient_reserve_rpc_error(exc)
+                    if not transient or rpc_attempt >= retry_attempts:
+                        raise
+                    delay_ms = int(retry_base_delay_ms * (2 ** (rpc_attempt - 1)))
+                    delay_ms += random.randint(0, max(30, retry_base_delay_ms // 2))
+                    delay_ms = min(delay_ms, 7000)
+                    logger.warning(
+                        "google_ai.reserve_rpc_transient_retry consumer=%s model=%s attempt=%s/%s delay_ms=%s err=%s",
+                        ctx.consumer,
+                        ctx.model,
+                        rpc_attempt,
+                        retry_attempts,
+                        delay_ms,
+                        str(exc)[:260],
+                    )
+                    await asyncio.sleep(delay_ms / 1000.0)
+            if result is None:
+                if rpc_error:
+                    raise rpc_error
+                raise RuntimeError("google_ai_reserve returned no result")
             
             data = result.data
             if isinstance(data, list) and data:
@@ -1026,21 +1125,23 @@ class GoogleAIClient:
         )
         return any(marker in message for marker in markers)
     
-    async def _mark_sent(self, request_uid: str, attempt_no: int) -> None:
+    async def _mark_sent(self, ctx: RequestContext, attempt_no: int) -> None:
         """Mark request as sent (before calling provider)."""
         if not self.supabase:
             return
         if self._mark_sent_rpc_missing:
             return
-        
+        request_uid = ctx.request_uid
+
         try:
-            self.supabase.rpc(
+            await self._call_supabase_rpc_with_retries(
                 "google_ai_mark_sent",
                 {
                     "p_request_uid": request_uid,
                     "p_attempt_no": attempt_no,
-                }
-            ).execute()
+                },
+                log_label="mark_sent",
+            )
         except Exception as e:
             message = str(e)
             if self._is_missing_rpc_error(e, "google_ai_mark_sent"):
@@ -1054,6 +1155,13 @@ class GoogleAIClient:
                     )
                 return
             logger.warning("Failed to mark_sent: %s", e)
+            await self._notify_incident(
+                "mark_sent_rpc_error",
+                ctx=ctx,
+                severity="warning",
+                message=message,
+                details={"attempt_no": attempt_no, "rpc": "google_ai_mark_sent"},
+            )
     
     async def _finalize(
         self,
@@ -1094,11 +1202,22 @@ class GoogleAIClient:
         }
 
         try:
-            self.supabase.rpc("google_ai_finalize", payload).execute()
+            await self._call_supabase_rpc_with_retries(
+                "google_ai_finalize",
+                payload,
+                log_label="finalize",
+            )
             return
         except Exception as e:
             if not self._is_missing_rpc_error(e, "google_ai_finalize"):
                 logger.warning("Failed to finalize: %s", e)
+                await self._notify_incident(
+                    "finalize_rpc_error",
+                    ctx=ctx,
+                    severity="warning",
+                    message=str(e),
+                    details={"attempt_no": attempt_no, "rpc": "google_ai_finalize"},
+                )
                 return
             logger.info("google_ai_finalize missing, falling back to finalize_google_ai_usage")
             # Don't try google_ai_finalize again in this process.
@@ -1261,7 +1380,9 @@ class GoogleAIClient:
         """Best-effort token estimate for prompts.
 
         We can't depend on provider-side countTokens here (it would also require
-        an API call). We use a conservative heuristic based on UTF-8 byte length.
+        an API call). We use conservative byte/char heuristics because long
+        Cyrillic/OCR prompts can tokenize much denser than a simple bytes/4
+        estimate and otherwise slip past reserve() only to hit provider 429.
         """
         if not prompt:
             return 1
@@ -1269,7 +1390,18 @@ class GoogleAIClient:
             size = len(prompt.encode("utf-8", errors="ignore"))
         except Exception:
             size = len(prompt)
-        est = int(size / float(self._BYTES_PER_TOKEN_ESTIMATE))
+        chars = len(prompt)
+        non_ascii = sum(1 for ch in prompt if ord(ch) > 127)
+        non_ascii_ratio = (non_ascii / chars) if chars > 0 else 0.0
+
+        bytes_est = size / float(self._BYTES_PER_TOKEN_ESTIMATE)
+        if non_ascii_ratio >= 0.30:
+            chars_est = chars * 0.72
+            bytes_est = size / 2.6
+        else:
+            chars_est = chars * 0.30
+
+        est = int(max(bytes_est, chars_est))
         # Add overhead for JSON, escaping, and tokenization variance.
         est = int(est * 1.15) + 50
         return max(1, est)

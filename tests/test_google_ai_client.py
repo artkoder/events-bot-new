@@ -192,6 +192,63 @@ class TestGoogleAIClient:
         assert third.key_alias == "recovered-key"
         assert reserve_calls == 2
         assert client._reserve_rpc_missing is False
+
+    @pytest.mark.asyncio
+    async def test_reserve_rpc_transient_error_retries_before_fallback(self):
+        supabase = MagicMock()
+        reserve_calls = 0
+
+        def _rpc_side_effect(fn_name, _payload):
+            nonlocal reserve_calls
+            resp = MagicMock()
+            if fn_name == "google_ai_reserve":
+                reserve_calls += 1
+                if reserve_calls == 1:
+                    resp.execute.side_effect = Exception(
+                        "Server disconnected without sending a response."
+                    )
+                else:
+                    resp.execute.return_value = MagicMock(
+                        data=[
+                            {
+                                "ok": True,
+                                "api_key_id": "test-key-id",
+                                "env_var_name": "GOOGLE_API_KEY",
+                                "key_alias": "retry-ok",
+                                "minute_bucket": "2024-01-01T00:00:00Z",
+                                "day_bucket": "2024-01-01",
+                            }
+                        ]
+                    )
+            else:
+                resp.execute.return_value = MagicMock(data=None)
+            return resp
+
+        supabase.rpc.side_effect = _rpc_side_effect
+
+        with patch.dict(
+            os.environ,
+            {
+                "GOOGLE_API_KEY": "test-api-key",
+                "GOOGLE_AI_ALLOW_RESERVE_FALLBACK": "1",
+                "GOOGLE_AI_RESERVE_RPC_RETRY_ATTEMPTS": "2",
+                "GOOGLE_AI_RESERVE_RPC_RETRY_BASE_DELAY_MS": "50",
+            },
+            clear=False,
+        ):
+            client = GoogleAIClient(
+                supabase_client=supabase,
+                consumer="test",
+                dry_run=True,
+            )
+            text, _usage = await client.generate_content_async(
+                model="gemma-3-27b",
+                prompt="retry transient reserve rpc",
+            )
+            assert "[DRY RUN]" in text
+
+        assert reserve_calls == 2
+        assert client._reserve_rpc_missing is False
     
     @pytest.mark.asyncio
     async def test_provider_error_retries(self, mock_supabase):
@@ -220,6 +277,33 @@ class TestGoogleAIClient:
             
             # Should retry up to MAX_RETRIES times
             assert mock_model.generate_content_async.call_count == GoogleAIClient.MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_provider_429_is_not_retried(self, mock_supabase):
+        """Provider 429 should bubble up so outer workflows can handle waiting."""
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "test-api-key"}):
+            client = GoogleAIClient(
+                supabase_client=mock_supabase,
+                consumer="test",
+                dry_run=False,
+            )
+
+            mock_genai = MagicMock()
+            mock_model = MagicMock()
+            mock_model.generate_content_async = AsyncMock(
+                side_effect=Exception("429 Resource exhausted. Please retry in 58s.")
+            )
+            mock_genai.GenerativeModel.return_value = mock_model
+            client._genai = mock_genai
+
+            with pytest.raises(ProviderError) as exc_info:
+                await client.generate_content_async(
+                    model="gemma-3-27b",
+                    prompt="Test",
+                )
+
+            assert exc_info.value.status_code == 429
+            assert mock_model.generate_content_async.call_count == 1
 
     @pytest.mark.asyncio
     async def test_finalize_fallback_uses_legacy_after_new_rpc_missing(self):
@@ -260,6 +344,80 @@ class TestGoogleAIClient:
         ]
 
     @pytest.mark.asyncio
+    async def test_mark_sent_retries_transient_rpc_error(self):
+        supabase = MagicMock()
+        calls = {"n": 0}
+
+        def _rpc_side_effect(fn_name, _payload):
+            resp = MagicMock()
+            if fn_name == "google_ai_mark_sent":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    resp.execute.side_effect = Exception("Server disconnected without sending a response.")
+                else:
+                    resp.execute.return_value = MagicMock(data=None)
+            else:
+                resp.execute.return_value = MagicMock(data=None)
+            return resp
+
+        supabase.rpc.side_effect = _rpc_side_effect
+        client = GoogleAIClient(supabase_client=supabase, consumer="test", dry_run=True)
+        ctx = RequestContext(
+            request_uid="req-mark-sent",
+            consumer="test",
+            account_name="local",
+            model="gemma-3-27b",
+            reserved_tpm=1000,
+        )
+
+        async def _noop_sleep(_sec: float) -> None:
+            return None
+
+        with patch.dict(os.environ, {"GOOGLE_AI_RESERVE_RPC_RETRY_ATTEMPTS": "2"}, clear=False):
+            with patch("google_ai.client.asyncio.sleep", new=_noop_sleep):
+                await client._mark_sent(ctx, 1)
+
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_finalize_retries_transient_rpc_error(self):
+        supabase = MagicMock()
+        calls = {"n": 0}
+
+        def _rpc_side_effect(fn_name, _payload):
+            resp = MagicMock()
+            if fn_name == "google_ai_finalize":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    resp.execute.side_effect = Exception("SSL handshake timeout")
+                else:
+                    resp.execute.return_value = MagicMock(data=None)
+            else:
+                resp.execute.return_value = MagicMock(data=None)
+            return resp
+
+        supabase.rpc.side_effect = _rpc_side_effect
+        client = GoogleAIClient(supabase_client=supabase, consumer="test", dry_run=True)
+        ctx = RequestContext(
+            request_uid="req-finalize",
+            consumer="test",
+            account_name="local",
+            model="gemma-3-27b",
+            reserved_tpm=1000,
+        )
+        ctx.api_key_id = "key-1"
+        usage = UsageInfo(input_tokens=10, output_tokens=5, total_tokens=15)
+
+        async def _noop_sleep(_sec: float) -> None:
+            return None
+
+        with patch.dict(os.environ, {"GOOGLE_AI_RESERVE_RPC_RETRY_ATTEMPTS": "2"}, clear=False):
+            with patch("google_ai.client.asyncio.sleep", new=_noop_sleep):
+                await client._finalize(ctx, attempt_no=1, usage=usage, duration_ms=10)
+
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
     async def test_mark_sent_missing_rpc_is_cached_case_insensitive(self):
         """Missing mark_sent RPC should be detected and skipped on next calls."""
         supabase = MagicMock()
@@ -267,12 +425,19 @@ class TestGoogleAIClient:
             "pgrst202: route post:/rpc/google_ai_mark_sent not found"
         )
         client = GoogleAIClient(supabase_client=supabase, consumer="test", dry_run=True)
+        ctx = RequestContext(
+            request_uid="req-1",
+            consumer="test",
+            account_name=None,
+            model="gemma-3-27b",
+            reserved_tpm=1000,
+        )
 
-        await client._mark_sent("req-1", 1)
+        await client._mark_sent(ctx, 1)
         assert client._mark_sent_rpc_missing is True
 
         supabase.rpc.reset_mock()
-        await client._mark_sent("req-1", 2)
+        await client._mark_sent(ctx, 2)
         supabase.rpc.assert_not_called()
     
     def test_calculate_reserved_tpm(self, client):
@@ -280,6 +445,12 @@ class TestGoogleAIClient:
         prompt = "Hello, world!"
         reserved = client._calculate_reserved_tpm(prompt=prompt, max_output_tokens=8192)
         assert reserved > 8192  # includes prompt estimate + extra
+
+    def test_estimate_prompt_tokens_is_more_conservative_for_cyrillic_ocr(self, client):
+        prompt = ("АФИША\n" + ("Концерт 19:00 Калининград\n" * 1200)).strip()
+        estimate = client._estimate_prompt_tokens(prompt)
+        legacy = int((len(prompt.encode("utf-8")) / 4.0) * 1.15) + 50
+        assert estimate > legacy
     
     def test_classify_error_retryable(self, client):
         """Test error classification for retryable errors."""

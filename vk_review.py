@@ -69,6 +69,22 @@ async def _retry_locked_write(
     raise last_exc
 
 
+async def _run_locked_write(
+    conn,
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    description: str,
+) -> Any:
+    """Run a write transaction with commit retry on transient SQLite locks."""
+
+    async def _wrapped() -> Any:
+        result = await operation()
+        await conn.commit()
+        return result
+
+    return await _retry_locked_write(conn, _wrapped, description=description)
+
+
 async def _unlock_stale(conn) -> int:
     """Return stale locks back to the queue.
 
@@ -223,6 +239,8 @@ async def pick_next(
     *,
     requeue_skipped: bool = True,
     prefer_oldest: bool = False,
+    strict_chronological: bool = False,
+    resume_locked: bool = True,
 ) -> Optional[InboxPost]:
     """Select the next inbox item and lock it for the operator.
 
@@ -237,6 +255,11 @@ async def pick_next(
     set and ``review_batch`` recorded so later imports can accumulate months
     for this batch.
 
+    When ``strict_chronological=True``, bucket weighting/prioritization is
+    bypassed and the next row is always picked globally by oldest timestamp
+    first (``event_ts_hint ASC``, then ``date``/``id`` according to
+    ``prefer_oldest``).
+
     ``None`` is returned when the queue is empty.
     """
 
@@ -250,72 +273,73 @@ async def pick_next(
         now_ts = int(_time.time())
         reject_cutoff = now_ts + int(reject_window_hours * 3600)
 
-        while True:
-            # Continue reviewing rows that remain locked for this operator.
-            cur = await conn.execute(
-                """
-                SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id, event_ts_hint
-                FROM vk_inbox
-                WHERE status='locked' AND locked_by=?
-                ORDER BY locked_at ASC, id ASC
-                LIMIT 1
-                """,
-                (operator_id,),
-            )
-            row = await cur.fetchone()
-            if not row:
-                break
-
-            inbox_id = row[0]
-            text = row[4]
-            matched_kw = row[5]
-            has_date = row[6]
-            skip_hint_recalc = matched_kw == OCR_PENDING_SENTINEL and has_date == 0
-            publish_ts = row[3]
-            ts_hint = (
-                None
-                if skip_hint_recalc
-                else extract_event_ts_hint(text, publish_ts=publish_ts)
-            )
-            if not skip_hint_recalc and (ts_hint is None or ts_hint < reject_cutoff):
-                await conn.execute(
-                    "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
-                    (inbox_id,),
+        if resume_locked:
+            while True:
+                # Continue reviewing rows that remain locked for this operator.
+                cur = await conn.execute(
+                    """
+                    SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id, event_ts_hint
+                    FROM vk_inbox
+                    WHERE status='locked' AND locked_by=?
+                    ORDER BY locked_at ASC, id ASC
+                    LIMIT 1
+                    """,
+                    (operator_id,),
                 )
+                row = await cur.fetchone()
+                if not row:
+                    break
+
+                inbox_id = row[0]
+                text = row[4]
+                matched_kw = row[5]
+                has_date = row[6]
+                skip_hint_recalc = matched_kw == OCR_PENDING_SENTINEL and has_date == 0
+                publish_ts = row[3]
+                ts_hint = (
+                    None
+                    if skip_hint_recalc
+                    else extract_event_ts_hint(text, publish_ts=publish_ts)
+                )
+                if not skip_hint_recalc and (ts_hint is None or ts_hint < reject_cutoff):
+                    await conn.execute(
+                        "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
+                        (inbox_id,),
+                    )
+                    await conn.commit()
+                    logging.info(
+                        "vk_review reject_locked_due_to_hint id=%s operator=%s hint=%s cutoff=%s",
+                        inbox_id,
+                        operator_id,
+                        ts_hint,
+                        reject_cutoff,
+                    )
+                    now_ts = int(_time.time())
+                    reject_cutoff = now_ts + int(reject_window_hours * 3600)
+                    continue
+
+                if not skip_hint_recalc and ts_hint is not None:
+                    await conn.execute(
+                        "UPDATE vk_inbox SET event_ts_hint=?, review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (ts_hint, batch_id, inbox_id),
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE vk_inbox SET review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (batch_id, inbox_id),
+                    )
                 await conn.commit()
+                row = list(row)
+                row[8] = batch_id
+                row[10] = ts_hint
+                post = InboxPost(*row)
                 logging.info(
-                    "vk_review reject_locked_due_to_hint id=%s operator=%s hint=%s cutoff=%s",
-                    inbox_id,
+                    "vk_review resume_locked id=%s operator=%s batch=%s",
+                    post.id,
                     operator_id,
-                    ts_hint,
-                    reject_cutoff,
+                    batch_id,
                 )
-                now_ts = int(_time.time())
-                reject_cutoff = now_ts + int(reject_window_hours * 3600)
-                continue
-
-            if not skip_hint_recalc and ts_hint is not None:
-                await conn.execute(
-                    "UPDATE vk_inbox SET event_ts_hint=?, review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (ts_hint, batch_id, inbox_id),
-                )
-            else:
-                await conn.execute(
-                    "UPDATE vk_inbox SET review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
-                    (batch_id, inbox_id),
-                )
-            await conn.commit()
-            row = list(row)
-            row[8] = batch_id
-            row[10] = ts_hint
-            post = InboxPost(*row)
-            logging.info(
-                "vk_review resume_locked id=%s operator=%s batch=%s",
-                post.id,
-                operator_id,
-                batch_id,
-            )
-            return post
+                return post
 
         selected_row = None
         final_bucket_name: Optional[str] = None
@@ -346,32 +370,69 @@ async def pick_next(
                         (reject_cutoff,),
                     )
                     # Re-check now that we've moved skipped back to pending.
-                    continue
+                    cur = await conn.execute(
+                        "SELECT 1 FROM vk_inbox WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?) LIMIT 1",
+                        (reject_cutoff,),
+                    )
+                    has_pending = await cur.fetchone() is not None
+                    if has_pending:
+                        continue
+                    await conn.commit()
+                    return None
                 else:
                     return None
 
-            cursor = await conn.execute(
-                f"""
-                WITH next AS (
-                    SELECT id FROM vk_inbox
-                    WHERE status='pending'
-                      AND event_ts_hint IS NOT NULL
-                      AND event_ts_hint >= ?
-                      AND event_ts_hint < ?
-                    ORDER BY event_ts_hint ASC, date {date_order}, id {id_order}
-                    LIMIT 1
+            row = None
+            if strict_chronological:
+                cursor = await conn.execute(
+                    f"""
+                    WITH next AS (
+                        SELECT id FROM vk_inbox
+                        WHERE status='pending'
+                          AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
+                        ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
+                                 event_ts_hint ASC,
+                                 date {date_order},
+                                 id {id_order}
+                        LIMIT 1
+                    )
+                    UPDATE vk_inbox
+                    SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
+                    WHERE id = (SELECT id FROM next)
+                    RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id, event_ts_hint
+                    """,
+                    (reject_cutoff, operator_id, batch_id),
                 )
-                UPDATE vk_inbox
-                SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
-                WHERE id = (SELECT id FROM next)
-                RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id, event_ts_hint
-                """,
-                (reject_cutoff, urgent_cutoff, operator_id, batch_id),
-            )
-            row = await cursor.fetchone()
-            if row:
-                bucket_name_for_history = "URGENT"
-            if not row:
+                row = await cursor.fetchone()
+                if row:
+                    bucket_name_for_history = "STRICT"
+            else:
+                cursor = await conn.execute(
+                    f"""
+                    WITH next AS (
+                        SELECT id FROM vk_inbox
+                        WHERE status='pending'
+                          AND event_ts_hint IS NOT NULL
+                          AND event_ts_hint >= ?
+                          AND event_ts_hint < ?
+                        ORDER BY event_ts_hint ASC, date {date_order}, id {id_order}
+                        LIMIT 1
+                    )
+                    UPDATE vk_inbox
+                    SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
+                    WHERE id = (SELECT id FROM next)
+                    RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id, event_ts_hint
+                    """,
+                    (reject_cutoff, urgent_cutoff, operator_id, batch_id),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    bucket_name_for_history = "URGENT"
+            if not row and strict_chronological:
+                await conn.commit()
+                return None
+
+            if not row and not strict_chronological:
                 soon_max_days = max(_float_from_env("VK_REVIEW_SOON_MAX_D", 14), 0.0)
                 long_max_days = max(
                     _float_from_env("VK_REVIEW_LONG_MAX_D", 30),
@@ -573,29 +634,63 @@ async def pick_next(
 
 async def mark_skipped(db: Database, inbox_id: int) -> None:
     async with db.raw_conn() as conn:
-        await conn.execute(
-            "UPDATE vk_inbox SET status='skipped', locked_by=NULL, locked_at=NULL WHERE id=?",
-            (inbox_id,),
+        async def _update() -> None:
+            await conn.execute(
+                "UPDATE vk_inbox SET status='skipped', locked_by=NULL, locked_at=NULL WHERE id=?",
+                (inbox_id,),
+            )
+
+        await _run_locked_write(
+            conn,
+            _update,
+            description=f"mark_skipped inbox_id={inbox_id}",
         )
-        await conn.commit()
 
 
 async def mark_failed(db: Database, inbox_id: int) -> None:
     async with db.raw_conn() as conn:
-        await conn.execute(
-            "UPDATE vk_inbox SET status='failed', locked_by=NULL, locked_at=NULL WHERE id=?",
-            (inbox_id,),
+        async def _update() -> None:
+            await conn.execute(
+                "UPDATE vk_inbox SET status='failed', locked_by=NULL, locked_at=NULL WHERE id=?",
+                (inbox_id,),
+            )
+
+        await _run_locked_write(
+            conn,
+            _update,
+            description=f"mark_failed inbox_id={inbox_id}",
         )
-        await conn.commit()
 
 
 async def mark_rejected(db: Database, inbox_id: int) -> None:
     async with db.raw_conn() as conn:
-        await conn.execute(
-            "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE id=?",
-            (inbox_id,),
+        async def _update() -> None:
+            await conn.execute(
+                "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE id=?",
+                (inbox_id,),
+            )
+
+        await _run_locked_write(
+            conn,
+            _update,
+            description=f"mark_rejected inbox_id={inbox_id}",
         )
-        await conn.commit()
+
+
+async def mark_pending(db: Database, inbox_id: int) -> None:
+    """Return an inbox row back to the queue (clear lock and batch)."""
+    async with db.raw_conn() as conn:
+        async def _update() -> None:
+            await conn.execute(
+                "UPDATE vk_inbox SET status='pending', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
+                (inbox_id,),
+            )
+
+        await _run_locked_write(
+            conn,
+            _update,
+            description=f"mark_pending inbox_id={inbox_id}",
+        )
 
 
 async def mark_imported(
@@ -648,62 +743,69 @@ async def mark_imported_events(
             months.add(month)
 
     async with db.raw_conn() as conn:
-        if not batch_id:
-            cur = await conn.execute(
-                "SELECT review_batch FROM vk_inbox WHERE id=?",
-                (inbox_id,),
-            )
-            row = await cur.fetchone()
-            if row and row[0]:
-                batch_id = row[0]
-
-        await conn.execute(
-            """
-            UPDATE vk_inbox
-            SET status='imported', locked_by=NULL, locked_at=NULL,
-                imported_event_id=?, review_batch=?
-            WHERE id=?
-            """,
-            (primary_event_id, batch_id, inbox_id),
-        )
-
-        if ids:
-            for eid in ids:
-                await conn.execute(
-                    "INSERT OR IGNORE INTO vk_inbox_import_event(inbox_id, event_id) VALUES(?,?)",
-                    (inbox_id, eid),
+        async def _update() -> None:
+            nonlocal batch_id
+            if not batch_id:
+                cur = await conn.execute(
+                    "SELECT review_batch FROM vk_inbox WHERE id=?",
+                    (inbox_id,),
                 )
+                row = await cur.fetchone()
+                if row and row[0]:
+                    batch_id = row[0]
 
-        if batch_id:
             await conn.execute(
                 """
-                INSERT OR IGNORE INTO vk_review_batch(batch_id, operator_id, months_csv)
-                VALUES(?,?,?)
+                UPDATE vk_inbox
+                SET status='imported', locked_by=NULL, locked_at=NULL,
+                    imported_event_id=?, review_batch=?
+                WHERE id=?
                 """,
-                (batch_id, operator_id, ""),
+                (primary_event_id, batch_id, inbox_id),
             )
-            cur = await conn.execute(
-                "SELECT months_csv FROM vk_review_batch WHERE batch_id=?",
-                (batch_id,),
-            )
-            row = await cur.fetchone()
-            if row and row[0]:
-                months.update(set(filter(None, str(row[0]).split(","))))
-            months_csv = ",".join(sorted(months))
-            await conn.execute(
-                "UPDATE vk_review_batch SET months_csv=?, finished_at=NULL WHERE batch_id=?",
-                (months_csv, batch_id),
-            )
-        else:
-            logging.warning(
-                "vk_review mark_imported missing_batch",
-                extra={
-                    "inbox_id": inbox_id,
-                    "event_ids": ids,
-                    "event_dates": event_dates,
-                },
-            )
-        await conn.commit()
+
+            if ids:
+                for eid in ids:
+                    await conn.execute(
+                        "INSERT OR IGNORE INTO vk_inbox_import_event(inbox_id, event_id) VALUES(?,?)",
+                        (inbox_id, eid),
+                    )
+
+            if batch_id:
+                await conn.execute(
+                    """
+                    INSERT OR IGNORE INTO vk_review_batch(batch_id, operator_id, months_csv)
+                    VALUES(?,?,?)
+                    """,
+                    (batch_id, operator_id, ""),
+                )
+                cur = await conn.execute(
+                    "SELECT months_csv FROM vk_review_batch WHERE batch_id=?",
+                    (batch_id,),
+                )
+                row = await cur.fetchone()
+                if row and row[0]:
+                    months.update(set(filter(None, str(row[0]).split(","))))
+                months_csv = ",".join(sorted(months))
+                await conn.execute(
+                    "UPDATE vk_review_batch SET months_csv=?, finished_at=NULL WHERE batch_id=?",
+                    (months_csv, batch_id),
+                )
+            else:
+                logging.warning(
+                    "vk_review mark_imported missing_batch",
+                    extra={
+                        "inbox_id": inbox_id,
+                        "event_ids": ids,
+                        "event_dates": event_dates,
+                    },
+                )
+
+        await _run_locked_write(
+            conn,
+            _update,
+            description=f"mark_imported_events inbox_id={inbox_id}",
+        )
 
     logging.info(
         "vk_review mark_imported_events inbox_id=%s primary_event_id=%s events=%s months=%s",

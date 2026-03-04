@@ -14,7 +14,6 @@ from smart_event_update import (
     _pick_new_text_snippet,
     _preserve_blockquotes_from_previous_description,
     _split_overlong_first_person_blockquotes,
-    _strip_foreign_schedule_headings,
     _strip_foreign_schedule_noise,
     _demote_redundant_anchor_facts,
 )
@@ -191,20 +190,9 @@ def test_merge_non_shrinking_prefers_candidate_when_before_and_merged_too_short(
     assert len(enforced) >= len(candidate_text) * 0.9
 
 
-def test_strip_foreign_schedule_headings_removes_other_dates() -> None:
-    text = (
-        "04.02 | Мысли мудрых людей на каждый день\n"
-        "07.02 | Мёртвые души\n"
-        "Описание спектакля.\n"
-        "08.02 | Три супруги-совершенства\n"
-    )
-    cleaned = _strip_foreign_schedule_headings(text, event_date="2026-02-07", end_date=None)
-    assert "04.02 | Мысли" not in cleaned
-    assert "08.02 | Три супруги" not in cleaned
-    assert "07.02 | Мёртвые души" in cleaned
-
-
-def test_strip_foreign_schedule_noise_removes_foreign_list_sentence() -> None:
+def test_strip_foreign_schedule_noise_is_noop_now() -> None:
+    # Policy: text shaping is handled by LLM. Deterministic schedule stripping
+    # must not delete text post-LLM.
     text = (
         "Спектакль по мотивам классики.\n"
         "Спектакль является частью театральной недели, в рамках которой также пройдут спектакли "
@@ -217,8 +205,7 @@ def test_strip_foreign_schedule_noise_removes_foreign_list_sentence() -> None:
         end_date=None,
         event_title="Мёртвые души",
     )
-    assert "мысли мудрых" not in cleaned.lower()
-    assert "Показ состоится" in cleaned
+    assert cleaned == text.strip()
 
 
 def test_fact_seed_preserves_style_terms_like_flamenco() -> None:
@@ -304,6 +291,25 @@ def test_initial_added_facts_do_not_include_textual_thesis_for_created_event() -
     assert not any(str(f).lower().startswith("тезис:") for f in facts)
     assert any(str(f).lower().startswith("дата:") for f in facts)
     assert any(str(f).lower().startswith("локация:") for f in facts)
+
+
+def test_initial_added_facts_do_not_duplicate_address_when_location_name_is_full_line() -> None:
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-32547811_10476",
+        source_text="Адрес: Московский пр-т, 39.",
+        raw_excerpt="Адрес: Московский пр-т, 39.",
+        title="Честно прекрасно: импровизированный спектакль",
+        date="2026-03-05",
+        time="19:00",
+        location_name="Библиотека Чехова, Московский пр-кт 39, Калининград",
+        location_address="Московский пр-т 39",
+        city="Калининград",
+    )
+    facts = _initial_added_facts(candidate)
+    loc_facts = [f for f in facts if str(f).startswith("Локация:")]
+    assert len(loc_facts) == 1
+    assert loc_facts[0] == "Локация: Библиотека Чехова, Московский пр-кт 39, Калининград"
 
 
 def test_merge_preserves_existing_blockquote_and_drops_reported_speech_duplicate() -> None:

@@ -33,6 +33,7 @@
 ## Практика в репозитории
 
 - Пример “split datasets + Fernet”: `source_parsing/telegram/service.py` + `source_parsing/telegram/split_secrets.py`.
+- Ещё один пример “split datasets + Fernet”: `telegraph_cache_sanitizer.py` (Telegraph cache sanitizer / TelegraphCacheProbe).
 - Пример multi-source secrets в Kaggle: `kaggle/UniversalFestivalParser/src/secrets.py` (env → Kaggle Secrets → encrypted datasets).
 
 ## Telegram Auth Bundle для Kaggle (ручные запуски)
@@ -70,6 +71,12 @@ client = TelegramClient(
 ```
 
 Важно: **не запускайте одну и ту же session строку параллельно** в двух процессах (иначе можно словить `AuthKeyDuplicatedError`). Разные session строки для одного аккаунта допустимы.
+
+Рекомендация для разных окружений:
+
+- храните отдельные bundle для prod и dev/e2e;
+- для Telegram Monitoring можно явно выбрать, какой env-ключ брать, через
+  `TG_MONITORING_AUTH_BUNDLE_ENV` (например `TELEGRAM_AUTH_BUNDLE_E2E`).
 
 Примечание: для **автоматических запусков через Kaggle API** по‑прежнему используйте encrypted datasets (см. базовый паттерн выше), так как Kaggle Secrets не всегда доступны при API‑старте.
 

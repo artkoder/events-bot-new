@@ -12,7 +12,7 @@ import main
 
 @pytest.mark.asyncio
 async def test_vk_intake_assigns_posters_to_matching_drafts(monkeypatch) -> None:
-    async def fake_parse_event_via_4o(text: str, *args, **kwargs):
+    async def fake_parse_event_via_llm(text: str, *args, **kwargs):
         return [
             {
                 "title": "Disco Party",
@@ -54,7 +54,7 @@ async def test_vk_intake_assigns_posters_to_matching_drafts(monkeypatch) -> None
             },
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse_event_via_4o)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse_event_via_llm)
 
     poster1 = PosterMedia(data=b"1", name="p1")
     poster1.ocr_title = "DISCO PARTY"

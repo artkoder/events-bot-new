@@ -13,6 +13,7 @@ import tempfile
 import time
 from html import escape, unescape
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from pathlib import Path
 from behave import given, when, then
 
@@ -114,6 +115,35 @@ def _find_event_id_in_text(text: str, title: str) -> int | None:
     return None
 
 
+def _raise_on_bot_ui_errors(messages, *, baseline_id: int) -> None:
+    """Fail fast on operator-visible errors in Telegram UI during live E2E.
+
+    We treat bot status messages like:
+      - "Результат: ошибка …"
+      - "Результат: ошибка извлечения событий …"
+    as hard failures, because otherwise the E2E run may appear to "hang" while
+    silently skipping posts.
+    """
+    for msg in messages or []:
+        mid = int(getattr(msg, "id", 0) or 0)
+        if mid <= int(baseline_id or 0):
+            continue
+        text = (msg.text or "").strip()
+        if not text:
+            continue
+        if "Результат:" not in text:
+            continue
+        # Non-fatal outcomes.
+        if re.search(r"^\s*Результат:\s*(лимит|limit|событий не найдено)", text, flags=re.IGNORECASE | re.MULTILINE):
+            continue
+        if re.search(r"^\s*Результат:\s*ошибка\b", text, flags=re.IGNORECASE | re.MULTILINE):
+            preview = text.replace("\n", " ")[:500]
+            raise AssertionError(
+                "В Telegram UI обнаружена ошибка выполнения операции. "
+                f"message_id={mid} text={preview}"
+            )
+
+
 def _extract_report_stat(text: str, label: str) -> int | None:
     if not text:
         return None
@@ -166,6 +196,29 @@ async def _fetch_telegraph_pages(links: list[str]) -> list[str]:
             async with session.get(link, timeout=aiohttp.ClientTimeout(total=20)) as resp:
                 html_pages.append(await resp.text())
     return html_pages
+
+
+async def _probe_image_webp(url: str) -> tuple[bool, str]:
+    """Return (is_webp, debug) for an image URL (best-effort, low bandwidth)."""
+    import aiohttp
+
+    headers = {
+        "User-Agent": "events-bot-e2e/1.0",
+        "Range": "bytes=0-63",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                status = int(getattr(resp, "status", 0) or 0)
+                ct = str(resp.headers.get("Content-Type") or "").lower()
+                body = await resp.content.read(64)
+    except Exception as exc:
+        return False, f"fetch_error={type(exc).__name__}:{exc}"
+
+    riff = (len(body) >= 12 and body[:4] == b"RIFF" and body[8:12] == b"WEBP")
+    ct_webp = ("image/webp" in ct)
+    ok = (status in {200, 206}) and (riff or ct_webp)
+    return ok, f"status={status} ct={ct!r} riff_webp={riff}"
 
 
 def _normalize_search_text(value: str) -> str:
@@ -963,30 +1016,28 @@ def _load_event_row_by_title(title: str) -> sqlite3.Row | None:
 
 
 def _ensure_sources(rows: list[dict]) -> None:
-    """Replace telegram_source set with provided rows (upsert), remove the rest."""
+    """Upsert telegram_source rows from provided list (non-destructive by default).
+
+    Safety:
+    - In shared test/prod-like DBs we must not delete carefully curated sources.
+    - When E2E runs against an isolated DB copy (`E2E_DB_BASE_PATH` is set), we
+      may disable other sources for determinism, but still avoid deleting rows.
+    """
     db_path = _db_path()
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         cur = conn.cursor()
         usernames = [str(r.get("username") or "").lstrip("@").strip() for r in rows]
         usernames = [u for u in usernames if u]
-        if usernames:
+        # Deterministic mode: disable all other sources on isolated DB copies.
+        # Do not delete anything (operators may want to re-run with the same seed).
+        safe_isolated = bool((os.getenv("E2E_DB_BASE_PATH") or "").strip())
+        if safe_isolated and usernames:
             placeholders = ",".join("?" for _ in usernames)
             cur.execute(
-                f"SELECT id FROM telegram_source WHERE username NOT IN ({placeholders})",
+                f"UPDATE telegram_source SET enabled=0 WHERE username NOT IN ({placeholders})",
                 usernames,
             )
-            other_ids = [row[0] for row in cur.fetchall()]
-            if other_ids:
-                other_ph = ",".join("?" for _ in other_ids)
-                cur.execute(
-                    f"DELETE FROM telegram_scanned_message WHERE source_id IN ({other_ph})",
-                    other_ids,
-                )
-                cur.execute(
-                    f"DELETE FROM telegram_source WHERE id IN ({other_ph})",
-                    other_ids,
-                )
 
         for row in rows:
             username = str(row.get("username") or "").lstrip("@").strip()
@@ -1386,11 +1437,11 @@ def _norm_location_key(value: str | None) -> str:
 
 
 def _find_row_buttons_for_username(message, username: str):
-    """Return (toggle_btn, trust_btn, loc_btn, ticket_btn, reset_btn, delete_btn) for a username on /tg list message."""
+    """Return (toggle_btn, trust_btn, loc_btn, ticket_btn, festival_btn, reset_btn, delete_btn) for a username on /tg list message."""
     uname = username.lstrip("@").strip()
     if not message or not getattr(message, "buttons", None):
-        return None, None, None, None, None, None
-    toggle_btn = trust_btn = loc_btn = ticket_btn = reset_btn = delete_btn = None
+        return None, None, None, None, None, None, None
+    toggle_btn = trust_btn = loc_btn = ticket_btn = festival_btn = reset_btn = delete_btn = None
     rows = list(message.buttons or [])
     for idx, row in enumerate(rows):
         texts = [getattr(b, "text", "") for b in row]
@@ -1416,15 +1467,103 @@ def _find_row_buttons_for_username(message, username: str):
         if idx + 2 < len(rows):
             for b in rows[idx + 2]:
                 t = getattr(b, "text", "")
-                if t.startswith("♻️") and f"@{uname}" in t:
-                    reset_btn = b
+                if t.startswith("🎪 "):
+                    festival_btn = b
         if idx + 3 < len(rows):
             for b in rows[idx + 3]:
+                t = getattr(b, "text", "")
+                if t.startswith("♻️") and f"@{uname}" in t:
+                    reset_btn = b
+        if idx + 4 < len(rows):
+            for b in rows[idx + 4]:
                 t = getattr(b, "text", "")
                 if t.startswith("🗑️") and f"@{uname}" in t:
                     delete_btn = b
         break
-    return toggle_btn, trust_btn, loc_btn, ticket_btn, reset_btn, delete_btn
+    return toggle_btn, trust_btn, loc_btn, ticket_btn, festival_btn, reset_btn, delete_btn
+
+
+def _extract_tg_sources_pagination(text: str | None) -> tuple[int | None, int | None]:
+    if not text:
+        return None, None
+    m = re.search(r"\\bpage\\s+(\\d+)\\s*/\\s*(\\d+)\\b", text, flags=re.IGNORECASE)
+    if not m:
+        return None, None
+    try:
+        return int(m.group(1)), int(m.group(2))
+    except Exception:
+        return None, None
+
+
+async def _collect_tg_sources_pages(context, *, max_pages: int = 30) -> list[str]:
+    texts: list[str] = []
+    msg = context.last_response
+    if not msg:
+        return texts
+    last_text = None
+    for _ in range(max_pages):
+        text = (msg.text or "")
+        texts.append(text)
+        cur, total = _extract_tg_sources_pagination(text)
+        if cur is not None and total is not None and cur >= total:
+            break
+        next_btn = find_button(msg, "➡️ Далее")
+        if not next_btn:
+            break
+        await context.client._gaussian_delay(0.4, 1.0)
+        await next_btn.click()
+        import asyncio
+        await asyncio.sleep(2.2)
+        try:
+            updated = await context.client.client.get_messages(context.bot_entity, ids=[msg.id])
+            if updated:
+                msg = updated[0]
+        except Exception:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=1)
+            if messages:
+                msg = messages[0]
+        context.last_response = msg
+        if last_text is not None and (msg.text or "") == last_text:
+            break
+        last_text = (msg.text or "")
+    return texts
+
+
+@then("список источников Telegram в UI использует пагинацию")
+def step_tg_sources_has_pagination(context):
+    msg = context.last_response
+    if not msg:
+        raise AssertionError("Нет сообщения со списком источников Telegram")
+    cur, total = _extract_tg_sources_pagination(msg.text or "")
+    if not total or total < 2:
+        raise AssertionError(f"Ожидалась пагинация (>=2 страниц), но найдено: page={cur}/{total}")
+    buttons = get_all_buttons(msg)
+    if not any("➡️ Далее" in b for b in buttons):
+        raise AssertionError(f"Ожидалась кнопка '➡️ Далее' на первой странице. Кнопки: {buttons}")
+    logger.info("✓ Пагинация списка источников включена: page=%s/%s", cur, total)
+
+
+@then("в списке источников Telegram через UI есть источники:")
+def step_tg_sources_contains_table(context):
+    if not context.table:
+        raise AssertionError("Ожидалась таблица | username |")
+    expected = []
+    for row in context.table:
+        expected.append(str(row["username"] or "").strip().lstrip("@"))
+    if not expected:
+        raise AssertionError("Пустой список ожидаемых источников")
+
+    async def _collect():
+        pages = await _collect_tg_sources_pages(context)
+        joined = "\n".join(pages)
+        found = set(re.findall(r"@([A-Za-z0-9_]{4,64})", joined))
+        missing = [u for u in expected if u not in found]
+        if missing:
+            preview = joined[:1500].replace("\n", " ")
+            raise AssertionError(f"Не найдены источники: {missing}. Preview: {preview}")
+        logger.info("✓ Найдены все источники (%d) через пагинацию", len(expected))
+
+    run_async(context, _collect())
 
 
 # =============================================================================
@@ -2470,11 +2609,54 @@ def step_event_has_vk_and_telegram_sources(context):
     logger.info("✓ Найдено событие с источниками VK+Telegram: event_id=%s", event_id)
 
 
+@then("существует событие с источниками VK, Telegram и парсером")
+def step_event_has_vk_tg_and_parser_sources(context):
+    """Find at least one event that has VK + Telegram + parser:<...> sources."""
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        try:
+            _ensure_event_source_table(conn)
+        except Exception:
+            pass
+        cur.execute(
+            """
+            SELECT
+                event_id,
+                SUM(CASE WHEN (source_url LIKE '%vk.com/%' OR source_url LIKE '%vk.ru/%') THEN 1 ELSE 0 END) AS vk_cnt,
+                SUM(CASE WHEN source_url LIKE '%t.me/%' THEN 1 ELSE 0 END) AS tg_cnt,
+                SUM(CASE WHEN source_type LIKE 'parser:%' THEN 1 ELSE 0 END) AS parser_cnt
+            FROM event_source
+            GROUP BY event_id
+            HAVING vk_cnt > 0 AND tg_cnt > 0 AND parser_cnt > 0
+            ORDER BY event_id DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError("Не найдено ни одного события с источниками VK + Telegram + parser")
+    event_id = int(row["event_id"])
+    context.vk_tg_parser_event_id = event_id
+    logger.info("✓ Найдено событие с источниками VK+Telegram+parser: event_id=%s", event_id)
+
+
 @when("я запрашиваю /log для события с источниками VK и Telegram")
 def step_request_log_for_vk_tg_merged_event(context):
     eid = int(getattr(context, "vk_tg_merged_event_id", 0) or 0)
     if eid <= 0:
         raise AssertionError("Нет event_id для VK+Telegram события (сначала найдите его в БД)")
+    step_send_command(context, f"/log {eid}")
+
+
+@when("я запрашиваю /log для события с источниками VK, Telegram и парсером")
+def step_request_log_for_vk_tg_parser_merged_event(context):
+    eid = int(getattr(context, "vk_tg_parser_event_id", 0) or 0)
+    if eid <= 0:
+        raise AssertionError("Нет event_id для VK+Telegram+parser события (сначала найдите его в БД)")
     step_send_command(context, f"/log {eid}")
 
 
@@ -2499,6 +2681,18 @@ def step_source_log_has_vk_and_tg(context):
 @given("я очищаю список источников Telegram через UI")
 def step_clear_all_sources_ui(context):
     """Delete all Telegram sources using the real UI buttons."""
+    if (os.getenv("E2E_ALLOW_TG_SOURCES_CLEAR") or "").strip() != "1":
+        raise AssertionError(
+            "Шаг 'очистить список источников Telegram' отключён по умолчанию, "
+            "чтобы не сносить вручную настроенные источники. "
+            "Для явного разрешения установите E2E_ALLOW_TG_SOURCES_CLEAR=1 "
+            "(и запускайте на изолированной копии DB_PATH)."
+        )
+    if not (os.getenv("E2E_DB_BASE_PATH") or "").strip():
+        raise AssertionError(
+            "Отказываюсь очищать Telegram источники: DB не выглядит изолированной копией "
+            "(нет E2E_DB_BASE_PATH). Запускайте behave на snapshot с E2E_DB_ISOLATE=1."
+        )
     step_send_command(context, "/tg")
     step_click_inline_button(context, "📋 Список источников")
 
@@ -2547,7 +2741,7 @@ def step_set_source_trust_ui(context, username, level):
         if f"@{uname} (trust={desired})" in text:
             logger.info("✓ trust уже установлен: @%s trust=%s", uname, desired)
             return
-        _toggle, trust_btn, _loc, _ticket, _reset, _delete = _find_row_buttons_for_username(msg, uname)
+        _toggle, trust_btn, _loc, _ticket, _festival, _reset, _delete = _find_row_buttons_for_username(msg, uname)
         if not trust_btn:
             raise AssertionError(
                 f"Не найдена кнопка Trust для @{uname}. Кнопки: {get_all_buttons(msg)}"
@@ -2578,7 +2772,7 @@ def step_set_source_location_ui(context, username, location):
     step_send_command(context, "/tg")
     step_click_inline_button(context, "📋 Список источников")
     msg = context.last_response
-    _toggle, _trust, loc_btn, _ticket, _reset, _delete = _find_row_buttons_for_username(msg, uname)
+    _toggle, _trust, loc_btn, _ticket, _festival, _reset, _delete = _find_row_buttons_for_username(msg, uname)
     if not loc_btn:
         raise AssertionError(f"Не найдена кнопка '📍 Локация' для @{uname}. Кнопки: {get_all_buttons(msg)}")
 
@@ -2595,6 +2789,139 @@ def step_set_source_location_ui(context, username, location):
 
     run_async(context, _set())
     logger.info("✓ default_location установлен для @%s: %s (UI)", uname, loc)
+
+
+@given('festival_series для источника "{username}" установлен в "{series}"')
+@then('festival_series для источника "{username}" установлен в "{series}"')
+def step_set_source_festival_series_ui(context, username, series):
+    uname = username.lstrip("@").strip()
+    value = (series or "").strip()
+    if not uname:
+        raise AssertionError("Пустой username для festival_series")
+    if not value:
+        raise AssertionError("Пустой festival_series (используйте '-' для очистки)")
+
+    step_send_command(context, "/tg")
+    step_click_inline_button(context, "📋 Список источников")
+    msg = context.last_response
+    _toggle, _trust, _loc, _ticket, festival_btn, _reset, _delete = _find_row_buttons_for_username(msg, uname)
+    if not festival_btn:
+        raise AssertionError(f"Не найдена кнопка '🎪 Фестиваль' для @{uname}. Кнопки: {get_all_buttons(msg)}")
+
+    async def _set():
+        import asyncio
+        await context.client._gaussian_delay(0.4, 1.0)
+        await festival_btn.click()
+        await asyncio.sleep(1.5)
+        await context.client.human_send_and_wait(context.bot_entity, value, timeout=30)
+        await asyncio.sleep(2.0)
+        messages = await context.client.client.get_messages(context.bot_entity, limit=1)
+        if messages:
+            context.last_response = messages[0]
+
+    run_async(context, _set())
+    logger.info("✓ festival_series установлен для @%s: %s (UI)", uname, value)
+
+
+@given("в UI /tg настроены источники Telegram:")
+def step_configure_tg_sources_via_ui(context):
+    """Ensure a set of Telegram sources exists and has desired trust/defaults/festival settings (UI-only)."""
+    if not context.table:
+        raise AssertionError("Ожидалась таблица источников (username/trust_level/default_location/festival_series)")
+
+    def _cell(row, key: str) -> str:
+        try:
+            if hasattr(row, "get"):
+                return (row.get(key) or "").strip()
+            return (row[key] or "").strip()
+        except Exception:
+            return ""
+
+    def _ensure_exists(username: str) -> None:
+        step_send_command(context, "/tg")
+        step_click_inline_button(context, "📋 Список источников")
+        msg = context.last_response
+        text = (msg.text or "")
+        if f"@{username}" in text:
+            return
+        step_send_command(context, "/tg")
+        step_click_inline_button(context, "➕ Добавить источник")
+        step_send_message(context, f"@{username}")
+        added_text = (context.last_response.text or "")
+        if f"@{username}" not in added_text:
+            raise AssertionError(f"Не удалось добавить источник @{username} через UI. Ответ:\n{added_text}")
+
+    sources: list[dict] = []
+    for row in context.table:
+        username = _cell(row, "username").lstrip("@")
+        if not username:
+            raise AssertionError("Пустой username в таблице источников")
+        trust = (_cell(row, "trust_level") or _cell(row, "trust") or "").lower()
+        default_location = _cell(row, "default_location") or _cell(row, "location")
+        festival_series = _cell(row, "festival_series") or _cell(row, "festival") or _cell(row, "series")
+        sources.append(
+            {
+                "username": username,
+                "trust_level": trust,
+                "default_location": default_location,
+                "festival_series": festival_series,
+            }
+        )
+
+    for src in sources:
+        username = src["username"]
+        _ensure_exists(username)
+        if src["trust_level"]:
+            step_set_source_trust_ui(context, username, src["trust_level"])
+        if src["default_location"]:
+            step_set_source_location_ui(context, username, src["default_location"])
+        if src["festival_series"]:
+            step_set_source_festival_series_ui(context, username, src["festival_series"])
+
+    logger.info("✓ /tg sources configured via UI: %s", [s["username"] for s in sources])
+
+
+@then("в UI /tg список источников содержит:")
+def step_assert_tg_sources_in_ui_list(context):
+    if not context.table:
+        raise AssertionError("Ожидалась таблица источников для проверки списка /tg")
+    step_send_command(context, "/tg")
+    step_click_inline_button(context, "📋 Список источников")
+    msg = context.last_response
+    text = (msg.text or "")
+    if not text:
+        raise AssertionError("Пустой ответ списка источников /tg")
+
+    def _cell(row, key: str) -> str:
+        try:
+            if hasattr(row, "get"):
+                return (row.get(key) or "").strip()
+            return (row[key] or "").strip()
+        except Exception:
+            return ""
+
+    missing: list[str] = []
+    for row in context.table:
+        username = _cell(row, "username").lstrip("@")
+        if not username:
+            continue
+        trust = (_cell(row, "trust_level") or _cell(row, "trust")).lower()
+        series = _cell(row, "festival_series") or _cell(row, "festival") or _cell(row, "series")
+
+        if trust and f"@{username} (trust={trust})" not in text:
+            missing.append(f"@{username} trust={trust}")
+            continue
+        if not trust and f"@{username}" not in text:
+            missing.append(f"@{username}")
+            continue
+        if series:
+            pattern = rf"@{re.escape(username)}\\s+\\(trust=\\w+\\)[\\s\\S]*?\\n\\s*↳\\s+festival:\\s+{re.escape(series)}\\b"
+            if not re.search(pattern, text):
+                missing.append(f"@{username} festival={series}")
+
+    if missing:
+        raise AssertionError("В /tg списке источников отсутствуют/не совпадают настройки: " + ", ".join(missing))
+    logger.info("✓ /tg UI list содержит ожидаемые источники и настройки (count=%s)", len(context.table))
 
 
 # =============================================================================
@@ -2656,6 +2983,41 @@ def step_send_message(context, text):
     
     run_async(context, _send())
 
+@when('я отправляю сообщение с текстом "{text}"')
+@then('я отправляю сообщение с текстом "{text}"')
+def step_send_message_with_text_alias(context, text):
+    """Alias for older/newer feature phrasing."""
+    step_send_message(context, text)
+
+
+@when('я отправляю фото "{rel_path}" с подписью:')
+@then('я отправляю фото "{rel_path}" с подписью:')
+def step_send_photo_with_caption(context, rel_path):
+    """Send a local image file to the bot with a caption (used for add-event UI flows)."""
+    caption = (getattr(context, "text", None) or "").strip()
+    if not caption:
+        raise AssertionError("Пустая подпись для фото (ожидали multiline текст после шага)")
+
+    path = Path(rel_path)
+    if not path.is_absolute():
+        # Behave is usually started from repo root, but keep this robust.
+        if not path.exists():
+            repo_root = Path(__file__).resolve().parents[4]
+            path = (repo_root / path).resolve()
+    if not path.exists() or not path.is_file():
+        raise AssertionError(f"Файл изображения не найден: {rel_path} (resolved={path})")
+
+    async def _send():
+        # Human-like pause before upload.
+        await context.client._gaussian_delay(0.7, 1.8)
+        entity = await context.client.client.get_entity(context.bot_entity)
+        sent = await context.client.client.send_file(entity, file=str(path), caption=caption)
+        # Store our outgoing message id for better diagnostics (bot uses it as source marker).
+        context.last_user_message_id = int(getattr(sent, "id", 0) or 0)
+        logger.info("→ Отправлено фото: %s (bytes=%s) msg_id=%s", str(path), path.stat().st_size, context.last_user_message_id)
+
+    run_async(context, _send())
+
 
 @when('я нажимаю инлайн-кнопку "{btn_text}"')
 @then('я нажимаю инлайн-кнопку "{btn_text}"')
@@ -2691,6 +3053,21 @@ def step_click_inline_button(context, btn_text):
             logger.info("← Получен обновлённый ответ")
     
     run_async(context, _click())
+
+@when('я нажимаю кнопку "{btn_text}"')
+@then('я нажимаю кнопку "{btn_text}"')
+def step_click_any_button(context, btn_text):
+    """Click a UI button (inline preferred; reply keyboard falls back to sending text)."""
+    msg = context.last_response
+    available = get_all_buttons(msg)
+    if available and btn_text not in available:
+        raise AssertionError(f"Кнопка '{btn_text}' не найдена. Доступные: {available}")
+    btn = find_button(msg, btn_text)
+    # Inline buttons can be clicked; reply-keyboard buttons should be sent as text.
+    if btn and hasattr(btn, "click"):
+        step_click_inline_button(context, btn_text)
+        return
+    step_send_message(context, btn_text)
 
 
 @when("я запускаю мониторинг повторно")
@@ -3858,6 +4235,87 @@ def step_wait_for_message_text(context, text):
     run_async(context, _wait())
 
 
+@when('я жду новое сообщение с текстом "{text}"')
+@then('я жду новое сообщение с текстом "{text}"')
+def step_wait_for_new_message_text(context, text):
+    """Wait for a NEW message (after the current last_response) containing specific text."""
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
+        poll_sec = float(os.getenv("E2E_WAIT_NEW_MESSAGE_POLL_SEC", "1.0"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_messages = []
+        while time.monotonic() < deadline:
+            last_messages = await context.client.client.get_messages(context.bot_entity, limit=10)
+            _raise_on_bot_ui_errors(last_messages, baseline_id=baseline_id)
+            for msg in last_messages:
+                mid = int(getattr(msg, "id", 0) or 0)
+                if mid <= baseline_id:
+                    continue
+                if msg.text and text.lower() in msg.text.lower():
+                    context.last_response = msg
+                    logger.info("✓ Найдено новое сообщение: %r (mid=%s baseline=%s)", text, mid, baseline_id)
+                    return
+            await asyncio.sleep(poll_sec)
+        previews = [(m.id, (m.text or "")[:80].replace("\n", " ")) for m in last_messages[:5]]
+        raise AssertionError(
+            f"Новое сообщение с текстом '{text}' не получено за {timeout_sec} секунд. "
+            f"baseline_id={baseline_id}, последние={previews}"
+        )
+
+    run_async(context, _wait())
+
+
+@when("я запоминаю message_id как baseline")
+@then("я запоминаю message_id как baseline")
+def step_remember_message_id_baseline(context):
+    """Remember the current last_response message id as a baseline for later checks."""
+    baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+    context.baseline_message_id = baseline_id
+    logger.info("✓ baseline_message_id=%s", baseline_id)
+
+
+@when('я жду новое сообщение после baseline с текстом "{text}"')
+@then('я жду новое сообщение после baseline с текстом "{text}"')
+def step_wait_for_new_message_after_baseline(context, text):
+    """Wait for a NEW message (after remembered baseline_message_id) containing specific text."""
+
+    async def _wait():
+        import asyncio
+
+        baseline_id = int(getattr(context, "baseline_message_id", 0) or 0)
+        timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
+        poll_sec = float(os.getenv("E2E_WAIT_NEW_MESSAGE_POLL_SEC", "1.0"))
+        deadline = time.monotonic() + float(timeout_sec)
+        last_messages = []
+        while time.monotonic() < deadline:
+            last_messages = await context.client.client.get_messages(context.bot_entity, limit=10)
+            _raise_on_bot_ui_errors(last_messages, baseline_id=baseline_id)
+            for msg in last_messages:
+                mid = int(getattr(msg, "id", 0) or 0)
+                if mid <= baseline_id:
+                    continue
+                if msg.text and text.lower() in msg.text.lower():
+                    context.last_response = msg
+                    logger.info(
+                        "✓ Найдено новое сообщение после baseline: %r (mid=%s baseline=%s)",
+                        text,
+                        mid,
+                        baseline_id,
+                    )
+                    return
+            await asyncio.sleep(poll_sec)
+        previews = [(m.id, (m.text or "")[:80].replace("\n", " ")) for m in last_messages[:5]]
+        raise AssertionError(
+            f"Новое сообщение после baseline с текстом '{text}' не получено за {timeout_sec} секунд. "
+            f"baseline_id={baseline_id}, последние={previews}"
+        )
+
+    run_async(context, _wait())
+
+
 @then("я пишу в лог количество отображенных событий")
 def step_log_events_count(context):
     """Log estimated number of events in the message."""
@@ -4097,6 +4555,9 @@ def step_wait_long_operation(context, text):
         elif any(tok in text_norm for tok in ["source parsing", "парсинг", "parse"]):
             timeout_sec = int(os.getenv("E2E_PARSE_TIMEOUT_SEC", str(35 * 60)))
             poll_sec = float(os.getenv("E2E_PARSE_POLL_SEC", "4"))
+        elif "фестиваль" in text_norm:
+            timeout_sec = int(os.getenv("E2E_FESTIVAL_PARSE_TIMEOUT_SEC", str(35 * 60)))
+            poll_sec = float(os.getenv("E2E_FESTIVAL_PARSE_POLL_SEC", "4"))
         else:
             timeout_sec = int(os.getenv("E2E_LONG_OPERATION_TIMEOUT_SEC", str(5 * 60)))
             poll_sec = float(os.getenv("E2E_LONG_OPERATION_POLL_SEC", "2"))
@@ -4187,6 +4648,37 @@ def step_report_stat_equals(context, label, expected):
         raise AssertionError(f"Ожидали '{label}: {expected}', получили '{label}: {value}'")
     logger.info("✓ Отчёт: %s=%s", label, value)
 
+@then('в отчёте мониторинга значение "{label}" минимум "{expected_min}"')
+def step_report_stat_min(context, label, expected_min):
+    report_text = getattr(context, "last_report_text", None) or (
+        context.last_response.text if context.last_response else ""
+    )
+    value = _extract_report_stat(report_text, label)
+    if value is None:
+        raise AssertionError(f"Не найден счётчик '{label}' в отчёте:\n{report_text}")
+    if value < int(expected_min):
+        raise AssertionError(f"Ожидали '{label} >= {expected_min}', получили '{label}: {value}'")
+    logger.info("✓ Отчёт: %s>=%s (value=%s)", label, expected_min, value)
+
+
+@then('в отчёте мониторинга сумма "{label_a}" и "{label_b}" минимум "{expected_min}"')
+def step_report_stat_sum_min(context, label_a, label_b, expected_min):
+    report_text = getattr(context, "last_report_text", None) or (
+        context.last_response.text if context.last_response else ""
+    )
+    a = _extract_report_stat(report_text, label_a)
+    b = _extract_report_stat(report_text, label_b)
+    if a is None:
+        raise AssertionError(f"Не найден счётчик '{label_a}' в отчёте:\n{report_text}")
+    if b is None:
+        raise AssertionError(f"Не найден счётчик '{label_b}' в отчёте:\n{report_text}")
+    total = int(a) + int(b)
+    if total < int(expected_min):
+        raise AssertionError(
+            f"Ожидали '{label_a}+{label_b} >= {expected_min}', получили {label_a}={a} {label_b}={b} total={total}"
+        )
+    logger.info("✓ Отчёт: %s+%s>=%s (total=%s)", label_a, label_b, expected_min, total)
+
 
 @then('в отчёте увеличивается счётчик "{label}"')
 def step_report_counter_increases(context, label):
@@ -4221,28 +4713,40 @@ def step_monitoring_report_has_unified_event_blocks(context):
         messages = await context.client.client.get_messages(context.bot_entity, limit=60)
         for msg in messages:
             t = msg.text or ""
-            if "Созданные события" in t and "Telegraph:" in t:
+            # Telegraph link is embedded into the event title, so the report may not contain
+            # a dedicated "Telegraph:" line when telegraph_url exists.
+            if "Созданные события" in t and "Лог:" in t and "ICS:" in t:
                 return msg
         return None
 
     msg = run_async(context, _fetch())
     if not msg:
-        raise AssertionError("Не найдено сообщение с блоком 'Созданные события' и 'Telegraph:'")
+        raise AssertionError("Не найдено сообщение с блоком 'Созданные события' и ссылками 'Лог:'/'ICS:'")
     text = msg.text or ""
 
     ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
     if not ids:
         raise AssertionError(f"В отчёте не найдено созданных событий (id=...). Текст:\n{text}")
 
-    tele_cnt = len(re.findall(r"^Telegraph:\s+https?://\S+", text, flags=re.MULTILINE))
     # Telethon renders entities as Markdown in msg.text (e.g. "Лог: [/log 1](https://...)").
     log_cnt = len(re.findall(r"^Лог:\s+.*?/log\s+\d+.*$", text, flags=re.MULTILINE))
     ics_cnt = len(re.findall(r"^ICS:\s+\S+", text, flags=re.MULTILINE))
     if "Telegraph: ⏳" in text:
         raise AssertionError(f"В отчёте найден 'Telegraph: ⏳ в очереди'. Текст:\n{text}")
+
+    # Prefer URL entities (reliable for embedded title links). Fall back to text search.
+    urls = []
+    for ent in (getattr(msg, "entities", None) or []):
+        u = getattr(ent, "url", None)
+        if u:
+            urls.append(str(u))
+    tele_links = {u for u in urls if "telegra.ph/" in u}
+    if not tele_links:
+        tele_links = set(re.findall(r"https?://telegra\\.ph/\\S+", text))
+    tele_cnt = len(tele_links)
     if tele_cnt < len(ids):
         raise AssertionError(
-            f"Ожидали Telegraph строк >= {len(ids)}, получили {tele_cnt}. Текст:\n{text}"
+            f"Ожидали ссылок на Telegraph >= {len(ids)}, получили {tele_cnt}. Текст:\n{text}"
         )
     if log_cnt < len(ids):
         raise AssertionError(
@@ -4257,11 +4761,6 @@ def step_monitoring_report_has_unified_event_blocks(context):
             raise AssertionError(f"В отчёте нет команды '/log {eid}'. Текст:\n{text}")
 
     # Ensure /log is a clickable deep-link (Telegram won't include args in command click targets).
-    urls = []
-    for ent in (getattr(msg, "entities", None) or []):
-        u = getattr(ent, "url", None)
-        if u:
-            urls.append(str(u))
     for eid in ids[:10]:
         want = f"start=log_{eid}"
         if not any(want in u for u in urls):
@@ -4286,14 +4785,26 @@ def step_wait_vk_auto_report_has_unified_event_blocks(context):
     async def _wait():
         import asyncio
 
-        timeout_sec = int(os.getenv("E2E_VK_AUTO_REPORT_TIMEOUT_SEC", str(15 * 60)))
+        timeout_env = os.getenv("E2E_VK_AUTO_REPORT_TIMEOUT_SEC")
+        timeout_sec = int(timeout_env) if timeout_env else int(15 * 60)
         poll_sec = float(os.getenv("E2E_VK_AUTO_REPORT_POLL_SEC", "3"))
         progress_log_sec = float(os.getenv("E2E_VK_AUTO_PROGRESS_LOG_SEC", "60"))
         baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
-        deadline = time.monotonic() + float(timeout_sec)
         next_progress_log = time.monotonic() + progress_log_sec
         last_preview: list[str] = []
         targets: list[tuple[int, int]] = list(getattr(context, "vk_priority_targets", []) or [])
+        if (not timeout_env) and targets:
+            per_post_sec = int(os.getenv("E2E_VK_AUTO_PER_POST_TIMEOUT_SEC", str(4 * 60)))
+            buffer_sec = int(os.getenv("E2E_VK_AUTO_REPORT_BUFFER_SEC", str(10 * 60)))
+            timeout_sec = max(timeout_sec, (len(targets) * per_post_sec) + buffer_sec)
+            logger.info(
+                "VK auto wait: computed timeout=%ss targets=%s per_post=%ss buffer=%ss",
+                timeout_sec,
+                len(targets),
+                per_post_sec,
+                buffer_sec,
+            )
+        deadline = time.monotonic() + float(timeout_sec)
         last_target_state = ""
         seen_report_msg_ids: set[int] = set()
         aggregated_event_ids: list[int] = []
@@ -4346,6 +4857,7 @@ def step_wait_vk_auto_report_has_unified_event_blocks(context):
                 (m.text or "").replace("\n", " ")[:140]
                 for m in messages[:8]
             ]
+            _raise_on_bot_ui_errors(messages, baseline_id=baseline_id)
             done, last_target_state = _targets_processed()
             now = time.monotonic()
             if now >= next_progress_log:
@@ -4365,7 +4877,7 @@ def step_wait_vk_auto_report_has_unified_event_blocks(context):
                 text = msg.text or ""
                 if not text:
                     continue
-                if "Telegraph:" not in text or "Лог:" not in text or "ICS:" not in text:
+                if "Лог:" not in text or "ICS:" not in text:
                     continue
                 if "Smart Update (детали событий)" not in text:
                     continue
@@ -4459,6 +4971,7 @@ def step_wait_vk_auto_first_report_has_unified_event_blocks(context):
         while time.monotonic() < deadline:
             messages = await context.client.client.get_messages(context.bot_entity, limit=80)
             last_preview = [(m.text or "").replace("\n", " ")[:140] for m in messages[:8]]
+            _raise_on_bot_ui_errors(messages, baseline_id=baseline_id)
 
             for msg in reversed(messages):
                 if int(getattr(msg, "id", 0) or 0) <= baseline_id:
@@ -4466,7 +4979,7 @@ def step_wait_vk_auto_first_report_has_unified_event_blocks(context):
                 text = msg.text or ""
                 if not text:
                     continue
-                if "Telegraph:" not in text or "Лог:" not in text or "ICS:" not in text:
+                if "Лог:" not in text or "ICS:" not in text:
                     continue
                 if "Smart Update (детали событий)" not in text:
                     continue
@@ -4539,6 +5052,7 @@ def step_wait_vk_auto_progress_message(context):
         while time.monotonic() < deadline:
             messages = await context.client.client.get_messages(context.bot_entity, limit=50)
             last_preview = [(m.text or "").replace("\n", " ")[:140] for m in messages[:8]]
+            _raise_on_bot_ui_errors(messages, baseline_id=baseline_id)
             for msg in messages:
                 if int(getattr(msg, "id", 0) or 0) <= baseline_id:
                     continue
@@ -4583,6 +5097,7 @@ def step_wait_vk_auto_finished_message(context):
         while time.monotonic() < deadline:
             messages = await context.client.client.get_messages(context.bot_entity, limit=60)
             last_preview = [(m.text or "").replace("\n", " ")[:160] for m in messages[:10]]
+            _raise_on_bot_ui_errors(messages, baseline_id=baseline_id)
             for msg in messages:
                 if int(getattr(msg, "id", 0) or 0) <= baseline_id:
                     continue
@@ -4629,7 +5144,7 @@ def step_wait_tg_smart_update_report(context):
                     continue
                 if ("Созданные события" not in text) and ("Обновлённые события" not in text):
                     continue
-                if "Telegraph:" not in text or "Лог:" not in text or "ICS:" not in text:
+                if "Лог:" not in text or "ICS:" not in text:
                     continue
                 if not re.search(r"^\s*Факты:\s+", text, flags=re.MULTILINE):
                     continue
@@ -4640,9 +5155,13 @@ def step_wait_tg_smart_update_report(context):
                 context.last_response = msg
                 context.last_tg_su_report_text = text
                 context.last_tg_su_report_event_ids = list(dict.fromkeys(ids))
+                context.last_tg_su_report_telegraph_links = list(
+                    dict.fromkeys(re.findall(r"https://telegra\\.ph/[a-zA-Z0-9_-]+", text))
+                )
                 logger.info(
-                    "✓ TG Smart Update report ready: events=%s",
+                    "✓ TG Smart Update report ready: events=%s telegraph_links=%s",
                     len(context.last_tg_su_report_event_ids),
+                    len(context.last_tg_su_report_telegraph_links),
                 )
                 return
             await asyncio.sleep(poll_sec)
@@ -4704,6 +5223,18 @@ def _request_source_logs_for_event_ids(context, event_ids: list[int], *, label: 
 
     context.last_opened_log_event_ids = opened
     logger.info("✓ %s: /log открыт для всех событий: %s", label, opened)
+
+
+@when("я запрашиваю /log для последнего события")
+@then("я запрашиваю /log для последнего события")
+def step_request_log_for_last_event(context):
+    """Open /log for the last event card (used for menu add-event smoke scenarios)."""
+    text = getattr(getattr(context, "last_response", None), "text", None)
+    event_id = _event_id_from_card_text(text) or getattr(context, "last_event_id", None)
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из последнего сообщения (ожидали карточку события с 'id: N')")
+    context.last_event_id = int(event_id)
+    _request_source_logs_for_event_ids(context, [int(event_id)], label="last event")
 
 
 @when("я запрашиваю /log для первого события из последнего VK отчёта")
@@ -4768,6 +5299,19 @@ def step_request_log_for_each_tg_report_event(context):
     _request_source_logs_for_event_ids(context, ids, label="Telegram monitoring")
 
 
+@when("я запрашиваю /log для первого события из последнего Telegram отчёта")
+def step_request_log_for_first_tg_report_event(context):
+    ids = list(getattr(context, "last_tg_su_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_tg_su_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+    if not ids:
+        raise AssertionError("В Telegram Smart Update отчёте не найден event_id для /log")
+    _request_source_logs_for_event_ids(context, [int(ids[0])], label="Telegram monitoring")
+
+
 @then("в отчёте /parse есть Telegraph и /log для событий")
 def step_parse_report_has_unified_event_blocks(context):
     msg = context.last_response
@@ -4776,8 +5320,6 @@ def step_parse_report_has_unified_event_blocks(context):
         raise AssertionError("Ожидали сообщение '/parse' с текстом 'Парсинг источников завершен'")
     if "Smart Update (детали событий)" not in text:
         raise AssertionError(f"В отчёте /parse нет секции Smart Update (детали событий). Текст:\n{text}")
-    if not re.search(r"^\s*Telegraph:\s+https?://\S+", text, flags=re.MULTILINE):
-        raise AssertionError(f"В отчёте /parse нет строки Telegraph: https://... Текст:\n{text}")
     if not re.search(r"^\s*Источник:\s+https?://\S+", text, flags=re.MULTILINE):
         raise AssertionError(f"В отчёте /parse нет строки Источник: https://... Текст:\n{text}")
     if not re.search(r"^\s*Лог:\s+.*?/log\s+\d+.*$", text, flags=re.MULTILINE):
@@ -4792,6 +5334,11 @@ def step_parse_report_has_unified_event_blocks(context):
         u = getattr(ent, "url", None)
         if u:
             urls.append(str(u))
+    if not any("telegra.ph/" in u for u in urls) and ("telegra.ph/" not in text):
+        raise AssertionError(
+            "В отчёте /parse не найдена ссылка на Telegraph (ожидали telegra.ph в заголовке события).\n"
+            f"Текст:\n{text}"
+        )
     if not any("start=log_" in u for u in urls):
         raise AssertionError(
             "В отчёте /parse нет кликабельной ссылки на лог (ожидали deep-link через start=log_<id>).\n"
@@ -5378,6 +5925,97 @@ def step_each_vk_report_telegraph_page_contains_marker(context, marker):
     logger.info("✓ Все Telegraph страницы VK отчёта содержат блок '%s' (count=%s)", marker, len(urls))
 
 
+@then("на каждой Telegraph странице из последнего VK отчёта присутствует основной текст события")
+def step_vk_report_telegraph_pages_contain_event_description_text(context):
+    """Ensure Telegraph pages contain the stored event.description (not only the summary/footer)."""
+    ids = list(getattr(context, "last_vk_auto_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_vk_auto_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text or "")]
+    if not ids:
+        raise AssertionError("Не удалось определить event_id из последнего VK отчёта")
+
+    db_path = _db_path()
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        cur = conn.cursor()
+        rows = []
+        for eid in ids:
+            row = cur.execute(
+                "SELECT id, description, telegraph_url, telegraph_path FROM event WHERE id = ?",
+                (int(eid),),
+            ).fetchone()
+            if not row:
+                raise AssertionError(f"Событие id={eid} не найдено в БД")
+            rows.append(row)
+    finally:
+        conn.close()
+
+    urls: list[str] = []
+    expectations: dict[str, str] = {}
+    for (eid, desc, tele_url, tele_path) in rows:
+        url = (tele_url or "").strip()
+        if not url:
+            path = (tele_path or "").strip().lstrip("/")
+            if not path:
+                raise AssertionError(f"У события id={eid} не заполнены telegraph_url/telegraph_path")
+            url = f"https://telegra.ph/{path}"
+        if url not in urls:
+            urls.append(url)
+        expectations[url] = str(desc or "")
+
+    # Keep this deterministic: we don't need perfect NLP, only to catch cases where the body was
+    # truncated after an internal <hr> and only the summary/footer remained.
+    stop = {
+        "который", "которая", "которые", "чтобы", "когда", "где", "это", "этот", "эта",
+        "эти", "его", "ее", "их", "для", "про", "при", "или", "а", "но", "и", "в", "на",
+        "по", "из", "от", "до", "как", "что", "также",
+    }
+
+    def _pick_keywords(text: str) -> list[str]:
+        norm = _normalize_search_text(text)
+        words = re.findall(r"[a-zа-яё]{5,}", norm, flags=re.IGNORECASE)
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for w in words:
+            wl = w.lower()
+            if wl in stop:
+                continue
+            if wl in seen:
+                continue
+            seen.add(wl)
+            uniq.append(wl)
+            if len(uniq) >= 10:
+                break
+        return uniq
+
+    async def _verify():
+        html_pages = await _fetch_telegraph_pages(urls)
+        missing: list[str] = []
+        for url, html in zip(urls, html_pages):
+            expected_desc = expectations.get(url, "")
+            keywords = _pick_keywords(expected_desc)
+            if not keywords:
+                # If description is empty/too short in DB, skip: this step is about missing body on Telegraph.
+                continue
+            body_norm = _normalize_search_text(_html_to_text(html))
+            present = sum(1 for w in keywords if w in body_norm)
+            # Need at least a few keywords to be present to consider the main body rendered.
+            if present < min(3, len(keywords)):
+                missing.append(url)
+        if missing:
+            sample = "\n".join(missing[:20])
+            raise AssertionError(
+                "На некоторых Telegraph страницах не найден основной текст события "
+                f"(нет ключевых слов из event.description):\n{sample}"
+            )
+
+    run_async(context, _verify())
+    logger.info("✓ Telegraph страницы VK отчёта содержат основной текст события (count=%s)", len(urls))
+
+
 @then("для событий из последнего VK отчёта с афишами Telegraph содержит изображения")
 def step_vk_report_events_with_posters_have_images(context):
     """If event has posters in DB, corresponding Telegraph page must contain <img>."""
@@ -5422,6 +6060,89 @@ def step_vk_report_events_with_posters_have_images(context):
     if not check_items:
         logger.info("✓ В VK отчёте нет событий с афишами, проверка <img> пропущена")
         return
+
+
+def _extract_telegraph_links_from_text(text: str) -> list[str]:
+    links = re.findall(r"https://telegra\\.ph/[a-zA-Z0-9_-]+", text or "")
+    return list(dict.fromkeys(links))
+
+
+@then("на страницах Telegraph из последнего VK отчёта есть изображения Catbox в формате WEBP")
+def step_vk_report_telegraph_catbox_webp(context):
+    links = list(getattr(context, "telegraph_links", []) or [])
+    if not links:
+        report_text = getattr(context, "last_vk_auto_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        links = _extract_telegraph_links_from_text(report_text)
+    if not links:
+        raise AssertionError("Не найдены Telegraph ссылки для проверки (после VK отчёта)")
+
+    max_pages = int(os.getenv("E2E_WEBP_CHECK_MAX_PAGES", "8"))
+    max_images = int(os.getenv("E2E_WEBP_CHECK_MAX_IMAGES", "12"))
+    links = links[:max_pages]
+
+    async def _verify():
+        html_pages = await _fetch_telegraph_pages(links)
+        catbox_urls: list[str] = []
+        seen: set[str] = set()
+        for html in html_pages:
+            for u in sorted(_extract_catbox_urls(html)):
+                if u in seen:
+                    continue
+                seen.add(u)
+                catbox_urls.append(u)
+        if not catbox_urls:
+            raise AssertionError(
+                "Не найдены изображения Catbox на Telegraph страницах из VK отчёта "
+                f"(pages={len(links)})."
+            )
+        catbox_urls = catbox_urls[:max_images]
+        for url in catbox_urls:
+            ok, dbg = await _probe_image_webp(url)
+            if not ok:
+                raise AssertionError(f"Catbox изображение не WEBP или недоступно: url={url} {dbg}")
+
+    run_async(context, _verify())
+    logger.info("✓ VK report: catbox изображения доступны и WEBP (pages=%s)", len(links))
+
+
+@then("на страницах Telegraph из последнего Telegram отчёта есть изображения Catbox в формате WEBP")
+def step_tg_report_telegraph_catbox_webp(context):
+    links = list(getattr(context, "last_tg_su_report_telegraph_links", []) or [])
+    if not links:
+        report_text = getattr(context, "last_tg_su_report_text", None) or ""
+        links = _extract_telegraph_links_from_text(report_text)
+    if not links:
+        raise AssertionError("Не найдены Telegraph ссылки для проверки (после Telegram Smart Update отчёта)")
+
+    max_pages = int(os.getenv("E2E_WEBP_CHECK_MAX_PAGES", "8"))
+    max_images = int(os.getenv("E2E_WEBP_CHECK_MAX_IMAGES", "12"))
+    links = links[:max_pages]
+
+    async def _verify():
+        html_pages = await _fetch_telegraph_pages(links)
+        catbox_urls: list[str] = []
+        seen: set[str] = set()
+        for html in html_pages:
+            for u in sorted(_extract_catbox_urls(html)):
+                if u in seen:
+                    continue
+                seen.add(u)
+                catbox_urls.append(u)
+        if not catbox_urls:
+            raise AssertionError(
+                "Не найдены изображения Catbox на Telegraph страницах из Telegram отчёта "
+                f"(pages={len(links)})."
+            )
+        catbox_urls = catbox_urls[:max_images]
+        for url in catbox_urls:
+            ok, dbg = await _probe_image_webp(url)
+            if not ok:
+                raise AssertionError(f"Catbox изображение не WEBP или недоступно: url={url} {dbg}")
+
+    run_async(context, _verify())
+    logger.info("✓ Telegram report: catbox изображения доступны и WEBP (pages=%s)", len(links))
 
     async def _verify():
         import aiohttp
@@ -6686,3 +7407,1273 @@ def step_restore_ticket_link(context, title):
         conn.commit()
     finally:
         conn.close()
+
+
+def _festival_queue_autorun_status() -> str:
+    raw = (os.getenv("ENABLE_FESTIVAL_QUEUE") or "").strip().lower()
+    return "вкл" if raw in {"1", "true", "yes", "on"} else "выкл"
+
+
+def _recent_bot_texts(context, limit: int = 40) -> list[str]:
+    async def _fetch():
+        msgs = await context.client.client.get_messages(context.bot_entity, limit=limit)
+        out: list[str] = []
+        for msg in msgs:
+            text = (msg.text or "").strip()
+            if text:
+                out.append(text)
+        return out
+
+    return run_async(context, _fetch())
+
+
+def _festival_assert_text(context) -> str:
+    messages = _recent_bot_texts(context, limit=60)
+    return "\n\n".join([*messages]).strip()
+
+
+def _festival_queue_has_source_url(source_url: str) -> bool:
+    wanted_norm = _norm_url_for_compare(source_url)
+    if not wanted_norm:
+        return False
+    wanted_vk = _vk_ids_from_url(source_url)
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT source_url
+            FROM festival_queue
+            ORDER BY id DESC
+            LIMIT 300
+            """
+        )
+        rows = cur.fetchall() or []
+    finally:
+        conn.close()
+    for row in rows:
+        raw = row["source_url"] if isinstance(row, sqlite3.Row) else row[0]
+        if wanted_vk:
+            cand_vk = _vk_ids_from_url(str(raw or ""))
+            if cand_vk and cand_vk == wanted_vk:
+                return True
+        candidate = _norm_url_for_compare(str(raw or ""))
+        if candidate and candidate == wanted_norm:
+            return True
+    return False
+
+
+def _vk_ids_from_url(post_url: str) -> tuple[int, int] | None:
+    raw = (post_url or "").strip()
+    m = re.search(r"wall-?(\d+)_([0-9]+)", raw)
+    if not m:
+        return None
+    return abs(int(m.group(1))), int(m.group(2))
+
+
+@then('я жду, что источник "{source_url}" появится в фестивальной очереди')
+def step_wait_source_in_festival_queue(context, source_url):
+    """Wait until Smart Update -> festival queue handoff is observable in DB."""
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_FEST_QUEUE_ENQUEUE_TIMEOUT_SEC", str(10 * 60)))
+        poll_sec = float(os.getenv("E2E_FEST_QUEUE_ENQUEUE_POLL_SEC", "2.0"))
+        deadline = time.monotonic() + float(timeout_sec)
+        while time.monotonic() < deadline:
+            if _festival_queue_has_source_url(source_url):
+                logger.info("✓ Источник появился в festival_queue: %s", source_url)
+                return
+            await asyncio.sleep(poll_sec)
+        raise AssertionError(f"Источник не появился в festival_queue за {timeout_sec}с: {source_url}")
+
+    run_async(context, _wait())
+
+
+@then('в ответах бота есть сообщение о постановке источника в фестивальную очередь для "{source_url}"')
+def step_assert_bot_mentions_festival_queue_for_source(context, source_url):
+    text = _festival_assert_text(context)
+    low = text.lower()
+    if "фестивальн" not in low or "очеред" not in low:
+        raise AssertionError("В ответах бота нет сообщений про фестивальную очередь")
+    # URL may vary by domain (vk.com/vk.ru), so for VK match by wall-<gid>_<pid>.
+    if "vk.com" in source_url.lower() or "vk.ru" in source_url.lower():
+        vk_ids = _vk_ids_from_url(source_url)
+        if not vk_ids:
+            raise AssertionError(f"Некорректная VK ссылка поста: {source_url}")
+        gid, pid = vk_ids
+        token = f"wall-{gid}_{pid}"
+        if token not in low:
+            raise AssertionError(f"Не найдено упоминание VK-поста в сообщениях бота: {source_url}")
+        return
+    # For TG use direct substring match (canonical link is expected).
+    if source_url not in text:
+        raise AssertionError(f"Не найдено упоминание источника в сообщениях бота: {source_url}")
+
+
+@then('в VK inbox пост "{post_url}" не импортирован как событие')
+def step_assert_vk_inbox_not_imported_as_event(context, post_url):
+    ids = _vk_ids_from_url(post_url)
+    if not ids:
+        raise AssertionError(f"Некорректная VK ссылка поста: {post_url}")
+    group_id, post_id = ids
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT imported_event_id, status FROM vk_inbox WHERE group_id=? AND post_id=? LIMIT 1",
+            (int(group_id), int(post_id)),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"VK inbox row не найден для поста: {post_url}")
+    imported_event_id, status = row[0], row[1]
+    if imported_event_id is not None:
+        raise AssertionError(
+            f"Ожидали, что festival-post не будет импортирован как событие, но imported_event_id={imported_event_id} status={status}"
+        )
+    logger.info("✓ VK inbox post not imported as event: status=%s", status)
+
+
+@then('в festival_queue для источника "{source_url}" статус "{status}"')
+def step_assert_festival_queue_status_for_source(context, source_url, status):
+    wanted = _norm_url_for_compare(source_url)
+    want_status = (status or "").strip().lower()
+    if want_status not in {"pending", "running", "done", "error"}:
+        raise AssertionError("status должен быть pending|running|done|error")
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_FEST_QUEUE_STATUS_TIMEOUT_SEC", str(10 * 60)))
+        poll_sec = float(os.getenv("E2E_FEST_QUEUE_STATUS_POLL_SEC", "2.0"))
+        deadline = time.monotonic() + float(timeout_sec)
+
+        while time.monotonic() < deadline:
+            conn = sqlite3.connect(_db_path(), timeout=30)
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT status, source_url
+                    FROM festival_queue
+                    ORDER BY id DESC
+                    LIMIT 400
+                    """
+                )
+                rows = cur.fetchall() or []
+            finally:
+                conn.close()
+
+            for st, url in rows:
+                url_norm = _norm_url_for_compare(str(url or ""))
+                if not url_norm:
+                    continue
+                if url_norm != wanted:
+                    # For VK allow match by wall id to ignore domain differences.
+                    want_vk = _vk_ids_from_url(source_url)
+                    cand_vk = _vk_ids_from_url(str(url or ""))
+                    if want_vk and cand_vk and want_vk == cand_vk:
+                        url_norm = wanted
+                    else:
+                        continue
+                got = str(st or "").strip().lower()
+                if got == want_status:
+                    logger.info("✓ festival_queue status=%s for %s", got, source_url)
+                    return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(f"Не найден festival_queue статус={want_status} для {source_url} за {timeout_sec}с")
+
+    run_async(context, _wait())
+
+
+def _extract_latest_festival_report(context) -> tuple[str | None, str | None, str | None]:
+    texts = _recent_bot_texts(context, limit=80)
+    all_text = "\n\n".join(texts)
+    name_match = re.search(r"Фестиваль обновлён:\s*(.+)", all_text)
+    url_match = re.search(r"Открыть страницу фестиваля:\s*(https?://\S+)", all_text)
+    index_match = re.search(r"Открыть страницу Фестивали:\s*(https?://\S+)", all_text)
+    name = name_match.group(1).strip() if name_match else None
+    fest_url = url_match.group(1).strip() if url_match else None
+    index_url = index_match.group(1).strip() if index_match else None
+    if name:
+        context.last_festival_name = name
+    if fest_url:
+        context.last_festival_url = fest_url
+    if index_url:
+        context.festivals_index_url = index_url
+    return name, fest_url, index_url
+
+
+def _extract_text_url_by_label_from_message(msg, label: str) -> str | None:
+    """Extract entity url for a given link label from a Telegram message (best-effort)."""
+    if not msg:
+        return None
+    text = (getattr(msg, "text", None) or "") or ""
+    ents = getattr(msg, "entities", None) or []
+    want = (label or "").strip().lower()
+    if not want or not text or not ents:
+        return None
+    for ent in ents:
+        url = getattr(ent, "url", None)
+        if not url:
+            continue
+        try:
+            off = int(getattr(ent, "offset", 0) or 0)
+            ln = int(getattr(ent, "length", 0) or 0)
+        except Exception:
+            continue
+        if ln <= 0:
+            continue
+        chunk = text[off : off + ln].strip().lower()
+        if want in chunk:
+            return str(url)
+    return None
+
+
+def _extract_recent_named_link(context, label: str, *, limit: int = 60) -> str | None:
+    async def _fetch():
+        msgs = await context.client.client.get_messages(context.bot_entity, limit=limit)
+        for msg in msgs:
+            url = _extract_text_url_by_label_from_message(msg, label)
+            if url:
+                return url
+        return None
+
+    return run_async(context, _fetch())
+
+
+def _fetch_festivals_index_from_db() -> str | None:
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT value FROM setting WHERE key IN ('festivals_index_url', 'fest_index_url') ORDER BY CASE key WHEN 'festivals_index_url' THEN 0 ELSE 1 END LIMIT 1"
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    value = str(row[0] or "").strip()
+    return value or None
+
+
+def _fetch_latest_festival_from_db() -> tuple[str | None, str | None]:
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT name, telegraph_url, telegraph_path
+            FROM festival
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None, None
+    name = str(row["name"] or "").strip() or None
+    url = str(row["telegraph_url"] or "").strip()
+    if not url:
+        path = str(row["telegraph_path"] or "").strip().lstrip("/")
+        if path:
+            url = f"https://telegra.ph/{path}"
+    return name, (url or None)
+
+
+def _fetch_url_html(context, url: str) -> str:
+    async def _fetch():
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    raise AssertionError(f"Страница {url} вернула статус {resp.status}")
+                return await resp.text()
+
+    return run_async(context, _fetch())
+
+
+@then("я жду сообщения о старте обработки очереди")
+def step_wait_festival_queue_started(context):
+    async def _wait():
+        import asyncio
+
+        last = getattr(context, "last_response", None)
+        last_txt = (getattr(last, "text", None) or "").strip()
+        # `/fest_queue` immediately sends the "start" message; do not require a second one.
+        if "Старт обработки фестивальной очереди" in last_txt:
+            return
+
+        timeout_sec = int(os.getenv("E2E_FEST_QUEUE_START_TIMEOUT_SEC", "120"))
+        poll_sec = float(os.getenv("E2E_FEST_QUEUE_START_POLL_SEC", "1.5"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=40)
+            last_preview = [(m.text or "").replace("\n", " ")[:160] for m in messages[:8]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                txt = (msg.text or "").strip()
+                if "Старт обработки фестивальной очереди" in txt:
+                    context.last_response = msg
+                    return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не найдено сообщение о старте фестивальной очереди "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@given("я сбрасываю festival_queue статусы running/error в pending")
+def step_reset_festival_queue_running_to_pending(context):
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        # Ensure the queue is runnable in a snapshot: some rows may have next_run_at in the future
+        # due to backoff/scheduling. Bump all pending rows to "now".
+        cur.execute(
+            """
+            UPDATE festival_queue
+            SET next_run_at=CURRENT_TIMESTAMP,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE status='pending'
+            """
+        )
+        cur.execute(
+            """
+            UPDATE festival_queue
+            SET status='pending',
+                last_error=NULL,
+                next_run_at=CURRENT_TIMESTAMP,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE status IN ('running','error')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@given('я выставляю festival_queue статус "{status}" для источников:')
+def step_set_festival_queue_status_for_sources(context, status):
+    want_status = str(status or "").strip().lower()
+    if want_status not in {"pending", "running", "done", "error"}:
+        raise AssertionError(f"Неподдерживаемый статус festival_queue: {status}")
+    table = getattr(context, "table", None)
+    if table is None:
+        raise AssertionError("Не передана таблица с url")
+
+    urls: list[str] = []
+    for row in table:
+        url = str(row.get("url") or "").strip()
+        if url:
+            urls.append(url)
+    if not urls:
+        raise AssertionError("Пустой список url для обновления festival_queue")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, source_url FROM festival_queue")
+        rows = cur.fetchall() or []
+
+        updates: list[int] = []
+        for source_url in urls:
+            wanted = _norm_url_for_compare(source_url)
+            want_vk = _vk_ids_from_url(source_url)
+            matched_id: int | None = None
+            for row_id, row_url in rows:
+                row_norm = _norm_url_for_compare(str(row_url or ""))
+                if row_norm == wanted:
+                    matched_id = int(row_id)
+                    break
+                cand_vk = _vk_ids_from_url(row_norm)
+                if want_vk and cand_vk and want_vk == cand_vk:
+                    matched_id = int(row_id)
+                    break
+            if matched_id is None:
+                raise AssertionError(f"Источник не найден в festival_queue: {source_url}")
+            updates.append(matched_id)
+
+        for row_id in updates:
+            if want_status == "pending":
+                cur.execute(
+                    """
+                    UPDATE festival_queue
+                    SET status='pending',
+                        attempts=0,
+                        last_error=NULL,
+                        next_run_at=CURRENT_TIMESTAMP,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (row_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE festival_queue
+                    SET status=?,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (want_status, row_id),
+                )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@then("я вижу прогресс фестивальной очереди (не молчать)")
+def step_wait_festival_queue_progress_visible(context):
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_FEST_QUEUE_PROGRESS_TIMEOUT_SEC", "90"))
+        poll_sec = float(os.getenv("E2E_FEST_QUEUE_PROGRESS_POLL_SEC", "1.5"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=60)
+            last_preview = [(m.text or "").replace("\n", " ")[:160] for m in messages[:10]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                txt = (msg.text or "").strip()
+                if "🎪 Фестивальная очередь:" not in txt:
+                    continue
+                context.fest_queue_progress_message_id = int(getattr(msg, "id", 0) or 0)
+                context.fest_queue_progress_text = txt
+                # Ensure it is not a single silent placeholder forever.
+                if any(
+                    marker in txt
+                    for marker in (
+                        "найдено элементов",
+                        "нет элементов",
+                        "Статус: running",
+                        "завершено",
+                        "✅ done",
+                        "❌ error",
+                    )
+                ):
+                    return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не увидел прогресс фестивальной очереди "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@then('в festival_queue для источников статус "{status}":')
+def step_assert_festival_queue_status_for_sources_table(context, status):
+    want_status = str(status or "").strip().lower()
+    table = getattr(context, "table", None)
+    if table is None:
+        raise AssertionError("Не передана таблица с url")
+    urls = []
+    for row in table:
+        url = str(row.get("url") or "").strip()
+        if url:
+            urls.append(url)
+    if not urls:
+        raise AssertionError("Пустой список url для проверки")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT status, source_url FROM festival_queue")
+        rows = cur.fetchall() or []
+    finally:
+        conn.close()
+
+    rows_norm: list[tuple[str, str]] = []
+    for st, url in rows:
+        rows_norm.append((str(st or "").strip().lower(), _norm_url_for_compare(str(url or ""))))
+
+    missing: list[str] = []
+    mismatched: list[tuple[str, str]] = []
+    for source_url in urls:
+        wanted = _norm_url_for_compare(source_url)
+        matched_status = None
+        for st_norm, url_norm in rows_norm:
+            if url_norm == wanted:
+                matched_status = st_norm
+                break
+            want_vk = _vk_ids_from_url(source_url)
+            cand_vk = _vk_ids_from_url(url_norm)
+            if want_vk and cand_vk and want_vk == cand_vk:
+                matched_status = st_norm
+                break
+        if matched_status is None:
+            missing.append(source_url)
+        elif matched_status != want_status:
+            mismatched.append((source_url, matched_status))
+
+    if missing or mismatched:
+        parts = []
+        if missing:
+            parts.append(f"missing={missing}")
+        if mismatched:
+            parts.append(f"mismatched={mismatched}")
+        raise AssertionError(
+            f"festival_queue статусы не совпали с ожидаемым status={want_status}: " + "; ".join(parts)
+        )
+
+
+@then("я жду сообщения о завершении обработки очереди")
+def step_wait_festival_queue_finished(context):
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_FEST_QUEUE_FINISH_TIMEOUT_SEC", str(35 * 60)))
+        poll_sec = float(os.getenv("E2E_FEST_QUEUE_FINISH_POLL_SEC", "2.5"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=60)
+            last_preview = [(m.text or "").replace("\n", " ")[:160] for m in messages[:10]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                txt = (msg.text or "").strip()
+                if "Завершение обработки фестивальной очереди" in txt:
+                    context.last_response = msg
+                    return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не найдено сообщение о завершении фестивальной очереди "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@then('я жду сообщение отчёта фестивальной очереди с текстом "{text}"')
+def step_wait_festival_queue_detail_text(context, text):
+    """Wait for a queue detail message like 'Фестиваль обновлён: ...'."""
+    async def _wait():
+        import asyncio
+
+        needle = (text or "").strip().lower()
+        if not needle:
+            raise AssertionError("Пустой текст ожидания")
+        timeout_sec = int(os.getenv("E2E_FEST_QUEUE_DETAIL_TIMEOUT_SEC", str(10 * 60)))
+        poll_sec = float(os.getenv("E2E_FEST_QUEUE_DETAIL_POLL_SEC", "2.0"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=80)
+            last_preview = [(m.text or "").replace("\n", " ")[:160] for m in messages[:10]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                txt = (msg.text or "").strip().lower()
+                if needle in txt:
+                    context.last_response = msg
+                    return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            f"Не найдено сообщение отчёта фестивальной очереди с текстом '{text}' "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@then('в сообщении должна быть ссылка "{link_label}"')
+def step_assert_message_has_named_link(context, link_label):
+    if link_label.strip() == "Открыть страницу фестиваля":
+        url = _extract_text_url_by_label_from_message(getattr(context, "last_response", None), link_label)
+        if not url:
+            url = _extract_recent_named_link(context, link_label)
+        if url:
+            context.last_festival_url = url
+            return
+        _extract_latest_festival_report(context)
+        url = getattr(context, "last_festival_url", None)
+        if not url:
+            raise AssertionError("Не найдена ссылка 'Открыть страницу фестиваля'")
+        return
+    text = _festival_assert_text(context)
+    if link_label not in text:
+        raise AssertionError(f"Не найдено упоминание '{link_label}' в сообщениях")
+
+
+@given("фестиваль успешно обновлён из очереди")
+def step_given_festival_updated_from_queue(context):
+    name, fest_url, index_url = _extract_latest_festival_report(context)
+    if not name or not fest_url:
+        db_name, db_url = _fetch_latest_festival_from_db()
+        if db_name:
+            context.last_festival_name = db_name
+        if db_url:
+            context.last_festival_url = db_url
+    if not getattr(context, "last_festival_url", None):
+        raise AssertionError("Не удалось определить ссылку страницы фестиваля после обработки очереди")
+    if not getattr(context, "last_festival_name", None):
+        raise AssertionError("Не удалось определить имя фестиваля после обработки очереди")
+    if not index_url:
+        db_index = _fetch_festivals_index_from_db()
+        if db_index:
+            context.festivals_index_url = db_index
+
+
+@when('я открываю страницу "Все фестивали" в Telegraph')
+def step_open_all_festivals_page(context):
+    url = getattr(context, "festivals_index_url", None) or _fetch_festivals_index_from_db()
+    if not url:
+        raise AssertionError("Не найдена ссылка на страницу 'Все фестивали'")
+    context.festivals_index_url = url
+    context.last_opened_html = _fetch_url_html(context, url)
+
+
+@then('в списке есть фестиваль "{festival_name}"')
+def step_assert_named_festival_in_index(context, festival_name):
+    name = str(festival_name or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля для проверки")
+
+    timeout_sec = int(os.getenv("E2E_FESTIVALS_INDEX_WAIT_TIMEOUT_SEC", str(6 * 60)))
+    poll_sec = float(os.getenv("E2E_FESTIVALS_INDEX_WAIT_POLL_SEC", "4"))
+    deadline = time.monotonic() + float(timeout_sec)
+    last_preview = ""
+
+    while time.monotonic() < deadline:
+        url = getattr(context, "festivals_index_url", None) or _fetch_festivals_index_from_db()
+        if not url:
+            raise AssertionError("Не найдена ссылка на страницу 'Все фестивали'")
+        context.festivals_index_url = url
+        html = _fetch_url_html(context, url)
+        context.last_opened_html = html
+        last_preview = re.sub(r"\\s+", " ", str(html or "")).strip()[:220]
+        if name.lower() in str(html or "").lower():
+            return
+        time.sleep(poll_sec)
+
+    raise AssertionError(
+        f"Фестиваль '{name}' не найден в индексе за {timeout_sec}с. Превью HTML: {last_preview}"
+    )
+
+
+@when('я открываю фестиваль "{festival_name}" из страницы "Все фестивали" в Telegraph')
+def step_open_named_festival_from_index(context, festival_name):
+    name = str(festival_name or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        step_open_all_festivals_page(context)
+        html = str(getattr(context, "last_opened_html", "") or "")
+    anchors = list(
+        re.finditer(
+            r'<a\b[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<label>.*?)</a>',
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+    best_href = ""
+    for m in anchors:
+        href = (m.group("href") or "").strip()
+        label_raw = (m.group("label") or "").strip()
+        label = re.sub(r"<[^>]+>", " ", label_raw)
+        label = re.sub(r"\s+", " ", label).strip()
+        if name.lower() in label.lower():
+            best_href = href
+            break
+    if not best_href:
+        raise AssertionError(f"Не найдена ссылка на фестиваль '{name}' на странице 'Все фестивали'")
+    # Telegraph often uses root-relative links like `/Some-Page-01-01`.
+    if best_href.startswith("/"):
+        best_href = "https://telegra.ph" + best_href
+    elif best_href.startswith("telegra.ph/"):
+        best_href = "https://" + best_href
+    context.last_festival_name = name
+    context.last_festival_url = best_href
+    context.last_opened_html = _fetch_url_html(context, best_href)
+
+
+@then("страница должна содержать список мероприятий фестиваля")
+def step_assert_festival_page_has_events_list(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница фестиваля")
+    if "Мероприятия фестиваля" not in html:
+        if "Расписание скоро обновим" in html:
+            raise AssertionError("На странице фестиваля нет списка событий: показан заглушечный текст")
+        raise AssertionError("На странице фестиваля не найден блок 'Мероприятия фестиваля'")
+    if not re.search(r"<h4\b", html, flags=re.IGNORECASE):
+        raise AssertionError("На странице фестиваля не найдено ни одного элемента события (<h4>)")
+
+
+@then('в БД есть фестиваль "{festival_name}"')
+def step_assert_db_has_festival(context, festival_name):
+    name = str(festival_name or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM festival WHERE lower(name)=lower(?) LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"В БД не найден фестиваль '{name}'")
+
+
+@then('в БД есть события фестиваля "{festival_name}" из VK источников:')
+def step_assert_db_has_festival_events_for_vk_sources(context, festival_name):
+    name = str(festival_name or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля")
+    table = getattr(context, "table", None)
+    if table is None:
+        raise AssertionError("Не передана таблица с url")
+    urls = []
+    for row in table:
+        url = str(row.get("url") or "").strip()
+        if url:
+            urls.append(url)
+    if not urls:
+        raise AssertionError("Пустой список url для проверки")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        missing: list[str] = []
+        found: dict[str, dict[str, str]] = {}
+        for url in urls:
+            cur.execute(
+                """
+                SELECT title, telegraph_url, date, festival, source_post_url, source_vk_post_url
+                FROM event
+                WHERE lower(festival)=lower(?)
+                  AND (source_post_url=? OR source_vk_post_url=?)
+                ORDER BY date ASC, id ASC
+                LIMIT 1
+                """,
+                (name, url, url),
+            )
+            ev = cur.fetchone()
+            if not ev:
+                missing.append(url)
+                continue
+            found[url] = {
+                "title": str(ev["title"] or ""),
+                "telegraph_url": str(ev["telegraph_url"] or ""),
+                "date": str(ev["date"] or ""),
+            }
+    finally:
+        conn.close()
+
+    if missing:
+        raise AssertionError(f"В БД нет событий фестиваля '{name}' для источников: {missing}")
+
+    context.festival_expected_sources = list(urls)
+    context.festival_events_by_source = found
+
+
+@then("я должен увидеть новый фестиваль в списке")
+def step_assert_festival_in_index(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    fest_name = str(getattr(context, "last_festival_name", "") or "").strip()
+    if not html:
+        raise AssertionError("Не загружена HTML-страница индекса фестивалей")
+    if not fest_name:
+        raise AssertionError("Не задано имя фестиваля для проверки в индексе")
+    if fest_name.lower() not in html.lower():
+        raise AssertionError(f"Фестиваль '{fest_name}' не найден в индексе")
+
+
+@then("ссылка в списке должна вести на страницу фестиваля")
+def step_assert_index_links_to_festival(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    fest_url = str(getattr(context, "last_festival_url", "") or "").strip()
+    if not fest_url:
+        raise AssertionError("Не задана ссылка страницы фестиваля")
+    if fest_url in html:
+        return
+    from urllib.parse import urlparse
+
+    parsed = urlparse(fest_url)
+    path = str(parsed.path or "").strip()
+    if path:
+        if f'href="{path}"' in html:
+            return
+        if f'href="https://telegra.ph{path}"' in html:
+            return
+    raise AssertionError("В индексе нет ссылки на страницу фестиваля")
+
+
+@when('я открываю ссылку "Открыть страницу фестиваля"')
+def step_open_festival_page_link(context):
+    url = str(getattr(context, "last_festival_url", "") or "").strip()
+    if not url:
+        url = _extract_recent_named_link(context, "Открыть страницу фестиваля") or ""
+    if not url:
+        _extract_latest_festival_report(context)
+        url = str(getattr(context, "last_festival_url", "") or "").strip()
+    if not url:
+        raise AssertionError("Не найдена ссылка 'Открыть страницу фестиваля'")
+    context.last_festival_url = url
+    context.last_opened_html = _fetch_url_html(context, url)
+
+
+@then("страница должна содержать обложку фестиваля")
+def step_assert_festival_cover(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if "<img" not in html.lower():
+        raise AssertionError("На странице фестиваля не найдено ни одного изображения")
+
+
+@then("страница должна содержать галерею иллюстраций")
+def step_assert_festival_gallery(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    img_count = len(re.findall(r"<img\b", html, flags=re.IGNORECASE))
+    expected = 2
+    fest_name = str(getattr(context, "last_festival_name", "") or "").strip()
+    if fest_name:
+        conn = sqlite3.connect(_db_path(), timeout=30)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT photo_url, photo_urls FROM festival WHERE lower(name)=lower(?) LIMIT 1", (fest_name,))
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        if row:
+            import json as _json
+
+            photo_url = str(row[0] or "").strip()
+            raw = row[1]
+            urls = []
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    urls = _json.loads(raw) or []
+                except Exception:
+                    urls = []
+            if len([u for u in urls if str(u or "").strip()]) < 2:
+                expected = 1 if photo_url else 1
+    if img_count < expected:
+        raise AssertionError(f"Ожидали иллюстрации (>= {expected}), найдено: {img_count}")
+
+
+@when('я открываю страницу фестиваля "{festival_name}" в Telegraph из БД')
+def step_open_festival_page_from_db(context, festival_name):
+    name = str(festival_name or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT telegraph_url, telegraph_path FROM festival WHERE lower(name)=lower(?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"В БД не найден фестиваль '{name}'")
+    url = str(row["telegraph_url"] or "").strip()
+    if not url:
+        path = str(row["telegraph_path"] or "").strip().lstrip("/")
+        if path:
+            url = f"https://telegra.ph/{path}"
+    if not url:
+        raise AssertionError(f"У фестиваля '{name}' нет telegraph_url/telegraph_path")
+    context.last_festival_name = name
+    context.last_festival_url = url
+    context.last_opened_html = _fetch_url_html(context, url)
+
+
+@then("страница должна содержать короткое описание фестиваля в 1 абзац")
+def step_assert_festival_one_paragraph_description(context):
+    name = str(getattr(context, "last_festival_name", "") or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля (last_festival_name)")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT description FROM festival WHERE lower(name)=lower(?) ORDER BY id DESC LIMIT 1", (name,))
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    desc = str((row[0] if row else "") or "").strip()
+    if not desc:
+        raise AssertionError(f"У фестиваля '{name}' отсутствует description в БД")
+    if len(desc) < 40:
+        raise AssertionError(f"У фестиваля '{name}' слишком короткое описание ({len(desc)} символов)")
+    if "\n\n" in desc or desc.count("\n") > 1:
+        raise AssertionError(f"У фестиваля '{name}' описание не похоже на 1 абзац (есть переносы строк)")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница фестиваля")
+    needle = re.sub(r"\\s+", " ", desc).strip()
+    import html as _html
+
+    hay = re.sub(r"\\s+", " ", _html.unescape(html)).strip()
+    if needle[:30].lower() not in hay.lower():
+        # best-effort check: at least some chunk of the description should be visible
+        raise AssertionError("Описание фестиваля из БД не найдено на странице Telegraph (best-effort check)")
+
+
+@then("страница должна содержать ссылку на источник фестиваля из БД")
+def step_assert_festival_source_link_present(context):
+    name = str(getattr(context, "last_festival_name", "") or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля (last_festival_name)")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT source_url, source_post_url FROM festival WHERE lower(name)=lower(?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    source_url = str((row[0] if row else "") or "").strip()
+    source_post_url = str((row[1] if row else "") or "").strip()
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if source_url:
+        if source_url not in html:
+            raise AssertionError(f"На странице фестиваля не найдена ссылка на источник: {source_url}")
+        return
+    # Source post links from social posts are internal provenance and should not be public.
+    if source_post_url and source_post_url in html:
+        raise AssertionError(f"На странице фестиваля не должна быть ссылка на пост-источник: {source_post_url}")
+
+
+@then('страница должна содержать текст "{expected_text}"')
+def step_assert_page_contains_text(context, expected_text):
+    want = str(expected_text or "").strip()
+    if not want:
+        raise AssertionError("Пустой expected_text")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница")
+    if want.lower() not in html.lower():
+        preview = re.sub(r"\\s+", " ", html).strip()[:260]
+        raise AssertionError(f"На странице не найден текст: {want}. Превью HTML: {preview}")
+
+
+@then("страница должна содержать один из текстов:")
+def step_assert_page_contains_any_text(context):
+    table = getattr(context, "table", None)
+    if table is None:
+        raise AssertionError("Не передана таблица с text")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница")
+    candidates: list[str] = []
+    for row in table:
+        txt = str(row.get("text") or row.get("phrase") or row.get("value") or "").strip()
+        if txt:
+            candidates.append(txt)
+    if not candidates:
+        raise AssertionError("Пустой список text для проверки")
+    hay = html.lower()
+    for txt in candidates:
+        if txt.lower() in hay:
+            return
+    preview = re.sub(r"\\s+", " ", html).strip()[:260]
+    raise AssertionError(
+        f"На странице не найден ни один из текстов: {candidates}. Превью HTML: {preview}"
+    )
+
+
+@then('страница должна содержать ссылку "{expected_url}"')
+def step_assert_page_contains_link(context, expected_url):
+    url = str(expected_url or "").strip()
+    if not url:
+        raise AssertionError("Пустой expected_url")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница")
+    if url not in html:
+        raise AssertionError(f"На странице не найдена ссылка: {url}")
+
+
+@then('страница не должна содержать текст "{forbidden_text}"')
+def step_assert_page_not_contains_text(context, forbidden_text):
+    forbid = str(forbidden_text or "").strip()
+    if not forbid:
+        raise AssertionError("Пустой forbidden_text")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница")
+    import html as _html
+
+    hay_raw = html.lower()
+    hay_unescaped = _html.unescape(html).lower()
+    if forbid.lower() in hay_raw or forbid.lower() in hay_unescaped:
+        raise AssertionError(f"На странице найден запрещённый текст: {forbid}")
+
+
+@then("на странице нет видимых служебных маркеров near-festivals")
+def step_assert_no_visible_near_festivals_markers(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница")
+    forbidden = [
+        "&lt;&#33;-- near-festivals:start --&gt;",
+        "&lt;&#33;-- near-festivals:end --&gt;",
+        "&lt;!-- near-festivals:start --&gt;",
+        "&lt;!-- near-festivals:end --&gt;",
+        "<!-- near-festivals:start -->",
+        "<!-- near-festivals:end -->",
+        "<!-- FEST_NAV_START -->",
+        "<!-- FEST_NAV_END -->",
+        "<!--FEST_NAV_START-->",
+        "<!--FEST_NAV_END-->",
+    ]
+    for f in forbidden:
+        if f in html:
+            raise AssertionError(f"На странице найден видимый служебный маркер: {f}")
+
+
+@then("og:image на странице не ссылается на Catbox")
+def step_assert_og_image_not_catbox(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница")
+    m = re.search(r'property="og:image"\s+content="([^"]+)"', html, flags=re.IGNORECASE)
+    if not m:
+        raise AssertionError("Не найден meta og:image на странице")
+    url = str(m.group(1) or "").strip()
+    if "catbox.moe" in url.lower():
+        raise AssertionError(f"og:image указывает на Catbox (Telegram кэш может не работать): {url}")
+
+
+@then("описания событий на странице фестиваля короткие")
+def step_assert_festival_event_digests_short(context):
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница фестиваля")
+    import html as _html
+
+    # Telegraph renders festival event list as <h4>title</h4><p>digest...</p>...
+    pairs = re.findall(r"<h4[^>]*>.*?</h4>\s*<p>(.*?)</p>", html, flags=re.DOTALL | re.IGNORECASE)
+    if not pairs:
+        raise AssertionError("Не удалось найти блоки описаний событий (<h4>...<p>...) на странице фестиваля")
+    max_words = 16
+    offenders: list[tuple[int, int, str]] = []
+    for p_html in pairs:
+        # Convert <br> to newlines so we can isolate the first line (digest).
+        p_html2 = re.sub(r"(?i)<br\s*/?>", "\n", p_html)
+        txt = _html.unescape(re.sub(r"<[^>]+>", " ", p_html2))
+        txt = txt.replace("\u200b", "")
+        lines = [re.sub(r"\s+", " ", ln).strip() for ln in txt.splitlines()]
+        digest = next((ln for ln in lines if ln), "")
+        if not digest:
+            continue
+        if digest.endswith("…") or digest.endswith("..."):
+            offenders.append((999, len(digest), digest[:200]))
+            continue
+        words = [w for w in re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", digest) if w.strip()]
+        if len(words) > max_words:
+            offenders.append((len(words), len(digest), digest[:200]))
+    if offenders:
+        sample = offenders[:3]
+        raise AssertionError(
+            "Найдены слишком длинные описания событий на странице фестиваля "
+            f"(limit={max_words} слов). Примеры: {sample}"
+        )
+
+
+@then("страница должна содержать события фестиваля:")
+def step_assert_festival_page_contains_event_titles(context):
+    table = getattr(context, "table", None)
+    if table is None:
+        raise AssertionError("Не передана таблица с title")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница фестиваля")
+    import html as _html
+
+    hay_raw = html.lower()
+    hay_unescaped = _html.unescape(html).lower()
+    missing: list[str] = []
+    for row in table:
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        needle = title.lower()
+        if needle not in hay_raw and needle not in hay_unescaped:
+            missing.append(title)
+    if missing:
+        raise AssertionError(f"На странице фестиваля не найдены ожидаемые события: {missing}")
+
+
+@then("страница должна содержать внешние ссылки фестиваля из БД (если есть)")
+def step_assert_page_contains_external_links_from_db(context):
+    name = str(getattr(context, "last_festival_name", "") or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля (last_festival_name)")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT website_url, vk_url, tg_url FROM festival WHERE lower(name)=lower(?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"В БД не найден фестиваль '{name}'")
+    website_url = str(row[0] or "").strip()
+    vk_url = str(row[1] or "").strip()
+    tg_url = str(row[2] or "").strip()
+    html = str(getattr(context, "last_opened_html", "") or "")
+    for u in (website_url, vk_url, tg_url):
+        if u and u not in html:
+            raise AssertionError(f"На странице фестиваля отсутствует внешняя ссылка из БД: {u}")
+
+
+@then('в индексе фестивалей у фестиваля "{festival_name}" есть обложка из БД')
+def step_assert_festival_index_has_cover_from_db(context, festival_name):
+    name = str(festival_name or "").strip()
+    if not name:
+        raise AssertionError("Не задано имя фестиваля")
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not html:
+        raise AssertionError("Не загружена HTML-страница индекса фестивалей")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT photo_url FROM festival WHERE lower(name)=lower(?) ORDER BY id DESC LIMIT 1",
+            (name,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    cover = str((row[0] if row else "") or "").strip()
+    if not cover:
+        raise AssertionError(f"У фестиваля '{name}' нет photo_url в БД")
+    if cover not in html:
+        raise AssertionError(
+            f"В индексе фестивалей не найдена обложка фестиваля '{name}' (photo_url из БД)"
+        )
+
+
+@when("я запускаю фестивальную очередь для Telegram-источников")
+def step_run_tg_festival_queue(context):
+    step_send_command(context, "/fest_queue --source=tg")
+
+
+@then("бот сообщает, что Telegram источники обрабатываются через Kaggle")
+def step_assert_tg_kaggle_note(context):
+    text = _festival_assert_text(context).lower()
+    if "telegram источники обрабатываются через kaggle" not in text:
+        raise AssertionError("Не найдено сообщение о Kaggle-обработке Telegram источников")
+
+
+@then('по завершении обработки фестиваль появляется на странице "Фестивали"')
+def step_assert_festival_visible_on_index(context):
+    step_given_festival_updated_from_queue(context)
+    step_open_all_festivals_page(context)
+    step_assert_festival_in_index(context)
+
+
+@given("у серии фестиваля есть несколько выпусков")
+def step_given_series_has_multiple_editions(context):
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT name, COUNT(*) AS cnt
+            FROM festival
+            GROUP BY name
+            HAVING COUNT(*) >= 2
+            ORDER BY cnt DESC, name
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            raise AssertionError("В базе нет серии фестиваля с несколькими выпусками")
+        series_name = str(row["name"] or "").strip()
+        cur.execute(
+            """
+            SELECT name, telegraph_url, telegraph_path
+            FROM festival
+            WHERE name = ?
+            ORDER BY start_date DESC, id DESC
+            LIMIT 1
+            """,
+            (series_name,),
+        )
+        current = cur.fetchone()
+    finally:
+        conn.close()
+    if not current:
+        raise AssertionError("Не найден текущий выпуск серии")
+    url = str(current["telegraph_url"] or "").strip()
+    if not url:
+        path = str(current["telegraph_path"] or "").strip().lstrip("/")
+        if path:
+            url = f"https://telegra.ph/{path}"
+    if not url:
+        raise AssertionError("У текущего выпуска нет telegraph_url/telegraph_path")
+    context.series_name = series_name
+    context.last_festival_url = url
+
+
+@when("я открываю страницу текущего выпуска")
+def step_open_current_edition_page(context):
+    step_open_festival_page_link(context)
+
+
+@then("я вижу ссылки на другие выпуски серии")
+def step_assert_series_links_present(context):
+    series_name = str(getattr(context, "series_name", "") or "").strip()
+    html = str(getattr(context, "last_opened_html", "") or "")
+    if not series_name:
+        raise AssertionError("Не задано имя серии для проверки ссылок")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM festival WHERE name = ?", (series_name,))
+        count = int((cur.fetchone() or [0])[0] or 0)
+    finally:
+        conn.close()
+    if count < 2:
+        raise AssertionError("Серия не содержит нескольких выпусков")
+    if html.lower().count(series_name.lower()) < 2:
+        raise AssertionError("На странице не видно ссылок/блока других выпусков серии")

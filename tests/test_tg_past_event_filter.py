@@ -4,14 +4,22 @@ from smart_event_update import EventCandidate
 from source_parsing.telegram.handlers import _should_skip_past_event_candidate
 
 
-def _candidate(*, event_type: str | None, start: str | None, end: str | None) -> EventCandidate:
+def _candidate(
+    *,
+    event_type: str | None,
+    start: str | None,
+    end: str | None,
+    title: str = "stub",
+    time: str | None = None,
+) -> EventCandidate:
     return EventCandidate(
         source_type="telegram",
         source_url="https://t.me/example/1",
         source_text="stub",
-        title="stub",
+        title=title,
         event_type=event_type,
         date=start,
+        time=time,
         end_date=end,
     )
 
@@ -36,6 +44,22 @@ def test_exhibition_without_end_date_is_not_skipped() -> None:
     assert _should_skip_past_event_candidate(c, today=date(2026, 2, 11)) is False
 
 
+def test_exhibition_without_end_date_but_very_old_is_skipped() -> None:
+    c = _candidate(event_type="exhibition", start="2018-11-14", end=None)
+    assert _should_skip_past_event_candidate(c, today=date(2026, 2, 11)) is True
+
+
 def test_exhibition_with_past_end_date_is_skipped() -> None:
     c = _candidate(event_type="выставка", start="2026-01-01", end="2026-02-01")
+    assert _should_skip_past_event_candidate(c, today=date(2026, 2, 11)) is True
+
+
+def test_exhibition_misclassified_single_event_with_time_is_skipped() -> None:
+    c = _candidate(
+        event_type="выставка",
+        start="2026-02-03",
+        end=None,
+        title="Fantastic Fungi — кинопоказ фильма",
+        time="18:00",
+    )
     assert _should_skip_past_event_candidate(c, today=date(2026, 2, 11)) is True

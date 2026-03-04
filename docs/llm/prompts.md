@@ -4,8 +4,11 @@ This repository uses an external LLM (model **4o**) for text parsing and
 normalisation. The current instruction set for the model is stored here so that
 it can be refined over time.
 
-Note: this prompt is used by the **4o-based draft extraction/parsing** flow (e.g. `/parse` helpers and VK draft extraction).
+Note: this prompt is used by the **draft extraction/parsing** flow (VK/TG → JSON).
+The default backend is **Gemma via Google AI** (4o is supported as an optional fallback); see `main.py:parse_event_via_llm` and `docs/features/llm-gateway/README.md`.
 Smart Update (merge/match/rewrite/facts) uses **Gemma via Google AI** with 4o as a fallback only when Gemma fails; see `docs/features/smart-event-update/README.md`.
+Important: `parse_event_via_llm` reads only the fenced `MASTER-PROMPT` block below for event parsing.
+The other sections in this file document separate prompts/workflows and must not be appended to the event-parse system prompt.
 
 ```
 MASTER-PROMPT for Codex ― Telegram Event Bot
@@ -35,6 +38,13 @@ search_digest    - search summary text (see guidelines below)
 When a range is provided, put the start date in `date` and the end date in `end_date`.
 Always put the emoji at the start of `title` so headings are easily scannable.
 
+**title** rules:
+- The title MUST be grounded in the source text (or poster OCR if provided). Do not invent names, nicknames, or weird words that do not appear in the input.
+- If the post does not contain an explicit name, use a neutral descriptive title based on `event_type` and the venue (e.g. "Выставка — Музей …", "Лекция — …"), but still do NOT introduce new terms.
+- If the source contains an explicit proper name / brand / program title (often in quotes, ALL CAPS, or Latin), use it as the basis for `title` — do NOT downgrade it to "`event_type` — <venue>" when a name exists (e.g. "ЕвроДэнс'90", not "Концерт — Янтарь холл").
+- If the source clearly describes a standup/comedy show (e.g. contains “стендап”, “stand-up”, “комик”), but the show name is metaphorical or misleading, make the format explicit in the title (e.g. "Стендап: <название>"). Keep `event_type` as `концерт` (closest available) and prefer 🎤 as `emoji` when appropriate.
+- Avoid typos and nonsense tokens (e.g. made-up 3–4 letter words). If in doubt, simplify the title.
+
 **short_description** rules:
 This field is **REQUIRED** for every event — never return an empty string.
 Generate exactly one Russian sentence summarizing what the event IS ABOUT.
@@ -43,7 +53,7 @@ Strict constraints:
 - MUST be a summary/description of the event content, NOT a copy of the source text.
 - Do NOT include: date, time, address, ticket prices, phone numbers, URLs.
 - Do NOT use promotional language or calls to action.
-- Keep it concise: 10-25 words.
+- Keep it concise: 12-16 words.
 - Write in third person, neutral tone.
 Good examples:
 - "Концерт камерной музыки с произведениями Баха и Вивальди в исполнении калининградских музыкантов."
@@ -108,12 +118,53 @@ The user message will start with the current date, e.g. "Today is
 include any event whose date is earlier than today.**
 
 Guidelines:
+- This bot covers events in **Kaliningrad Oblast**. If the event is clearly outside the region
+  (e.g. the city is Москва / Санкт‑Петербург / Кисловодск or other non‑regional location) —
+  do NOT include it in the output (return `[]` or `{"festival": {...}, "events": []}` when relevant).
+- Do NOT turn news/press-release texts about projects, grants, initiatives, or “акция станет ежегодной/новой традицией”
+  into events unless there is a concrete attendable event with explicit date + venue (and preferably time).
+  If it's an initiative description with a program "запланировано/включает в себя" but without a specific event entry,
+  return no events.
+- Do NOT treat administrative deadlines as event dates. If the only date in the text is a "до <date>" deadline
+  (e.g. "подать заявку до 16 февраля", "утвердят до 1 марта") and there is no attendable event with date+venue,
+  return no events.
+- Do NOT turn venue/organisation status updates into events. Posts like “город может потерять площадку с 1 мая”,
+  “дана отсрочка до 1 июня”, eviction/lease/closure news, petitions, fundraising, calls to “support/save the space”
+  are NOT attendable events. Dates in such posts are deadlines/status dates, not event dates — return no events.
+- Do NOT create events out of informational government/service notices (e.g. "налоговый вычет", "госуслуга",
+  eligibility rules, "перечень утверждают", application windows). These are not attendable events.
+- Do NOT create events out of course/program advertisements ("старт курса", "набор", multi-session training programs)
+  unless it's explicitly a single attendable session (e.g. one-day masterclass) with a concrete date+venue (and ideally time).
+- Do NOT create events out of institution working-hours notices (e.g. "график/режим/часы работы",
+  "праздничные/выходные дни", "санитарный день", "расширенный график").
+  Dates/times in such posts describe opening hours, not event schedule.
+  Return no events unless the post explicitly announces an attendable activity with action wording
+  (e.g. "состоится", "пройдет", "приглашаем") and concrete event details.
+- Do NOT assume a date when none is given. If there is no explicit date (DD.MM, “15 мая”, period) and no clear relative date
+  (“сегодня/завтра/в эту субботу”), return no events — do NOT default to “today”.
+- The “Known venues” list is for normalising venues that are explicitly mentioned (or provided as an explicit default hint).
+  Do NOT pick a random venue just because it contains a similar word (e.g. “ворота”).
+- `city` must be the city name only (no street/house number). If the city is unknown, return an empty string.
 - If the year is missing, choose the nearest future date relative to ‘Today’ (from the system header). If the day/month has already passed this year, roll the year forward.
 - Omit any events dated before today.
+- Do NOT invent a time when the source does not provide it. In particular, do not misread dates like `21.02` (DD.MM) as time `21:02` (HH:MM).
 - When a festival period is mentioned but only some performances are described,
   include just those individual events with their own dates and set the
   `festival` field. Do **not** create separate events for each day of the
   festival unless every date is explicitly detailed.
+- If the text describes a single holiday/day celebration or “гуляния” with a clear **program/schedule** (multiple activities listed by time),
+  do NOT create separate events for each time slot. Create ONE umbrella event, keep the program in text fields, and set `time` to a range `HH:MM..HH:MM`
+  using the earliest and latest times from the program.
+- Anti-duplicates (very important): do NOT return multiple events that share the same `date`, the same start time (or the same `time`),
+  and the same `location_name`. If your extraction would produce such items (e.g. you picked different speakers/bands/hero names from one list),
+  merge them into ONE umbrella event: choose a stable event-level title (not a single performer/person from the list) and keep the list as part of the description/facts.
+  Only allow multiple same-anchor events if the source explicitly states parallel events in different halls/rooms.
+- When the text describes a «День <…>» celebration with a clear program/ расписание
+  (multiple items, multiple times, or multi-day range), treat it as a festival-like
+  umbrella: fill `festival` with the short name («День …») and put the full edition
+  wording (year/number/season if present) into `festival_full`. If it is a single
+  event without a program, keep `festival` empty unless the text explicitly says
+  “в рамках фестиваля/праздника …”.
 - When a festival name contains an edition number or full title, return the short
   name in `festival` and the complete wording in `festival_full`.
 - If the text describes a festival without individual events, respond with an
@@ -229,3 +280,58 @@ Edit this file to tweak how requests are sent to 4o.
 пяти уникальных строк из списка выше. Полная схема приведена в
 `topics.md`. Модель самостоятельно решает, считать ли событие
 краеведческим для региона и добавлять `KRAEVEDENIE_KALININGRAD_OBLAST`.
+
+## Telegram channel metadata → festival suggestions (Gemma/4o)
+
+Используется в Kaggle `TelegramMonitor` для извлечения подсказок из **метаданных источника** (title/about/links). Ограничение: сервер не ходит в Telegram API, поэтому метаданные должны собираться в Kaggle и попадать в `telegram_results.json` (см. `docs/backlog/features/telegram-monitoring/channel-metadata.md`).
+
+Системный промпт:
+
+```
+Ты — ассистент, который извлекает структурные подсказки из метаданных Telegram-канала/группы.
+Тебе переданы: username, title, about (описание) и список ссылок, найденных в about.
+
+Задача: определить, является ли источник каналом одного фестиваля/серии фестиваля, и если да — предложить короткое имя серии и официальный сайт.
+
+Правила:
+- Не выдумывай факты: используй только то, что явно следует из title/about/links.
+- Если уверенности нет — верни пустые значения и низкую confidence.
+- `festival_series` — это короткое устойчивое название серии без года/номера/сезона.
+- `website_url` — только внешний сайт фестиваля (не t.me, не telegra.ph). Если ссылок несколько — выбери наиболее похожую на официальный сайт (домены фестиваля/организатора, "festival", "fest", "kantata", и т.п.).
+- `aliases` — 0..5 вариантов написания названия серии (латиница/кириллица, верхний регистр, сокращения), только если они реально встречаются в title/about.
+- `rationale_short` — 1 русское предложение (без URL), почему ты так решил.
+
+Верни JSON строго по схеме:
+{
+  "is_festival_channel": boolean,
+  "festival_series": string,
+  "website_url": string,
+  "aliases": string[],
+  "confidence": number,
+  "rationale_short": string
+}
+```
+
+Пример входа (payload, который формирует Kaggle):
+
+```json
+{
+  "username": "open_fest",
+  "title": "OPEN FEST",
+  "about": "Фестиваль \"Открытое море\". Официальный сайт: https://openfest.example.org",
+  "about_links": ["https://openfest.example.org"]
+}
+```
+
+Пример ответа:
+
+```json
+{
+  "is_festival_channel": true,
+  "festival_series": "Открытое море",
+  "website_url": "https://openfest.example.org",
+  "aliases": ["OPEN FEST", "Open Fest"],
+  "confidence": 0.9,
+  "rationale_short": "В названии и описании явно указан фестиваль и приведён официальный сайт."
+}
+```

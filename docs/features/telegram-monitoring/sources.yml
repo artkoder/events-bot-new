@@ -1,0 +1,221 @@
+version: 1
+
+# Canonical Telegram sources for monitoring (prod/test).
+#
+# Fields:
+# - username: Telegram @username (stored normalized: lowercase, no @, no url)
+# - trust_level: low|medium|high
+# - default_location: optional (used if post omits venue/address)
+# - festival_series: optional; if set -> telegram_source.festival_source=1
+# - filters: optional dict of booleans (server-side filters)
+#   - skip_recurring_excursions: drops "ежедневные/каждый день" экскурсии
+#   - skip_esoterica: drops эзотерика/таро/астрология/etc
+#   - skip_ads: drops posts with явной маркировкой рекламы (#реклама)
+#   - bridge_notice_daily: for @klgdcity развод мостов -> post notice to /daily channels
+# - notes: optional free text (not used by code)
+
+sources:
+  - username: tretyakovka_kaliningrad
+    trust_level: high
+    default_location: "Филиал Третьяковской галереи, Парадная наб. 3, Калининград"
+    filters: {skip_recurring_excursions: true}
+    notes: "официальный; фильтровать регулярные ежедневные экскурсии"
+
+  - username: world_ocean_museum
+    trust_level: high
+    default_location: "Музей Мирового океана, наб. Петра Великого 1, Калининград"
+    filters: {skip_recurring_excursions: true}
+    notes: "официальный; фильтровать регулярные ежедневные экскурсии"
+
+  - username: rostec_arena
+    trust_level: high
+    default_location: "Ростех Арена, Солнечный бульвар 25, Калининград"
+    notes: "официальный"
+
+  - username: terkatalk
+    trust_level: medium
+    notes: "агрегирует партнёрские события, но проводит и свои"
+
+  - username: klassster
+    trust_level: low
+    filters: {skip_esoterica: true}
+    notes: "открытая группа; фильтровать эзотерику и мусор"
+
+  - username: meowafisha
+    trust_level: medium
+    notes: "агрегатор тусовок; часто нужны linked-post ссылки с подробностями"
+
+  - username: dobro39
+    trust_level: high
+    default_location: "Калининградский добровольческий центр (ДОБРО39), Профессора Баранова 34, офис 411, Калининград"
+    notes: "официальный; указывать default_location если в посте нет адреса"
+
+  - username: dramteatr39
+    trust_level: high
+    default_location: "Драматический театр, Мира 4, Калининград"
+    notes: "официальный"
+
+  - username: kulturnaya_chaika
+    trust_level: medium
+    filters: {skip_ads: true}
+    notes: "агрегатор; фильтровать явную рекламу (#реклама)"
+
+  - username: kaliningradartmuseum
+    trust_level: high
+    default_location: "Музей Изобразительных искусств, Ленинский проспект 83, Калининград"
+    filters: {skip_recurring_excursions: true}
+    notes: "официальный; фильтровать регулярные экскурсии"
+
+  - username: domkitoboya
+    trust_level: high
+    default_location: "Дом китобоя, Мира 9, Калининград"
+    filters: {skip_recurring_excursions: true}
+    notes: "официальный; фильтровать регулярные экскурсии"
+
+  - username: locostandup
+    trust_level: high
+    notes: "организаторы"
+
+  - username: signalkld
+    trust_level: high
+    default_location: "Сигнал, Леонова 22, Калининград"
+    notes: "организаторы, площадка"
+
+  - username: kaliningradlibrary
+    trust_level: high
+    default_location: "Научная библиотека, Мира 9, Калининград"
+    notes: "официальный"
+
+  - username: koihm
+    trust_level: high
+    default_location: "Историко-художественный музей, Клиническая 21, Калининград"
+    filters: {skip_recurring_excursions: true}
+    notes: "официальный; фильтровать регулярные экскурсии"
+
+  - username: grezahutor
+    trust_level: high
+    default_location: "Грёза Хутор, пос. Тихомировка, Озёрск"
+    notes: "организатор некоторых мероприятий, локация"
+
+  - username: zaryakinoteatr
+    trust_level: high
+    default_location: "Заря, Мира 41-43, Калининград"
+    notes: "официальный"
+
+  - username: klgdcity
+    trust_level: high
+    filters: {bridge_notice_daily: true}
+    notes: "официальный; «развод мостов» -> notice в /daily каналы"
+
+  - username: ambermuseum
+    trust_level: high
+    default_location: "Музей Янтаря, пл. Василевского 1, Калининград"
+    notes: "официальный"
+
+  - username: telegraf_svetlogorsk
+    trust_level: high
+    default_location: "Телеграф, Островского 3, Светлогорск"
+    notes: "площадка; собственные мероприятия"
+
+  - username: muztear39
+    trust_level: high
+    default_location: "Музыкальный театр, Мира 87, Калининград"
+    notes: "официальный"
+
+  - username: festdir
+    trust_level: high
+    notes: "официальный"
+
+  - username: molod_kld
+    trust_level: high
+    notes: "официальный"
+
+  - username: minkultturism_39
+    trust_level: high
+    notes: "официальный"
+
+  - username: zamokinsterburg
+    trust_level: high
+    default_location: "Замок Инстербург, Замковая 1, Черняховск"
+    notes: "официальный"
+
+  - username: mesto_sily_bar
+    trust_level: high
+    default_location: "Место Силы, Галицкого 18, Калининград"
+    notes: "собственные события, площадка"
+
+  - username: castleneuhausen
+    trust_level: high
+    default_location: "Замок Нойхаузен, Заречная 2А, Гурьевск"
+    notes: "официальный"
+
+  - username: admyantarniy
+    trust_level: high
+    notes: "администрация курортного города, официальный"
+
+  - username: sobor39
+    trust_level: high
+    default_location: "Кафедральный собор, Остров Канта, #Калининград"
+    notes: "официальный"
+
+  - username: gumbinnen
+    trust_level: high
+    notes: "площадка"
+
+  - username: dom_semii
+    trust_level: high
+    default_location: "Дом Семьи, Леонова 4, Калининград"
+    notes: "площадка, официальный"
+
+  - username: kldzoo
+    trust_level: high
+    default_location: "Калининградский зоопарк, пр-т Мира 26, Калининград"
+    notes: "официальный"
+
+  - username: kozia_gorka
+    trust_level: high
+    default_location: "Козья горка, пос. Горьковское, Светлогорское шоссе 13а, Светлогорск"
+    notes: "площадка, собственные события"
+
+  - username: k_mira101
+    trust_level: high
+    default_location: "Евангелистко-Лютеранская церковь, Мира 101, #Калининград"
+    notes: "площадка/организаторы концертов (кирха на Мира 101)"
+
+  - username: barn_kaliningrad
+    trust_level: high
+    default_location: "Барн, Каштановая аллея 1а, Калининград"
+    notes: "площадка"
+
+  - username: itcsvetlogorsk
+    trust_level: high
+    default_location: "Информационно-туристический центр, Карла Маркса 7а, Светлогорск"
+    notes: "официальный"
+
+  - username: agropark39
+    trust_level: high
+    notes: "агропарк, официальный"
+
+  - username: tastes_of_vistynets
+    trust_level: high
+    notes: "организаторы событий, официальный"
+
+  - username: yantarholl
+    trust_level: high
+    default_location: "Янтарь холл, Ленина 11, Светлогорск"
+    notes: "официальный, концертный зал"
+
+  - username: open_fest
+    trust_level: medium
+    festival_series: "Открытое море"
+    notes: "ежегодный фестиваль"
+
+  - username: festkantata
+    trust_level: medium
+    festival_series: "Кантата"
+    notes: "ежегодный фестиваль классической музыки"
+
+  - username: garazhka_kld
+    trust_level: medium
+    festival_series: "Гаражка"
+    notes: "регулярный фестиваль, несколько раз в год"

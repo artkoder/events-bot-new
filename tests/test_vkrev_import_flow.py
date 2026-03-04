@@ -455,7 +455,7 @@ async def test_vkrev_import_flow_passes_festival_hint(tmp_path, monkeypatch):
         ]
 
     def fake_require(name: str):
-        if name == "LOCAL_TZ": return timezone.utc; assert name == "parse_event_via_4o"
+        if name == "LOCAL_TZ": return timezone.utc; assert name == "parse_event_via_llm"
         return fake_parse
 
     async def fake_persist(draft, photos, db_, source_post_url=None):
@@ -809,7 +809,7 @@ async def test_vkrev_import_flow_creates_festival_without_events_from_llm(
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize_posters)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse, raising=False)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
@@ -1131,7 +1131,7 @@ async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_pa
 
     monkeypatch.setattr(vk_intake, "process_media", fake_process_media)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
 
     draft, festival_payload = await vk_intake.build_event_draft(
@@ -1217,7 +1217,7 @@ async def test_build_event_payload_includes_operator_extra(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "Original announcement", operator_extra=" Extra context "
@@ -1241,7 +1241,7 @@ async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "", operator_extra="  Only extra  "
@@ -1282,7 +1282,7 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 4242
     message = SimpleNamespace(
@@ -1353,7 +1353,7 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 5151
     url = "https://example.com/foo(bar)"
@@ -1424,7 +1424,7 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 5252
     message = SimpleNamespace(
@@ -1492,7 +1492,7 @@ async def test_handle_vk_extra_message_forces_festival(monkeypatch):
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 5353
     message = SimpleNamespace(
@@ -1642,7 +1642,7 @@ async def test_build_event_draft_handles_ocr_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
     monkeypatch.setattr(vk_intake, "process_media", fake_process)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
 
     draft, festival_payload = await vk_intake.build_event_draft(

@@ -32,7 +32,7 @@ async def test_year_rollover_when_date_has_passed(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     # Act
     drafts, _ = await vk_intake.build_event_drafts_from_vk(
@@ -63,7 +63,7 @@ async def test_no_rollover_when_explicit_year_in_text(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     drafts, _ = await vk_intake.build_event_drafts_from_vk(
         text,
@@ -94,7 +94,7 @@ async def test_rollover_with_hint_application(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     drafts, _ = await vk_intake.build_event_drafts_from_vk(
         text,

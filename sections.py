@@ -7,6 +7,17 @@ from datetime import date
 from typing import Any, List, Tuple
 
 
+_BODY_DIVIDER_MARKER_RE = re.compile(r"<!--\s*BODY_DIVIDER\s*-->\s*$", re.IGNORECASE)
+
+
+def _is_body_divider_hr(html: str, hr_start: int) -> bool:
+    """Return True if the <hr> at position is an internal body divider (not footer anchor)."""
+    if hr_start <= 0:
+        return False
+    window = html[max(0, hr_start - 80) : hr_start]
+    return bool(_BODY_DIVIDER_MARKER_RE.search(window))
+
+
 def ensure_footer_nav_with_hr(
     content: Any, nav_block: Any, *, month: str | None = None, page: int | None = None
 ) -> Any:
@@ -25,10 +36,20 @@ def ensure_footer_nav_with_hr(
         pattern = re.compile(r"<hr\s*/?>", flags=re.I)
         matches = list(pattern.finditer(content))
         if matches:
-            hr_found = True
-            last = matches[-1]
-            removed_chars = len(content) - last.end()
-            content = content[: last.end()]
+            # Ignore internal body dividers marked with <!--BODY_DIVIDER-->.
+            anchor = None
+            for m in reversed(matches):
+                if _is_body_divider_hr(content, m.start()):
+                    continue
+                anchor = m
+                break
+            if anchor is not None:
+                hr_found = True
+                removed_chars = len(content) - anchor.end()
+                content = content[: anchor.end()]
+            else:
+                # Only internal dividers exist -> append a dedicated footer anchor at the end.
+                content = content.rstrip() + "<hr>"
         else:
             content = content.rstrip() + "<hr>"
         # nav_block is expected to be HTML string in this branch
@@ -277,4 +298,3 @@ def dedup_same_date(nodes: List[Any], target: date) -> Tuple[List[Any], int]:
         del nodes[sec.start_idx:sec.end_idx]
         removed += 1
     return nodes, removed
-

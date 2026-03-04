@@ -27,7 +27,27 @@
 - только если `location` пустой или “общий” (например “Гаражка, Калининград”),
 - и **не** перезаписывает вручную заданные значения.
 
+### Пример: канонические Telegram‑источники (мониторинг)
+
+В `Database.init()` также выполняется идемпотентный seed списка Telegram‑источников:
+
+- источник данных: `docs/features/telegram-monitoring/sources.yml`;
+- вставляет отсутствующие каналы и нормализует username (lowercase, без `@`/URL);
+- повышает trust_level (только upgrade) и добавляет missing filters (не удаляет существующие);
+- доступен и вручную из UI: `/tg` → «🧩 Синхронизировать источники»;
+- для release/ops можно запускать CLI: `python scripts/seed_telegram_sources.py --db <path>`.
+
+### Пример: backfill `event_source` для legacy событий
+
+Старые снапшоты БД могут содержать заполненные `event.source_post_url` / `event.source_vk_post_url`, но без строк в таблице `event_source`.
+
+Чтобы Smart Update мог сходиться по `source_url` (и не плодить дубли при повторной обработке одного и того же поста),
+в `Database.init()` выполняется идемпотентный backfill:
+
+- `INSERT OR IGNORE` в `event_source` из `event.source_post_url` (тип выводится как `telegram`/`vk`/`legacy` по URL),
+- отдельный `INSERT OR IGNORE` из `event.source_vk_post_url` с `source_type='vk'`,
+- можно отключить на больших БД (или для отладки) переменной окружения: `DB_INIT_SKIP_EVENT_SOURCE_BACKFILL=1`.
+
 ## Важно про Supabase‑миграции
 
 SQL‑миграции Supabase лежат отдельно в `migrations/` (например `001_google_ai.sql`, `002_google_ai_rpc_rollout.sql`) и не имеют отношения к SQLite схеме событий.
-

@@ -150,7 +150,7 @@ def _normalize_location_key(value: str) -> str:
 
 @lru_cache(maxsize=1)
 def _load_known_locations() -> dict[str, tuple[str, str | None, str | None]]:
-    loc_path = os.path.join("docs", "LOCATIONS.md")
+    loc_path = os.path.join("docs", "reference", "locations.md")
     if not os.path.exists(loc_path):
         return {}
     mapping: dict[str, tuple[str, str | None, str | None]] = {}
@@ -258,16 +258,26 @@ def group_events_for_special(
         # Pick first event as "main" for description, photo, etc.
         main = event_list[0]
         
-        # Description: prefer non-empty description, else search_digest
+        # Description for list pages: prefer LLM short_description, else search_digest, else first sentence.
+        from digest_helper import clean_search_digest, clean_short_description, fallback_one_sentence
+
         description = ""
         for e in event_list:
-            if e.description and e.description.strip():
-                description = e.description.strip()
+            sd = clean_short_description(getattr(e, "short_description", None))
+            if sd:
+                description = sd
                 break
         if not description:
             for e in event_list:
-                if e.search_digest and e.search_digest.strip():
-                    description = e.search_digest.strip()
+                digest = clean_search_digest(getattr(e, "search_digest", None))
+                if digest:
+                    description = digest
+                    break
+        if not description:
+            for e in event_list:
+                sent = fallback_one_sentence(getattr(e, "description", None))
+                if sent:
+                    description = sent
                     break
         
         # Photo URL: prioritize 3D preview, then first valid photo

@@ -56,7 +56,7 @@ async def test_build_month_page_threshold(monkeypatch):
     )
     monkeypatch.setattr(main_part2, "rough_size", lambda nodes: 0, raising=False)
 
-    events_small = [_make_event(i) for i in range(9)]
+    events_small = [_make_event(i) for i in range(30)]
     _build_month_page_content_sync(
         "2026-05",
         events_small,
@@ -65,16 +65,18 @@ async def test_build_month_page_threshold(monkeypatch):
         None,
         None,
         None,
+        None,
         True,
         True,
     )
 
-    events_large = [_make_event(i) for i in range(10)]
+    events_large = [_make_event(i) for i in range(31)]
     _build_month_page_content_sync(
         "2026-05",
         events_large,
         [],
         {},
+        None,
         None,
         None,
         None,

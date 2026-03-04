@@ -46,7 +46,7 @@ async def test_apply_posters_prunes_foreign_posters_by_scope_hashes(tmp_path) ->
 
         # Now a new run decides only poster "b" belongs to this event.
         posters = [PosterCandidate(catbox_url="https://files.catbox.moe/b.jpg", sha256="b")]
-        added, _added_urls, _preview_invalidated, pruned = await _apply_posters(
+        added, _added_urls, _preview_invalidated, pruned, _changed = await _apply_posters(
             session,
             int(ev.id),
             posters,

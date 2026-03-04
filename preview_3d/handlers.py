@@ -19,6 +19,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from db import Database
 from models import Event, MonthPage, User
+from ops_run import finish_ops_run, start_ops_run
 from sqlmodel import select
 from video_announce.kaggle_client import KaggleClient, KERNELS_ROOT_PATH
 from kaggle_registry import register_job, remove_job, list_jobs
@@ -168,6 +169,34 @@ async def run_3di_new_only_scheduler(
         events = await _get_new_events_gap(db, min_images=min_images)
         if not events:
             logger.info("3di_scheduler: no new events to process")
+            ops_run_id = await start_ops_run(
+                db,
+                kind="3di",
+                trigger="scheduled",
+                chat_id=chat_id,
+                operator_id=0,
+                details={
+                    "run_id": run_id,
+                    "mode": "new_only",
+                    "month": "New Events Gap",
+                },
+            )
+            await finish_ops_run(
+                db,
+                run_id=ops_run_id,
+                status="success",
+                metrics={
+                    "events_considered": 0,
+                    "previews_rendered": 0,
+                    "preview_errors": 0,
+                    "preview_skipped": 0,
+                },
+                details={
+                    "run_id": run_id,
+                    "mode": "new_only",
+                    "month": "New Events Gap",
+                },
+            )
             return 0
 
         session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
@@ -214,9 +243,40 @@ async def run_3di_new_only_scheduler(
             session_id=session_id,
             payload=payload,
             month="New Events Gap",
+            trigger="scheduled",
+            operator_id=0,
+            run_id=run_id,
         )
         return len(events)
     except Exception:
+        ops_run_id = await start_ops_run(
+            db,
+            kind="3di",
+            trigger="scheduled",
+            chat_id=chat_id,
+            operator_id=0,
+            details={
+                "run_id": run_id,
+                "mode": "new_only",
+                "month": "New Events Gap",
+            },
+        )
+        await finish_ops_run(
+            db,
+            run_id=ops_run_id,
+            status="error",
+            metrics={
+                "events_considered": 0,
+                "previews_rendered": 0,
+                "preview_errors": 1,
+                "preview_skipped": 0,
+            },
+            details={
+                "run_id": run_id,
+                "mode": "new_only",
+                "month": "New Events Gap",
+            },
+        )
         logger.exception("3di_scheduler failed")
         return 0
 
@@ -581,6 +641,10 @@ async def _run_kaggle_render(
     session_id: int,
     payload: dict,
     month: str,
+    *,
+    trigger: str = "manual",
+    operator_id: int | None = None,
+    run_id: str | None = None,
 ) -> None:
     session = _active_sessions.get(session_id)
     if not session:
@@ -596,6 +660,25 @@ async def _run_kaggle_render(
     else:
         month_label = f"{MONTHS_RU.get(month_number, month)} {year}"
     event_count = session.get("event_count", len(payload.get("events", [])))
+    ops_run_id = await start_ops_run(
+        db,
+        kind="3di",
+        trigger=trigger,
+        chat_id=chat_id,
+        operator_id=operator_id,
+        details={
+            "run_id": run_id,
+            "month": month,
+            "mode": session.get("mode"),
+            "session_id": session_id,
+        },
+    )
+    ops_status = "success"
+    ops_error: str | None = None
+    previews_rendered = 0
+    preview_errors = 0
+    preview_skipped = 0
+    duration_sec = 0.0
     try:
         if _preview3d_lock.locked():
             await _set_session_status(
@@ -637,6 +720,7 @@ async def _run_kaggle_render(
             final_status, status_data, duration = await _poll_kaggle_kernel(
                 client, kernel_ref, session_id, bot, chat_id, message_id
             )
+            duration_sec = float(duration or 0.0)
             if final_status != "complete":
                 failure = ""
                 if status_data:
@@ -652,6 +736,9 @@ async def _run_kaggle_render(
                     session_id, "apply_results", bot=bot, chat_id=chat_id, message_id=message_id
                 )
                 updated, errors, skipped = await update_previews_from_results(db, results)
+                previews_rendered = int(updated or 0)
+                preview_errors = int(errors or 0)
+                preview_skipped = int(skipped or 0)
                 updated_event_ids: list[int] = []
                 seen_event_ids: set[int] = set()
                 for result in results:
@@ -756,6 +843,8 @@ async def _run_kaggle_render(
             finally:
                 shutil.rmtree(output_dir, ignore_errors=True)
     except Exception as exc:
+        ops_status = "error"
+        ops_error = str(exc)
         session["status"] = "error"
         session["error"] = str(exc)
         if registered and kernel_ref:
@@ -775,6 +864,26 @@ async def _run_kaggle_render(
                 ]),
                 parse_mode="HTML",
             )
+    finally:
+        await finish_ops_run(
+            db,
+            run_id=ops_run_id,
+            status=ops_status,
+            metrics={
+                "events_considered": int(event_count or 0),
+                "previews_rendered": int(previews_rendered),
+                "preview_errors": int(preview_errors),
+                "preview_skipped": int(preview_skipped),
+                "duration_sec": round(float(duration_sec), 3),
+            },
+            details={
+                "run_id": run_id,
+                "month": month,
+                "mode": session.get("mode"),
+                "session_id": session_id,
+                "error": ops_error,
+            },
+        )
 
 
 async def handle_3di_command(message: types.Message, db: Database, bot) -> None:
@@ -882,7 +991,14 @@ async def handle_3di_callback(
         # Use a generic label for the month/group since it's a gap fill
         label = "New Events Gap"
         await _start_generation(
-            db, bot, callback, events, label, mode_str, start_kaggle_render
+            db,
+            bot,
+            callback,
+            events,
+            label,
+            mode_str,
+            start_kaggle_render,
+            operator_id=callback.from_user.id,
         )
         return
 
@@ -899,7 +1015,14 @@ async def handle_3di_callback(
         
         mode_str = "new:multy" if is_multy else "new"
         await _start_generation(
-            db, bot, callback, events, month_key, mode_str, start_kaggle_render
+            db,
+            bot,
+            callback,
+            events,
+            month_key,
+            mode_str,
+            start_kaggle_render,
+            operator_id=callback.from_user.id,
         )
         return
     
@@ -916,7 +1039,14 @@ async def handle_3di_callback(
         # Use a descriptive label since this spans multiple months
         label = "All Missing"
         await _start_generation(
-            db, bot, callback, events, label, mode_str, start_kaggle_render
+            db,
+            bot,
+            callback,
+            events,
+            label,
+            mode_str,
+            start_kaggle_render,
+            operator_id=callback.from_user.id,
         )
         return
     
@@ -933,7 +1063,14 @@ async def handle_3di_callback(
         
         mode_str = "all:multy" if is_multy else "all"
         await _start_generation(
-            db, bot, callback, events, month_key, mode_str, start_kaggle_render
+            db,
+            bot,
+            callback,
+            events,
+            month_key,
+            mode_str,
+            start_kaggle_render,
+            operator_id=callback.from_user.id,
         )
         return
     
@@ -948,7 +1085,14 @@ async def handle_3di_callback(
         
         mode_str = "month:multy" if is_multy else "month"
         await _start_generation(
-            db, bot, callback, events, month_key, mode_str, start_kaggle_render
+            db,
+            bot,
+            callback,
+            events,
+            month_key,
+            mode_str,
+            start_kaggle_render,
+            operator_id=callback.from_user.id,
         )
         return
     
@@ -972,6 +1116,8 @@ async def _start_generation(
     month: str,
     mode: str,
     start_kaggle_render: Callable | None,
+    *,
+    operator_id: int | None = None,
 ) -> None:
     """Start 3D preview generation for events."""
     chat_id = callback.message.chat.id
@@ -1020,6 +1166,8 @@ async def _start_generation(
             session_id=session_id,
             payload=payload,
             month=month,
+            trigger="manual",
+            operator_id=operator_id,
         )
     except Exception as e:
         logger.exception("3di: Kaggle render failed")

@@ -104,6 +104,16 @@ def step_wait_long_operation(context, text):
 
 ---
 
+## Реакция на ошибки в Telegram UI (обязательно)
+
+Live E2E — это не только `behave`-assert’ы, но и **операторские сообщения бота в Telegram**.
+
+- Любое сообщение с шаблоном `Результат: ошибка …` считается **провалом прогона** и требует расследования.
+- Не допускается “тихий пропуск” постов/событий из‑за ошибок: E2E должен падать как можно раньше.
+- Логи для расследования: `artifacts/test-results/e2e_local_bot_*.log` + текст сообщения в Telegram UI.
+
+---
+
 ## Верификация контента Telegraph
 
 ### Проблема
@@ -218,7 +228,12 @@ def step_log(ctx): ...
 - [ ] Подготовить **изолированную** БД для E2E (чтобы прогон не мутировал snapshot):
   - `eval "$(./scripts/prepare_e2e_db_from_prod_snapshot.sh --max-age-hours 6)"`
   - (альтернатива) вручную сделать sqlite backup/copy в `artifacts/test-results/` и выставить `DB_PATH` на копию
-- [ ] Запустить бота локально в polling режиме: `DEV_MODE=1 python main.py` (использует `DB_PATH` из шага выше)
+- [ ] Запустить бота локально в polling режиме (использует `DB_PATH` из шага выше):
+  - рекомендуемо: `DEV_MODE=1 python main.py`
+  - или просто `python main.py` (если `WEBHOOK_URL` не задан — бот сам стартует в polling режиме)
+  - если `WEBHOOK_URL` задан, но нужен polling: `FORCE_POLLING=1 python main.py`
+- [ ] Если админ-команды (`/vk`, `/fest_queue`, и т.п.) отвечают `Access denied` для тестового пользователя:
+  - один раз выполнить `python scripts/seed_dev_superadmin.py` (выдаёт superadmin в sqlite `DB_PATH` для Telethon‑аккаунта из `TELEGRAM_AUTH_BUNDLE_E2E`/`TELEGRAM_SESSION`)
 - [ ] Если БД-снимок лежит на нестабильной FS, выставить `DB_JOURNAL_MODE=DELETE` (иначе возможны ошибки WAL)
 - [ ] Убедиться что бот отвечает на `/start`
 - [ ] Проверить что нет конфликтов с production ботом
@@ -266,15 +281,40 @@ python3 main.py &
 behave tests/e2e/features/your_feature.feature --no-capture
 ```
 
+Примечание про `@manual` сценарии:
+- `@manual` — это тяжёлые/долгие live-сценарии (массовые прогоны).
+- Чтобы они запускались, используйте **один** из вариантов:
+  - `E2E_RUN_MANUAL=1 behave ...`
+  - `behave ... --tags=manual`
+
 Примечание:
 - Если вы запускаете `behave`, `tests/e2e/features/environment.py` **автоматически** делает копию, когда `DB_PATH`
   указывает на `db_prod_snapshot*.sqlite` в корне репозитория (можно отключить `E2E_DB_ISOLATE=0`).
+- Если `DB_PATH` не задан, `tests/e2e/features/environment.py` пытается выбрать snapshot автоматически:
+  - сначала `db_prod_snapshot.sqlite` (если файл “здоровый”);
+  - иначе — самый новый `db_prod_snapshot_*.sqlite` по времени изменения (если он “здоровый”).
+  Если snapshot повреждён (например, незавершённая загрузка), он будет пропущен с warning в логах E2E.
 
 Примечание про переменные окружения:
 - `export ...` в одном терминале влияет только на текущую shell-сессию и её дочерние процессы. Если IDE открыла новый терминал/процесс, переменные “исчезнут”.
 - Для E2E предпочтительнее хранить настройки в `.env` в корне репозитория: `tests/e2e/features/environment.py` подхватывает `.env` автоматически (best-effort), заполняя отсутствующие переменные.
+  - Если в окружении уже задан **явно неверный** `SUPABASE_KEY`/`SUPABASE_SERVICE_KEY` (например слишком короткое значение), E2E‑раннер заменит его на значение из `.env` (иначе ломаются media upload fallback’и, где нужен доступ к Storage).
   - Если ты запускаешь бота вручную из терминала (не через `behave`), `.env` в процесс не подхватится сам — перед `python main.py` выполни:
     - `set -a; source .env; set +a`
+
+### Быстрая диагностика “бот не отвечает на команды”
+
+Симптом: отправляешь `/start` или `/vk`, а в Telegram тишина.
+
+1) Проверь в логах строку режима:
+   - ожидаемо для local/live E2E: `Mode: DEV_MODE | Connection: POLLING | Webhook: DISABLED`
+   - если видишь `Mode: PROD_MODE | Connection: WEBHOOK | Polling: DISABLED` — бот не будет получать апдейты без корректно настроенного webhook.
+2) Запусти заново в polling режиме:
+   - `DEV_MODE=1 python main.py` или `FORCE_POLLING=1 python main.py`
+3) Если запускаешь вручную — не забудь подхватить `.env`:
+   - `set -a; source .env; set +a`
+
+Опционально (чтобы уменьшить шум/фоновую активность при live E2E): `DISABLE_PAGE_JOBS=1`.
 
 Если в рамках E2E вы проверяете только **страницы событий** (Telegraph build) и не хотите, чтобы фоновая очередь пыталась пересобирать агрегирующие страницы (месяц/неделя/выходные), запускайте бота с:
 
@@ -329,6 +369,8 @@ E2E_OFFLINE=1 SMART_UPDATE_LLM=off EVENT_TOPICS_LLM=off DB_PATH=db_prod_snapshot
 - **Согласованность фактов**: после `/parse` смысловые факты из лога должны присутствовать в тексте Telegraph страницы.
 - **Анти-шум multi-event**: в Telegraph тексте не должно оставаться строк расписания/чужих названий из того же Telegram поста.
 - **Telegram preview**: для итоговой Telegraph страницы события должен собираться `cached_page + photo` (иначе в клиенте возможен “чёрный экран” превью).
+  - Частая причина отсутствия `cached_page`: на странице события есть `<img>` с битой ссылкой (например, Catbox `404`), из-за чего Telegram не может собрать Instant View.
+  - Бот при сборке/обновлении event‑страницы теперь (по умолчанию) проверяет типовые источники иллюстраций (Catbox/Supabase) и **подменяет** битые URL на fallback (если есть) или **удаляет** их из набора иллюстраций. Управляется через `TELEGRAPH_VALIDATE_IMAGE_URLS=1` и `HTTP_IMAGE_UA` (User-Agent для скачивания изображений).
 
 Канонические файлы сценариев:
 - `tests/e2e/features/telegram_monitoring.feature`

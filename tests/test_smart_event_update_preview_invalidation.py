@@ -32,7 +32,7 @@ async def test_apply_posters_invalidates_preview_3d_when_images_change(tmp_path)
         await session.commit()
 
     async with db.get_session() as session:
-        added, urls, invalidated, pruned = await _apply_posters(
+        added, urls, invalidated, pruned, changed = await _apply_posters(
             session,
             1,
             [
@@ -43,6 +43,7 @@ async def test_apply_posters_invalidates_preview_3d_when_images_change(tmp_path)
         assert urls == []
         assert invalidated is True
         assert pruned == 0
+        assert changed is True
         await session.commit()
 
     async with db.get_session() as session:

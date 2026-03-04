@@ -87,6 +87,38 @@ async def test_upcoming_festivals_filters_past_and_logs(tmp_path, caplog):
 
 
 @pytest.mark.asyncio
+async def test_upcoming_festivals_applies_horizon_window(tmp_path, monkeypatch):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today()
+    near = today + timedelta(days=30)
+    far = today + timedelta(days=240)
+
+    async with db.get_session() as session:
+        session.add(
+            Festival(
+                name="Near",
+                start_date=near.isoformat(),
+                end_date=near.isoformat(),
+            )
+        )
+        session.add(
+            Festival(
+                name="Far",
+                start_date=far.isoformat(),
+                end_date=far.isoformat(),
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setenv("FESTIVALS_UPCOMING_HORIZON_DAYS", "120")
+    items = await main.upcoming_festivals(db, today=today)
+    names = [fest.name for _, _, fest in items]
+    assert "Near" in names
+    assert "Far" not in names
+
+
+@pytest.mark.asyncio
 async def test_festival_nav_block_sorted(tmp_path):
     db = main.Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -111,4 +143,3 @@ async def test_festival_nav_block_sorted(tmp_path):
         await session.commit()
     _, lines, _ = await main.build_festivals_nav_block(db)
     assert lines.index("Soon") < lines.index("Later")
-

@@ -10,8 +10,14 @@
 - `docs/features/tourist-label/README.md` — туристическая метка (ручная разметка + экспорт)
 - `docs/features/llm-gateway/README.md` — управление лимитами Google AI (Gemma/Gemini) и ретраи
 - `docs/features/smart-event-update/README.md` — единый Smart Update (match/merge, лог фактов, Telegraph)
+- `docs/features/linked-events/README.md` — связанные события (серии “то же событие в другие даты” + UI «Другие даты»)
 - `docs/features/vk-auto-queue/README.md` — авторазбор очереди VK постов
 - `docs/features/exhibitions-smart-update/README.md` — поддержка выставок через Smart Update
+- `docs/features/festivals/README.md` — фестивали: серии/выпуски, очередь и связь с событиями
+- `docs/features/post-metrics/README.md` — статистика постов и популярность (TG/VK): медианы, уровни ⭐/👍, основа для ранжирования
+- `docs/features/ticket-sites-queue/README.md` — очередь обогащения событий по ссылкам на ticket‑сайты (pyramida/dom/qtickets)
+- `docs/features/admin-action-assistant/README.md` — ассистент админ‑команд: запрос «простыми словами» → команда + подтверждение
+- `docs/features/telegraph-cache-sanitizer/README.md` — прогрев/проверка Telegram web preview (Instant View) для Telegraph страниц + очередь на пересборку “битых”
 
 ## Как добавлять новую фичу
 

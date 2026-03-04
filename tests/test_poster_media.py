@@ -147,3 +147,52 @@ async def test_process_media_prefers_dunder_main(monkeypatch, caplog):
             sys.modules.pop("__main__", None)
 
         importlib.reload(poster_media_module)
+
+
+@pytest.mark.asyncio
+async def test_process_media_sets_supabase_url_for_supabase_links(monkeypatch):
+    original_main = sys.modules.get("main")
+    original_dunder_main = sys.modules.get("__main__")
+
+    script_main = types.ModuleType("__main__")
+
+    async def fake_upload_images(images, *args, **kwargs):
+        return [
+            f"https://project.supabase.co/storage/v1/object/public/events-media/p/dh16/aa/{idx}.webp"
+            for idx, _ in enumerate(images)
+        ], "ok"
+
+    script_main.upload_images = fake_upload_images  # type: ignore[attr-defined]
+    script_main.CATBOX_ENABLED = True  # type: ignore[attr-defined]
+    script_main.get_http_session = lambda: "session"  # type: ignore[attr-defined]
+    script_main.HTTP_SEMAPHORE = "semaphore"  # type: ignore[attr-defined]
+
+    sys.modules["__main__"] = script_main
+    sys.modules.pop("main", None)
+
+    try:
+        module = importlib.reload(poster_media_module)
+        monkeypatch.setattr(module, "_MAIN_MODULE", None, raising=False)
+
+        posters, _msg = await module.process_media(
+            [(b"data", "poster.jpg")],
+            need_catbox=True,
+            need_ocr=False,
+        )
+
+        assert len(posters) == 1
+        assert posters[0].catbox_url
+        assert posters[0].supabase_url == posters[0].catbox_url
+        assert module.is_supabase_storage_url(posters[0].supabase_url)
+    finally:
+        if original_main is not None:
+            sys.modules["main"] = original_main
+        else:
+            sys.modules.pop("main", None)
+
+        if original_dunder_main is not None:
+            sys.modules["__main__"] = original_dunder_main
+        else:
+            sys.modules.pop("__main__", None)
+
+        importlib.reload(poster_media_module)

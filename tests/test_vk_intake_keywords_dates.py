@@ -411,7 +411,7 @@ async def test_build_drafts_library_defaults_to_free(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse, raising=False)
 
     drafts, festival_payload = await vk_intake.build_event_drafts_from_vk(
         "Встреча читателей в уютной библиотеке"
@@ -432,7 +432,7 @@ async def test_build_drafts_library_respects_paid_keywords(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse, raising=False)
 
     drafts, festival_payload = await vk_intake.build_event_drafts_from_vk(
         "Встреча читателей в библиотеке, вход 300 руб."

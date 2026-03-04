@@ -1,6 +1,9 @@
-import pytest
 import os
-from digest_helper import clean_search_digest
+from digest_helper import (
+    clean_search_digest,
+    enforce_digest_word_limit,
+    is_short_description_acceptable,
+)
 
 def test_clean_search_digest_timestamps():
     assert clean_search_digest("Concert at 19:00 today") == "Concert at today"
@@ -23,6 +26,26 @@ def test_clean_search_digest_complex():
     input_str = "Лекция о  искусстве  начало в 18:30, вход свободный"
     expected = "Лекция о искусстве начало в , вход свободный"
     assert clean_search_digest(input_str) == expected
+
+
+def test_enforce_digest_word_limit_trims_long_text():
+    text = "раз два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать тринадцать четырнадцать пятнадцать шестнадцать семнадцать"
+    out = enforce_digest_word_limit(text, max_words=16)
+    assert out is not None
+    assert len(out.split()) <= 16
+    assert out.endswith("…")
+
+
+def test_is_short_description_acceptable_requires_complete_sentence_and_length():
+    good = "Музыкальный вечер знакомит с солдатскими балладами и народными песнями о мужестве России."
+    bad_ellipsis = "Музыкальный вечер знакомит с солдатскими балладами и народными песнями о мужестве…"
+    bad_too_long = (
+        "Музыкальный вечер знакомит с солдатскими балладами и народными песнями, "
+        "а также с авторскими композициями о памяти, доблести и стойкости народа."
+    )
+    assert is_short_description_acceptable(good, min_words=12, max_words=16) is True
+    assert is_short_description_acceptable(bad_ellipsis, min_words=12, max_words=16) is False
+    assert is_short_description_acceptable(bad_too_long, min_words=12, max_words=16) is False
 
 def test_prompts_file_content():
     """Smoke test to ensure PROMPTS.md will contain new rules"""

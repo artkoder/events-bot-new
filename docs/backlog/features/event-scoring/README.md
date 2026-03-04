@@ -35,5 +35,4 @@
 
 ## 4. Требования к данным (для реализации)
 
-Telegram Monitoring должен сохранять метрики на уровне источника/сообщения (см. `docs/backlog/features/telegram-monitoring/README.md`), чтобы скоринг был воспроизводим.
-
+Telegram Monitoring должен сохранять метрики на уровне источника/сообщения (см. `docs/features/telegram-monitoring/README.md`), чтобы скоринг был воспроизводим.

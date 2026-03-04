@@ -21,6 +21,7 @@ from aiogram import Bot, types
 from aiogram.filters import Command
 
 from db import Database
+from ops_run import finish_ops_run, start_ops_run
 from models import User
 from source_parsing.handlers import (
     run_source_parsing,
@@ -29,6 +30,7 @@ from source_parsing.handlers import (
     run_diagnostic_parse,
 )
 from net import http_call
+from heavy_ops import heavy_operation
 
 logger = logging.getLogger(__name__)
 
@@ -319,21 +321,29 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
 
     async with PARSE_LOCK:
         try:
-            result = await run_source_parsing(
-                db,
-                bot,
+            async with heavy_operation(
+                kind="parse",
+                trigger="manual",
+                operator_id=message.from_user.id,
                 chat_id=message.chat.id,
-                only_sources=only_sources,
-                date_from=date_from,
-                date_to=date_to,
-            )
+            ):
+                result = await run_source_parsing(
+                    db,
+                    bot,
+                    chat_id=message.chat.id,
+                    only_sources=only_sources,
+                    date_from=date_from,
+                    date_to=date_to,
+                    trigger="manual",
+                    operator_id=message.from_user.id,
+                )
             bot_username = None
             try:
                 me = await bot.get_me()
                 bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
             except Exception:
                 bot_username = None
-            report = format_parsing_report(result, bot_username=bot_username)
+            report = await format_parsing_report(result, bot_username=bot_username, db=db)
             
             try:
                 await bot.send_message(
@@ -424,7 +434,13 @@ async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None
     logger.info("source_parsing_scheduler started run_id=%s", run_id)
     
     try:
-        result = await run_source_parsing(db, bot)
+        result = await run_source_parsing(
+            db,
+            bot,
+            trigger="scheduled",
+            operator_id=0,
+            run_id=run_id,
+        )
 
         should_update_guard = result.total_events > 0 or not result.errors
         if should_update_guard:
@@ -439,7 +455,7 @@ async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None
                 bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
             except Exception:
                 bot_username = None
-            report = format_parsing_report(result, bot_username=bot_username)
+            report = await format_parsing_report(result, bot_username=bot_username, db=db)
             try:
                 await bot.send_message(
                     int(admin_chat_id),
@@ -477,9 +493,38 @@ async def source_parsing_scheduler_if_changed(
             guard_state = _load_source_parsing_guard()
             if guard_state.get("signatures") == signatures:
                 logger.info("source_parsing_guard: no changes, skipping parse")
+                ops_run_id = await start_ops_run(
+                    db,
+                    kind="parse",
+                    trigger="scheduled",
+                    operator_id=0,
+                    details={
+                        "run_id": run_id,
+                        "reason": "no_changes",
+                    },
+                )
+                await finish_ops_run(
+                    db,
+                    run_id=ops_run_id,
+                    status="skipped",
+                    metrics={
+                        "total_events": 0,
+                        "sources_processed": 0,
+                    },
+                    details={
+                        "run_id": run_id,
+                        "reason": "no_changes",
+                    },
+                )
                 return
 
-        result = await run_source_parsing(db, bot)
+        result = await run_source_parsing(
+            db,
+            bot,
+            trigger="scheduled",
+            operator_id=0,
+            run_id=run_id,
+        )
         should_update_guard = result.total_events > 0 or not result.errors
         if should_update_guard and signatures:
             await _update_source_parsing_guard(signatures)
@@ -494,7 +539,7 @@ async def source_parsing_scheduler_if_changed(
                 bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
             except Exception:
                 bot_username = None
-            report = format_parsing_report(result, bot_username=bot_username)
+            report = await format_parsing_report(result, bot_username=bot_username, db=db)
             try:
                 await bot.send_message(
                     int(admin_chat_id),

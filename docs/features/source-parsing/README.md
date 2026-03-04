@@ -15,6 +15,8 @@
 
 - `Event.search_digest` (в UI иногда называют “короткое описание”) используется как краткий дайджест.
 - `Event.description` — **полное** описание события, которое публикуется на странице события в Telegraph.
+- Ежедневные анонсы (daily posts) должны показывать именно `Event.search_digest` как one‑liner, а не полный `Event.description`.
+- В ежедневных анонсах заголовок события должен вести на Telegraph страницу события (а не на Telegram/VK пост-источник).
 - Для каждого источника создаются записи `event_source` и “факты” в `event_source_fact`, чтобы было видно вклад каждого источника в мердж.
 
 ### Каноничность сайта (/parse) при конфликтах
@@ -34,16 +36,21 @@
 
 Это снижает лишнюю нагрузку на LLM и делает отчёт `/parse` честным для E2E-проверок.
 
+### Очередь обновления month/weekend страниц
+
+- Для созданных/обновлённых событий `/parse` использует общий `schedule_event_update_tasks` (как и VK/TG), где `month_pages`/`weekend_pages` ставятся как debounce-задачи с `next_run_at = now + 15 минут`.
+- В финальном safeguard `_process_parsing_files` гарантирует постановку задач по затронутым месяцам и выходным, и тоже ставит их отложенно (`+15 минут`), чтобы не было немедленной пересборки Telegraph-страниц после массового прогона.
+
 ### Расписание автозапуска
 
 - `ENABLE_SOURCE_PARSING=1` — включить ежедневный запуск.
-- `SOURCE_PARSING_TIME_LOCAL=02:15` — локальное время запуска (HH:MM).
+- `SOURCE_PARSING_TIME_LOCAL=04:30` — локальное время запуска (HH:MM).
 - `SOURCE_PARSING_TZ=Europe/Kaliningrad` — таймзона для локального времени.
 - `ENABLE_SOURCE_PARSING_DAY=1` — включить дневной запуск.
 - `SOURCE_PARSING_DAY_TIME_LOCAL=14:15` — локальное время дневного запуска (HH:MM).
 - `SOURCE_PARSING_DAY_TZ=Europe/Kaliningrad` — таймзона дневного запуска.
 
-Если значения не заданы, используется 02:15 по Europe/Kaliningrad. Дневной запуск пропускает Kaggle, если страницы источников не изменились с последнего успешного прогона.
+Если значения не заданы, используется 04:30 по Europe/Kaliningrad. Дневной запуск пропускает Kaggle, если страницы источников не изменились с последнего успешного прогона.
 
 ## Документация по источникам
 
@@ -54,6 +61,7 @@
 - Филармония: `docs/features/source-parsing/sources/philharmonia/README.md`
 - Qtickets: `docs/features/source-parsing/sources/qtickets/README.md`
 - Universal Festival Parser: `docs/features/source-parsing/sources/festival-parser/README.md`
+- Каноника по фестивальным сериям/выпускам и очереди: `docs/features/festivals/README.md`
 
 ## Артефакты
 

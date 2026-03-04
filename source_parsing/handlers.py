@@ -10,7 +10,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
 from urllib.parse import urlparse, urljoin
@@ -19,6 +19,7 @@ from aiogram import Bot
 from sqlalchemy import select
 
 from db import Database
+from ops_run import finish_ops_run, start_ops_run
 from source_parsing.kaggle_runner import run_kaggle_kernel
 from source_parsing.parser import (
     TheatreEvent,
@@ -29,7 +30,7 @@ from source_parsing.parser import (
     find_linked_events,
     limit_photos_for_source,
 )
-from poster_media import PosterMedia, process_media
+from poster_media import PosterMedia, is_supabase_storage_url, process_media
 from kaggle_registry import list_jobs, remove_job
 from video_announce.kaggle_client import KaggleClient
 from models import Event, EventSource
@@ -735,36 +736,43 @@ async def update_linked_events(
         location_name: Location name for finding linked events
         title: Title for fuzzy matching
     """
-    from models import Event
-    
+    # NOTE: location_name/title are kept for backward compatibility with callers.
+    # The canonical recompute uses the stored Event fields to avoid drift.
     try:
-        linked_ids = await find_linked_events(db, location_name, title, event_id)
-        
-        if not linked_ids:
-            return
-        
-        async with db.get_session() as session:
-            # Update this event with linked IDs
-            event = await session.get(Event, event_id)
-            if event:
-                event.linked_event_ids = linked_ids
-            
-            # Update linked events to include this one
-            for linked_id in linked_ids:
-                linked_event = await session.get(Event, linked_id)
-                if linked_event:
-                    existing_links = set(linked_event.linked_event_ids or [])
-                    existing_links.add(event_id)
-                    existing_links.discard(linked_id)  # Don't link to self
-                    linked_event.linked_event_ids = list(existing_links)
-            
-            await session.commit()
-            
-        logger.info(
-            "source_parsing: linked events event_id=%d linked_count=%d",
-            event_id,
-            len(linked_ids),
-        )
+        from linked_events import recompute_linked_event_ids
+
+        res = await recompute_linked_event_ids(db, int(event_id))
+        if res.changed_event_ids:
+            logger.info(
+                "source_parsing: linked events recomputed event_id=%d group=%d changed=%d capped=%s",
+                event_id,
+                len(res.group_event_ids or []),
+                len(res.changed_event_ids or []),
+                str(bool(getattr(res, "capped", False))).lower(),
+            )
+            # Refresh linked occurrences in Telegraph so the public "Другие даты" infoblock line
+            # stays consistent across the whole group.
+            refresh_ids = [
+                int(x)
+                for x in (res.changed_event_ids or [])
+                if int(x) and int(x) != int(event_id)
+            ]
+            if refresh_ids:
+                import sys
+
+                main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+                if main_mod and hasattr(main_mod, "enqueue_job") and hasattr(main_mod, "JobTask"):
+                    try:
+                        enqueue_job = getattr(main_mod, "enqueue_job")
+                        job_task = getattr(getattr(main_mod, "JobTask"), "telegraph_build")
+                        for rid in refresh_ids[:80]:
+                            await enqueue_job(db, int(rid), job_task, depends_on=None)
+                    except Exception:
+                        logger.warning(
+                            "source_parsing: failed to enqueue linked telegraph refresh event_id=%d",
+                            event_id,
+                            exc_info=True,
+                        )
     except Exception as e:
         logger.warning(
             "source_parsing: linking failed event_id=%d error=%s",
@@ -951,7 +959,15 @@ async def add_new_event_via_queue(
 
             posters: list[PosterCandidate] = [
                 PosterCandidate(
-                    catbox_url=item.catbox_url,
+                    catbox_url=None
+                    if is_supabase_storage_url(item.catbox_url)
+                    else item.catbox_url,
+                    supabase_url=item.supabase_url
+                    or (
+                        item.catbox_url
+                        if is_supabase_storage_url(item.catbox_url)
+                        else None
+                    ),
                     sha256=item.digest,
                     phash=None,
                     ocr_text=item.ocr_text,
@@ -960,7 +976,13 @@ async def add_new_event_via_queue(
                 for item in (poster_media or [])
             ]
             if not posters and photos:
-                posters = [PosterCandidate(catbox_url=url) for url in photos]
+                posters = [
+                    PosterCandidate(
+                        catbox_url=(url if not is_supabase_storage_url(url) else None),
+                        supabase_url=(url if is_supabase_storage_url(url) else None),
+                    )
+                    for url in photos
+                ]
 
             fallback_key = "|".join(
                 [
@@ -1153,7 +1175,12 @@ def _format_kaggle_status_message(
     return "\n".join(lines)
 
 
-def format_parsing_report(result: SourceParsingResult, *, bot_username: str | None = None) -> str:
+async def format_parsing_report(
+    result: SourceParsingResult,
+    *,
+    bot_username: str | None = None,
+    db: Database | None = None,
+) -> str:
     """Format parsing result as a human-readable report.
     
     Args:
@@ -1257,6 +1284,109 @@ def format_parsing_report(result: SourceParsingResult, *, bot_username: str | No
 
     added_items = list(result.added_events or [])
     updated_items = list(result.updated_events or [])
+    ctx = None
+    if db and (added_items or updated_items):
+        try:
+            from source_parsing.smart_update_report import build_smart_update_report_context
+
+            all_items = added_items + updated_items
+            eids = [int(getattr(i, "event_id", 0) or 0) for i in all_items]
+            urls = [str(getattr(i, "source_url", "") or "").strip() for i in all_items]
+            ctx = await build_smart_update_report_context(db, event_ids=eids, source_urls=urls)
+        except Exception:
+            ctx = None
+    tz = getattr(ctx, "tz", None)
+    sources_by_eid = getattr(ctx, "sources_by_event_id", None) or {}
+    video_counts = getattr(ctx, "video_count_by_event_id", None) or {}
+    ticket_queue_by_eid = getattr(ctx, "ticket_queue_by_event_id", None) or {}
+    fest_queue_by_src = getattr(ctx, "festival_queue_by_source_url", None) or {}
+
+    def _ics_line_md(url: str | None, *, has_time: bool) -> str:
+        value = (url or "").strip()
+        if value:
+            return f"  ICS: [ics]({value})"
+        return "  ICS: ⏳" if has_time else "  ICS: —"
+
+    def _sources_lines_md(eid: int) -> list[str]:
+        rows = list(sources_by_eid.get(int(eid)) or [])
+        if not rows or not tz:
+            return []
+        from source_parsing.smart_update_report import format_dt_compact
+
+        out: list[str] = ["  Источники:"]
+        limit = 24
+        shown = rows[:limit]
+        for imported_at, url in shown:
+            stamp = format_dt_compact(imported_at, tz)
+            out.append(f"  {stamp} {escape_md(str(url))}")
+        if len(rows) > limit:
+            out.append(f"  … ещё {len(rows) - limit}")
+        return out
+
+    def _queue_lines_md(eid: int, source_url: str | None) -> list[str]:
+        out: list[str] = []
+        src = (source_url or "").strip()
+        if src:
+            fest = fest_queue_by_src.get(src)
+            if fest:
+                name = (
+                    (getattr(fest, "festival_name", None) or "")
+                    or (getattr(fest, "festival_full", None) or "")
+                ).strip()
+                ctx2 = (getattr(fest, "festival_context", None) or "").strip()
+                status = (getattr(fest, "status", None) or "").strip()
+                fid = getattr(fest, "id", None)
+                tail = name or ctx2
+                extra = f" {escape_md(tail)}" if tail else ""
+                id_part = f" (id={int(fid)})" if isinstance(fid, int) and fid > 0 else ""
+                st_part = f" {escape_md(status)}" if status else ""
+                out.append(f"  🎪 festival_queue:{st_part}{extra}{id_part}".strip())
+
+        tickets = list(ticket_queue_by_eid.get(int(eid)) or [])
+        if tickets:
+            first = tickets[0]
+            url = str(getattr(first, "url", "") or "").strip()
+            label = str(getattr(first, "site_kind", "") or "tickets").strip() or "tickets"
+            extra = f" +{len(tickets)}" if len(tickets) > 1 else ""
+            if url:
+                out.append(f"  🎟 ticket_site_queue:{extra} [{escape_md(label)}]({url})")
+            else:
+                out.append(f"  🎟 ticket_site_queue:{extra}".strip())
+        return out
+
+    def _format_facts_photos_videos_md(item: object) -> str:
+        stats = getattr(item, "fact_stats", None) or {}
+        try:
+            photos = int(getattr(item, "photo_count", None) or 0)
+        except Exception:
+            photos = 0
+        added_posters_raw = getattr(item, "added_posters", None)
+        try:
+            added_posters = int(added_posters_raw) if added_posters_raw is not None else None
+        except Exception:
+            added_posters = None
+        if added_posters is None:
+            photos_label = f"Иллюстрации: {'⚠️0' if photos == 0 else photos}"
+        else:
+            photos_label = f"Иллюстрации: +{added_posters}, всего {'⚠️0' if photos == 0 else photos}"
+        try:
+            eid2 = int(getattr(item, "event_id", 0) or 0)
+        except Exception:
+            eid2 = 0
+        try:
+            videos_total = int(video_counts.get(int(eid2), 0) or 0)
+        except Exception:
+            videos_total = 0
+        videos_label = f" | Видео: {videos_total}" if videos_total > 0 else ""
+        stats = getattr(item, "fact_stats", None) or {}
+        if stats:
+            added = int(stats.get("added") or 0)
+            dup = int(stats.get("duplicate") or 0)
+            conf = int(stats.get("conflict") or 0)
+            note = int(stats.get("note") or 0)
+            return f"  Факты: ✅{added} ↩️{dup} ⚠️{conf} ℹ️{note} | {photos_label}{videos_label}"
+        return f"  Факты: — | {photos_label}{videos_label}"
+
     if added_items or updated_items:
         lines.append("")
         lines.append("**Smart Update (детали событий):**")
@@ -1269,11 +1399,15 @@ def format_parsing_report(result: SourceParsingResult, *, bot_username: str | No
                     meta.append(str(item.date))
                 if item.time:
                     meta.append(str(item.time))
-                lines.append(f"• {title} (id={item.event_id})" + (f" — {' '.join(meta)}" if meta else ""))
+                if item.telegraph_url:
+                    lines.append(
+                        f"• [{title}]({item.telegraph_url}) (id={item.event_id})"
+                        + (f" — {' '.join(meta)}" if meta else "")
+                    )
+                else:
+                    lines.append(f"• {title} (id={item.event_id})" + (f" — {' '.join(meta)}" if meta else ""))
                 if getattr(item, "source_url", None):
                     lines.append(f"  Источник: {escape_md(str(item.source_url))}")
-                if item.telegraph_url:
-                    lines.append(f"  Telegraph: {item.telegraph_url}")
                 if item.log_cmd:
                     link = _log_deeplink(int(item.event_id))
                     if link:
@@ -1281,11 +1415,15 @@ def format_parsing_report(result: SourceParsingResult, *, bot_username: str | No
                         lines.append(f"  Лог: [{cmd}]({link})")
                     else:
                         lines.append(f"  Лог: {escape_md(item.log_cmd)}")
-                if item.ics_url:
-                    lines.append(f"  ICS: {item.ics_url}")
-                else:
-                    lines.append("  ICS: ⏳" if (item.time or "").strip() else "  ICS: —")
-                lines.append(_format_facts_and_photos(item))
+                try:
+                    eid_i = int(getattr(item, "event_id", 0) or 0)
+                except Exception:
+                    eid_i = 0
+                if eid_i:
+                    lines.extend(_sources_lines_md(eid_i))
+                lines.append(_ics_line_md(item.ics_url, has_time=bool((item.time or "").strip())))
+                lines.append(_format_facts_photos_videos_md(item))
+                lines.extend(_queue_lines_md(eid_i, getattr(item, "source_url", None)))
             if len(added_items) > 12:
                 lines.append(f"... ещё {len(added_items) - 12}")
         if updated_items:
@@ -1297,11 +1435,15 @@ def format_parsing_report(result: SourceParsingResult, *, bot_username: str | No
                     meta.append(str(item.date))
                 if item.time:
                     meta.append(str(item.time))
-                lines.append(f"• {title} (id={item.event_id})" + (f" — {' '.join(meta)}" if meta else ""))
+                if item.telegraph_url:
+                    lines.append(
+                        f"• [{title}]({item.telegraph_url}) (id={item.event_id})"
+                        + (f" — {' '.join(meta)}" if meta else "")
+                    )
+                else:
+                    lines.append(f"• {title} (id={item.event_id})" + (f" — {' '.join(meta)}" if meta else ""))
                 if getattr(item, "source_url", None):
                     lines.append(f"  Источник: {escape_md(str(item.source_url))}")
-                if item.telegraph_url:
-                    lines.append(f"  Telegraph: {item.telegraph_url}")
                 if item.log_cmd:
                     link = _log_deeplink(int(item.event_id))
                     if link:
@@ -1309,11 +1451,15 @@ def format_parsing_report(result: SourceParsingResult, *, bot_username: str | No
                         lines.append(f"  Лог: [{cmd}]({link})")
                     else:
                         lines.append(f"  Лог: {escape_md(item.log_cmd)}")
-                if item.ics_url:
-                    lines.append(f"  ICS: {item.ics_url}")
-                else:
-                    lines.append("  ICS: ⏳" if (item.time or "").strip() else "  ICS: —")
-                lines.append(_format_facts_and_photos(item))
+                try:
+                    eid_i = int(getattr(item, "event_id", 0) or 0)
+                except Exception:
+                    eid_i = 0
+                if eid_i:
+                    lines.extend(_sources_lines_md(eid_i))
+                lines.append(_ics_line_md(item.ics_url, has_time=bool((item.time or "").strip())))
+                lines.append(_format_facts_photos_videos_md(item))
+                lines.extend(_queue_lines_md(eid_i, getattr(item, "source_url", None)))
             if len(updated_items) > 12:
                 lines.append(f"... ещё {len(updated_items) - 12}")
             
@@ -1466,7 +1612,21 @@ async def _process_parsing_files(
             else:
                 enqueue_job = main_mod.enqueue_job
                 mark_pages_dirty = main_mod.mark_pages_dirty
+                weekend_start_for_date = getattr(main_mod, "weekend_start_for_date", None)
+                deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+                def _coerce_date(value: object) -> date | None:
+                    if isinstance(value, date):
+                        return value
+                    try:
+                        raw = str(value or "").strip()
+                        return date.fromisoformat(raw) if raw else None
+                    except Exception:
+                        return None
+
                 month_event_ids: dict[str, int] = {}
+                weekend_event_ids: dict[str, int] = {}
+                weekend_starts: set[str] = set()
                 async with db.get_session() as session:
                     for month in months:
                         res = await session.execute(
@@ -1478,6 +1638,41 @@ async def _process_parsing_files(
                         event_id = res.scalar_one_or_none()
                         if event_id:
                             month_event_ids[month] = event_id
+                    for events in events_by_source.values():
+                        for parsed_event in events:
+                            day = _coerce_date(getattr(parsed_event, "parsed_date", None))
+                            if not day:
+                                continue
+                            weekend_start: date | None = None
+                            if callable(weekend_start_for_date):
+                                try:
+                                    weekend_start = weekend_start_for_date(day)
+                                except Exception:
+                                    weekend_start = None
+                            elif day.weekday() >= 5:
+                                weekend_start = day - timedelta(days=day.weekday() - 5)
+                            if weekend_start:
+                                weekend_starts.add(weekend_start.isoformat())
+
+                    for weekend_start in sorted(weekend_starts):
+                        sunday = _coerce_date(weekend_start)
+                        sunday_iso = (
+                            (sunday + timedelta(days=1)).isoformat() if sunday else None
+                        )
+                        event_id = None
+                        if sunday_iso:
+                            sat_res = await session.execute(
+                                select(Event.id)
+                                .where(
+                                    Event.date.like(f"{weekend_start}%")
+                                    | Event.date.like(f"{sunday_iso}%")
+                                )
+                                .order_by(Event.id.desc())
+                                .limit(1)
+                            )
+                            event_id = sat_res.scalar_one_or_none()
+                        if event_id:
+                            weekend_event_ids[weekend_start] = event_id
 
                 for month in months:
                     event_id = month_event_ids.get(month)
@@ -1488,8 +1683,21 @@ async def _process_parsing_files(
                         event_id,
                         JobTask.month_pages,
                         coalesce_key=f"month_pages:{month}",
+                        next_run_at=deferred_time,
                     )
                     await mark_pages_dirty(db, month)
+                for weekend_start in sorted(weekend_starts):
+                    event_id = weekend_event_ids.get(weekend_start)
+                    if not event_id:
+                        continue
+                    await enqueue_job(
+                        db,
+                        event_id,
+                        JobTask.weekend_pages,
+                        coalesce_key=f"weekend_pages:{weekend_start}",
+                        next_run_at=deferred_time,
+                    )
+                    await mark_pages_dirty(db, f"weekend:{weekend_start}")
 
     if bot and chat_id and progress_message_id:
         try:
@@ -1521,6 +1729,9 @@ async def run_source_parsing(
     only_sources: Sequence[str] | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    trigger: str = "manual",
+    operator_id: int | None = None,
+    run_id: str | None = None,
 ) -> SourceParsingResult:
     """Run full source parsing pipeline.
     
@@ -1536,7 +1747,22 @@ async def run_source_parsing(
     result = SourceParsingResult(chat_id=chat_id)
     kaggle_status_message_id: int | None = None
     kaggle_kernel_ref = ""
-    run_id = uuid.uuid4().hex[:8]
+    parse_run_id = run_id or uuid.uuid4().hex[:8]
+    ops_run_id = await start_ops_run(
+        db,
+        kind="parse",
+        trigger=trigger,
+        chat_id=chat_id,
+        operator_id=operator_id,
+        details={
+            "run_id": run_id,
+            "only_sources": list(only_sources or []),
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    )
+    ops_status = "success"
+    ops_error: str | None = None
     log_handler: logging.Handler | None = None
 
     class _SourceParsingFilter(logging.Filter):
@@ -1556,7 +1782,7 @@ async def run_source_parsing(
         log_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         logger.warning("source_parsing: failed to init debug dir %s: %s", log_dir, e)
-    log_path = log_dir / f"source_parsing_{run_id}.log"
+    log_path = log_dir / f"source_parsing_{parse_run_id}.log"
     try:
         log_handler = logging.FileHandler(log_path, encoding="utf-8")
         log_handler.setLevel(logging.INFO)
@@ -1718,10 +1944,45 @@ async def run_source_parsing(
         )
         
         return result
+    except Exception as exc:
+        ops_status = "error"
+        ops_error = str(exc)
+        raise
     finally:
         if log_handler:
             logging.getLogger().removeHandler(log_handler)
             log_handler.close()
+        source_details = {
+            source: {
+                "processed": int(stats.total_received),
+                "new_events": int(stats.new_added),
+                "updated_events": int(stats.ticket_updated + stats.already_exists),
+                "failed": int(stats.failed),
+                "skipped": int(stats.skipped),
+            }
+            for source, stats in (result.stats_by_source or {}).items()
+        }
+        await finish_ops_run(
+            db,
+            run_id=ops_run_id,
+            status=ops_status,
+            metrics={
+                "total_events": int(result.total_events or 0),
+                "sources_processed": int(len(result.stats_by_source or {})),
+                "events_created": int(len(result.added_events or [])),
+                "events_updated": int(len(result.updated_events or [])),
+                "errors_count": int(len(result.errors or [])),
+                "kernel_duration": round(float(result.kernel_duration or 0.0), 3),
+                "processing_duration": round(float(result.processing_duration or 0.0), 3),
+            },
+            details={
+                "run_id": run_id,
+                "log_file_path": result.log_file_path,
+                "sources": source_details,
+                "errors": list(result.errors or [])[:40],
+                "fatal_error": ops_error,
+            },
+        )
 
 
 _source_parsing_recovery_active: set[str] = set()
@@ -1821,7 +2082,7 @@ async def resume_source_parsing_jobs(
                     bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
                 except Exception:
                     bot_username = None
-                report = format_parsing_report(result, bot_username=bot_username)
+                report = await format_parsing_report(result, bot_username=bot_username, db=db)
                 await bot.send_message(
                     notify_chat_id,
                     f"✅ parse recovery: kernel {kernel_ref} обработан\n\n{report}",

@@ -1,7 +1,10 @@
+import pytest
+
 from source_parsing.handlers import AddedEventInfo, SourceParsingResult, format_parsing_report
 
 
-def test_parse_report_includes_source_and_fact_stats_in_smart_update_block():
+@pytest.mark.asyncio
+async def test_parse_report_includes_source_and_fact_stats_in_smart_update_block():
     result = SourceParsingResult(
         total_events=1,
         processing_duration=1.2,
@@ -21,9 +24,10 @@ def test_parse_report_includes_source_and_fact_stats_in_smart_update_block():
         ],
     )
 
-    text = format_parsing_report(result, bot_username="eventsbotTestBot")
+    text = await format_parsing_report(result, bot_username="eventsbotTestBot")
     assert "Smart Update (детали событий)" in text
     assert "Источник:" in text
     assert "dramteatr39" in text
     assert "Факты: ✅3 ↩️2 ⚠️1 ℹ️4" in text
     assert "start=log_1" in text
+    assert "https://telegra.ph/Figaro-02-10" in text

@@ -32,7 +32,7 @@ async def test_vk_intake_marks_recap_title_as_low_confidence(monkeypatch) -> Non
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     publish_dt = datetime(2026, 2, 14, 18, 0, tzinfo=main.LOCAL_TZ)
     drafts, _ = await vk_intake.build_event_drafts_from_vk(text, publish_ts=publish_dt)
@@ -59,7 +59,7 @@ async def test_vk_intake_allows_title_when_repeated_near_future_date(monkeypatch
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     publish_dt = datetime(2026, 2, 14, 18, 0, tzinfo=main.LOCAL_TZ)
     drafts, _ = await vk_intake.build_event_drafts_from_vk(text, publish_ts=publish_dt)
 

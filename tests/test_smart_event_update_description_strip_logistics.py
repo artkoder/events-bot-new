@@ -41,6 +41,8 @@ def test_strip_infoblock_logistics_removes_obvious_duplicates():
     # Still keeps narrative content.
     assert "лучших комиков" in out
     assert "старше 18" in out
+    # And should preserve sentence-ending punctuation (Telegraph readability).
+    assert "." in out or "!" in out or "?" in out
 
 
 def test_strip_infoblock_logistics_drops_dangling_price_clause():

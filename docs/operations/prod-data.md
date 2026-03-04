@@ -180,7 +180,7 @@ python main.py
 # Создайте файл test_llm_local.py
 import asyncio
 from db import Database
-from main import parse_event_via_4o
+from main import parse_event_via_llm
 
 async def test_llm():
     db = Database("./db_prod_snapshot.sqlite")
@@ -191,7 +191,7 @@ async def test_llm():
         # ... ваш код ...
         
         # Протестируйте LLM
-        result = await parse_event_via_4o(text, source_channel="test")
+        result = await parse_event_via_llm(text, source_channel="test")
         print(result)
 
 asyncio.run(test_llm())

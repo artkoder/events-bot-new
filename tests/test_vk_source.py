@@ -307,7 +307,7 @@ async def test_add_events_from_text_preserves_links(tmp_path: Path, monkeypatch)
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(main, "create_source_page", fake_create)
 
     html = "<a href='http://reg'>Регистрация</a>"

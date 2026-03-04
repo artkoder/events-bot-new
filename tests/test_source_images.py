@@ -113,14 +113,7 @@ async def test_build_source_page_content_ics_with_cover():
 
 
 @pytest.mark.asyncio
-async def test_build_source_page_content_prefers_telegraph_hosted_cover(monkeypatch):
-    async def fake_upload(url):
-        assert url == "http://cat/1.jpg"
-        return "https://telegra.ph/file/cover.jpg"
-
-    monkeypatch.setattr(main, "TELEGRAPH_IMAGE_UPLOAD", True)
-    monkeypatch.setattr(main, "upload_telegraph_image_from_url", fake_upload)
-
+async def test_build_source_page_content_prefers_non_webp_cover_when_available():
     html, _, uploaded = await main.build_source_page_content(
         "T",
         "text",
@@ -129,12 +122,11 @@ async def test_build_source_page_content_prefers_telegraph_hosted_cover(monkeypa
         None,
         None,
         None,
-        catbox_urls=["http://cat/1.jpg", "http://cat/2.jpg"],
+        catbox_urls=["http://cat/1.webp", "http://cat/2.jpg"],
     )
     assert uploaded == 2
-    assert html.startswith('<figure><img src="https://telegra.ph/file/cover.jpg"/></figure>')
-    assert '<img src="http://cat/2.jpg"/>' in html
-    assert '<figure><img src="http://cat/1.jpg"/></figure>' not in html
+    assert html.startswith('<figure><img src="http://cat/2.jpg"/></figure>')
+    assert '<img src="http://cat/1.webp"/>' in html
 
 
 @pytest.mark.asyncio
@@ -615,6 +607,19 @@ async def test_build_source_page_content_editor_blocks():
         '<p>Второй с <a href="https://example.com">https://example.com</a></p>'
         in html
     )
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_heading_keeps_paragraph_breaks_but_not_heading_gap():
+    html, _, _ = await main.build_source_page_content(
+        "Заголовок",
+        "Исходный текст",
+        None,
+        "### Анонс\n\nПервый абзац.\n\nВторой абзац.",
+        display_link=False,
+    )
+    assert "<h3>Анонс</h3><p>Первый абзац.</p>" in html
+    assert "<p>Первый абзац.</p><p>&#8203;</p><p>Второй абзац.</p>" in html
 
 
 @pytest.mark.asyncio

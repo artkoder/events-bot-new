@@ -211,6 +211,95 @@ async def test_sync_festivals_index_page_sorted(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upcoming_festivals_sorts_by_next_upcoming_event(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                Festival(
+                    name="LongFest",
+                    start_date="2025-01-01",
+                    end_date="2026-12-31",
+                    telegraph_path="long",
+                ),
+                Festival(
+                    name="SoonFest",
+                    start_date="2026-03-01",
+                    end_date="2026-03-01",
+                    telegraph_path="soon",
+                ),
+                Event(
+                    title="LongFest summer",
+                    description="desc",
+                    source_text="src",
+                    date="2026-06-01",
+                    time="12:00",
+                    location_name="Loc",
+                    festival="LongFest",
+                ),
+                Event(
+                    title="SoonFest event",
+                    description="desc",
+                    source_text="src",
+                    date="2026-03-01",
+                    time="12:00",
+                    location_name="Loc",
+                    festival="SoonFest",
+                ),
+            ]
+        )
+        await session.commit()
+
+    items = await main.upcoming_festivals(db, today=date(2026, 2, 25))
+    names = [fest.name for _start, _end, fest in items]
+    assert names.index("SoonFest") < names.index("LongFest")
+
+
+@pytest.mark.asyncio
+async def test_resolve_festival_card_images_prefers_non_index_cover(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await main.set_setting_value(db, "festivals_index_cover", "https://example.com/index-cover.png")
+    async with db.get_session() as session:
+        fest = Festival(
+            name="Fest",
+            telegraph_path="fest",
+            photo_url="https://example.com/index-cover.png",
+            photo_urls=["https://files.catbox.moe/fest.jpg"],
+        )
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    async def fake_mirror(url: str | None) -> str | None:
+        if "files.catbox.moe/fest.jpg" in str(url or ""):
+            return "https://example.com/fest-mirrored.jpg"
+        return None
+
+    monkeypatch.setattr(main, "_mirror_festival_image_to_supabase", fake_mirror)
+    items = [
+        (
+            date(2026, 3, 1),
+            date(2026, 3, 1),
+            Festival(
+                id=fid,
+                name="Fest",
+                telegraph_path="fest",
+                photo_url="https://example.com/index-cover.png",
+                photo_urls=["https://files.catbox.moe/fest.jpg"],
+            ),
+        )
+    ]
+    out = await main._resolve_festival_card_images(db, items)
+    assert out[0][2].photo_url == "https://example.com/fest-mirrored.jpg"
+    async with db.get_session() as session:
+        db_fest = await session.get(Festival, fid)
+    assert db_fest is not None
+    assert db_fest.photo_url == "https://example.com/fest-mirrored.jpg"
+
+
+@pytest.mark.asyncio
 async def test_persist_event_updates_festival_range(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -369,6 +458,78 @@ def test_build_festival_card_html_preserves_link():
     )
     assert html.index("<figure>") < html.index("<h3>")
     assert main.sanitize_telegraph_html(html) == html
+
+
+def test_build_festival_card_html_skips_catbox_image():
+    fest = Festival(
+        name="Fest",
+        telegraph_path="fest",
+        photo_url="https://files.catbox.moe/test.jpg",
+    )
+    nodes, used_img, _ = main.build_festival_card_nodes(
+        fest, None, None, with_image=True, add_spacer=False
+    )
+    html = nodes_to_html(nodes)
+    assert used_img is False
+    assert "<figure>" not in html
+    assert "files.catbox.moe" not in html
+
+
+def test_preview_friendly_filter_excludes_telegraph_file_urls():
+    assert main._is_telegram_preview_friendly_image_url(
+        "https://telegra.ph/file/cover.jpg"
+    ) is False
+    assert main._is_telegram_preview_friendly_image_url(
+        "https://graph.org/file/cover.jpg"
+    ) is False
+    assert main._is_telegram_preview_friendly_image_url(
+        "https://lnvfarbbofsnkedbfhlt.supabase.co/storage/v1/object/public/events-ics/covers/f.png"
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_festivals_index_cover_replaces_unsafe_existing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await main.set_setting_value(db, "festivals_index_cover", "https://files.catbox.moe/cover.jpg")
+
+    async def fake_supabase(*args, **kwargs):
+        return "https://example.com/generated-cover.png"
+
+    async def fake_telegraph(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "_build_festivals_index_cover_image_bytes", lambda: b"img")
+    monkeypatch.setattr(main, "_upload_bytes_to_supabase_public_image", fake_supabase)
+    monkeypatch.setattr(main, "_upload_bytes_to_telegraph_public_image", fake_telegraph)
+
+    items = [(date.today(), date.today(), Festival(name="Fest", photo_url="https://files.catbox.moe/f.jpg"))]
+    url = await main._ensure_festivals_index_cover_url(db, items)
+    assert url == "https://example.com/generated-cover.png"
+    assert await main.get_setting_value(db, "festivals_index_cover") == url
+
+
+@pytest.mark.asyncio
+async def test_ensure_festivals_index_cover_uses_env_fallback(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await main.set_setting_value(db, "festivals_index_cover", "https://files.catbox.moe/cover.jpg")
+
+    async def fake_supabase(*args, **kwargs):
+        return None
+
+    async def fake_telegraph(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "_build_festivals_index_cover_image_bytes", lambda: b"img")
+    monkeypatch.setattr(main, "_upload_bytes_to_supabase_public_image", fake_supabase)
+    monkeypatch.setattr(main, "_upload_bytes_to_telegraph_public_image", fake_telegraph)
+    monkeypatch.setenv("FESTIVALS_INDEX_FALLBACK_COVER_URL", "https://example.com/fallback.png")
+
+    items = [(date.today(), date.today(), Festival(name="Fest", photo_url="https://files.catbox.moe/f.jpg"))]
+    url = await main._ensure_festivals_index_cover_url(db, items)
+    assert url == "https://example.com/fallback.png"
+    assert await main.get_setting_value(db, "festivals_index_cover") == url
 
 
 @pytest.mark.asyncio

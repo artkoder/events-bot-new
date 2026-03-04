@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import tempfile
 from contextlib import asynccontextmanager
 
@@ -18,8 +19,24 @@ async def _add_column(conn, table: str, col_def: str) -> None:
     try:
         await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
     except Exception as e:
-        if "duplicate column name" not in str(e).lower():
-            raise
+        msg = str(e).lower()
+        if "duplicate column name" in msg:
+            return
+        # SQLite restriction: ALTER TABLE ... ADD COLUMN only supports constant defaults.
+        # Some prod snapshots may have older schema, and migrations here may attempt to add
+        # columns like "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP", which would crash
+        # startup with "Cannot add a column with non-constant default".
+        if "non-constant default" in msg:
+            sanitized = re.sub(
+                r"\s+default\s+\(?current_timestamp\)?\b",
+                "",
+                col_def,
+                flags=re.IGNORECASE,
+            ).strip()
+            if sanitized and sanitized != col_def:
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN {sanitized}")
+                return
+        raise
 
 
 class Database:
@@ -59,7 +76,7 @@ class Database:
     def _sqlite_timeout_sec(cls) -> float:
         # sqlite3 "timeout" is busy_timeout (seconds). Keep reasonably high
         # to avoid flaky "database is locked" under concurrent async workers.
-        return max(0.1, min(cls._read_float_env("DB_TIMEOUT_SEC", 15.0), 120.0))
+        return max(0.1, min(cls._read_float_env("DB_TIMEOUT_SEC", 30.0), 120.0))
 
     @classmethod
     def _sqlite_busy_timeout_ms(cls) -> int:
@@ -87,6 +104,44 @@ class Database:
         await conn.execute("PRAGMA cache_size=-40000")
         await conn.execute(f"PRAGMA busy_timeout={self._sqlite_busy_timeout_ms()}")
         await conn.execute("PRAGMA mmap_size=134217728")
+
+    def _create_orm_engine(self):
+        from sqlalchemy import event
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{self.path}",
+            future=True,
+            poolclass=NullPool,
+            connect_args={"timeout": self._sqlite_timeout_sec()},
+        )
+
+        journal_mode = self._sqlite_journal_mode()
+        busy_timeout_ms = self._sqlite_busy_timeout_ms()
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+            cursor = None
+            try:
+                cursor = dbapi_connection.cursor()
+                cursor.execute(f"PRAGMA journal_mode={journal_mode}")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA temp_store=MEMORY")
+                cursor.execute("PRAGMA cache_size=-40000")
+                cursor.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+                cursor.execute("PRAGMA mmap_size=134217728")
+            except Exception:
+                logging.debug("Failed to apply sqlite PRAGMAs on ORM connection", exc_info=True)
+            finally:
+                try:
+                    if cursor is not None:
+                        cursor.close()
+                except Exception:
+                    pass
+
+        return engine
 
     async def close(self) -> None:
         if self._sessionmaker is not None:
@@ -131,7 +186,7 @@ class Database:
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.execute("PRAGMA temp_store=MEMORY")
             await conn.execute("PRAGMA cache_size=-40000")
-            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute(f"PRAGMA busy_timeout={self._sqlite_busy_timeout_ms()}")
             await conn.execute("PRAGMA mmap_size=134217728")
             dbg(f"pragmas journal_mode={journal_mode}")
 
@@ -277,6 +332,24 @@ class Database:
 
             await conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS supabase_delete_queue(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bucket TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_attempt_at TIMESTAMP,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    UNIQUE(bucket, path)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_supabase_delete_queue_created_at ON supabase_delete_queue(created_at)"
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS event(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
@@ -284,6 +357,7 @@ class Database:
                     festival TEXT,
                     date TEXT NOT NULL,
                     time TEXT NOT NULL,
+                    time_is_default BOOLEAN NOT NULL DEFAULT 0,
                     location_name TEXT NOT NULL,
                     location_address TEXT,
                     city TEXT,
@@ -293,6 +367,7 @@ class Database:
                     event_type TEXT,
                     emoji TEXT,
                     end_date TEXT,
+                    end_date_is_inferred BOOLEAN NOT NULL DEFAULT 0,
                     is_free BOOLEAN DEFAULT 0,
                     pushkin_card BOOLEAN DEFAULT 0,
                     silent BOOLEAN DEFAULT 0,
@@ -351,11 +426,14 @@ class Database:
             await _add_column(
                 conn, "event", "lifecycle_status TEXT NOT NULL DEFAULT 'active'"
             )
+            await _add_column(conn, "event", "short_description TEXT")
             await _add_column(conn, "event", "search_digest TEXT")
             await _add_column(conn, "event", "ticket_status TEXT")
             await _add_column(conn, "event", "ticket_trust_level TEXT")
             await _add_column(conn, "event", "linked_event_ids TEXT")
             await _add_column(conn, "event", "preview_3d_url TEXT")
+            await _add_column(conn, "event", "time_is_default BOOLEAN NOT NULL DEFAULT 0")
+            await _add_column(conn, "event", "end_date_is_inferred BOOLEAN NOT NULL DEFAULT 0")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
             )
@@ -391,6 +469,30 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_eventposter_phash ON eventposter(phash)"
+            )
+
+            dbg("event_media_asset")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_media_asset(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'video',
+                    supabase_url TEXT,
+                    supabase_path TEXT,
+                    sha256 TEXT,
+                    size_bytes INTEGER,
+                    mime_type TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_media_asset_event ON event_media_asset(event_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_media_asset_kind ON event_media_asset(kind)"
             )
 
             dbg("event_source")
@@ -450,16 +552,86 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS ix_event_source_fact_source ON event_source_fact(source_id)"
             )
 
+            # Backfill `event_source` for legacy events created before Smart Update started
+            # recording sources (idempotent). This improves Smart Update idempotency and reduces
+            # duplicate event creation when the same post is reprocessed.
+            skip_event_source_backfill = (
+                (os.getenv("DB_INIT_SKIP_EVENT_SOURCE_BACKFILL") or "").strip().lower()
+                in {"1", "true", "yes"}
+            )
+            if not skip_event_source_backfill:
+                dbg("seed event_source backfill")
+                try:
+                    await conn.execute(
+                        """
+                        INSERT OR IGNORE INTO event_source(
+                            event_id,
+                            source_type,
+                            source_url,
+                            source_chat_id,
+                            source_message_id
+                        )
+                        SELECT
+                            e.id,
+                            CASE
+                                WHEN e.source_post_url LIKE '%t.me/%' THEN 'telegram'
+                                WHEN e.source_post_url LIKE '%vk.com/%' THEN 'vk'
+                                ELSE 'legacy'
+                            END,
+                            e.source_post_url,
+                            e.source_chat_id,
+                            e.source_message_id
+                        FROM event e
+                        WHERE e.source_post_url IS NOT NULL AND TRIM(e.source_post_url) != ''
+                        """
+                    )
+                    await conn.execute(
+                        """
+                        INSERT OR IGNORE INTO event_source(
+                            event_id,
+                            source_type,
+                            source_url,
+                            source_chat_id,
+                            source_message_id
+                        )
+                        SELECT
+                            e.id,
+                            'vk',
+                            e.source_vk_post_url,
+                            e.source_chat_id,
+                            e.source_message_id
+                        FROM event e
+                        WHERE e.source_vk_post_url IS NOT NULL AND TRIM(e.source_vk_post_url) != ''
+                        """
+                    )
+                except Exception:
+                    logging.warning(
+                        "db.init: event_source backfill failed (non-fatal)",
+                        exc_info=True,
+                    )
+
             dbg("telegram_source")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS telegram_source(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
+                    title TEXT,
                     enabled BOOLEAN NOT NULL DEFAULT 1,
                     default_location TEXT,
                     default_ticket_link TEXT,
                     trust_level TEXT,
+                    filters_json TEXT,
+                    festival_source BOOLEAN DEFAULT 0,
+                    festival_series TEXT,
+                    about TEXT,
+                    about_links_json JSON,
+                    meta_hash TEXT,
+                    meta_fetched_at TIMESTAMP,
+                    suggested_festival_series TEXT,
+                    suggested_website_url TEXT,
+                    suggestion_confidence REAL,
+                    suggestion_rationale TEXT,
                     last_scanned_message_id INTEGER,
                     last_scan_at TIMESTAMP
                 )
@@ -468,6 +640,18 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_telegram_source_enabled ON telegram_source(enabled)"
             )
+            await _add_column(conn, "telegram_source", "festival_source BOOLEAN DEFAULT 0")
+            await _add_column(conn, "telegram_source", "festival_series TEXT")
+            await _add_column(conn, "telegram_source", "filters_json TEXT")
+            await _add_column(conn, "telegram_source", "title TEXT")
+            await _add_column(conn, "telegram_source", "about TEXT")
+            await _add_column(conn, "telegram_source", "about_links_json JSON")
+            await _add_column(conn, "telegram_source", "meta_hash TEXT")
+            await _add_column(conn, "telegram_source", "meta_fetched_at TIMESTAMP")
+            await _add_column(conn, "telegram_source", "suggested_festival_series TEXT")
+            await _add_column(conn, "telegram_source", "suggested_website_url TEXT")
+            await _add_column(conn, "telegram_source", "suggestion_confidence REAL")
+            await _add_column(conn, "telegram_source", "suggestion_rationale TEXT")
 
             dbg("telegram_scanned_message")
             await conn.execute(
@@ -507,6 +691,112 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_tg_force_source ON telegram_source_force_message(source_id)"
+            )
+
+            dbg("telegram_post_metric")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_post_metric(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    age_day INTEGER NOT NULL,
+                    source_url TEXT,
+                    message_ts INTEGER,
+                    collected_ts INTEGER NOT NULL,
+                    views INTEGER,
+                    likes INTEGER,
+                    reactions_json JSON,
+                    UNIQUE(source_id, message_id, age_day),
+                    FOREIGN KEY(source_id) REFERENCES telegram_source(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_tg_metric_source_age ON telegram_post_metric(source_id, age_day)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_tg_metric_source_message ON telegram_post_metric(source_id, message_id)"
+            )
+            await _add_column(conn, "telegram_post_metric", "reactions_json JSON")
+
+            # Canonical Telegram sources (safe seed).
+            skip_tg_seed = (os.getenv("DB_INIT_SKIP_TG_SOURCES_SEED") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            if not skip_tg_seed:
+                try:
+                    from telegram_sources_seed import seed_telegram_sources
+
+                    await seed_telegram_sources(conn)
+                except Exception:
+                    logging.exception("telegram_source seed failed (non-fatal)")
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ops_run(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    trigger TEXT NOT NULL DEFAULT 'manual',
+                    chat_id INTEGER,
+                    operator_id INTEGER,
+                    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    metrics_json JSON NOT NULL DEFAULT '{}',
+                    details_json JSON NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            await _add_column(conn, "ops_run", "trigger TEXT NOT NULL DEFAULT 'manual'")
+            await _add_column(conn, "ops_run", "chat_id INTEGER")
+            await _add_column(conn, "ops_run", "operator_id INTEGER")
+            await _add_column(conn, "ops_run", "finished_at TIMESTAMP")
+            await _add_column(conn, "ops_run", "status TEXT NOT NULL DEFAULT 'running'")
+            await _add_column(conn, "ops_run", "metrics_json JSON NOT NULL DEFAULT '{}'")
+            await _add_column(conn, "ops_run", "details_json JSON NOT NULL DEFAULT '{}'")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_ops_run_kind_started_at ON ops_run(kind, started_at)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_ops_run_status_started_at ON ops_run(status, started_at)"
+            )
+
+            # Telegram web preview (Instant View) probe results for Telegraph pages.
+            # Used by the Telegraph cache sanitizer to track pages missing `cached_page`/photo
+            # (often leads to “black screen” in Telegram clients).
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegraph_preview_probe(
+                    url TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    ref_id INTEGER,
+                    ref_key TEXT,
+                    last_checked_at TIMESTAMP,
+                    last_ok INTEGER NOT NULL DEFAULT 0,
+                    last_has_cached_page INTEGER NOT NULL DEFAULT 0,
+                    last_has_photo INTEGER NOT NULL DEFAULT 0,
+                    last_title TEXT,
+                    last_site_name TEXT,
+                    last_error TEXT,
+                    total_checks INTEGER NOT NULL DEFAULT 0,
+                    total_ok INTEGER NOT NULL DEFAULT 0,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    last_ok_at TIMESTAMP,
+                    last_fail_at TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_telegraph_preview_probe_kind ON telegraph_preview_probe(kind)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_telegraph_preview_probe_last_checked ON telegraph_preview_probe(last_checked_at)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_telegraph_preview_probe_failures ON telegraph_preview_probe(consecutive_failures)"
             )
 
             # For local/offline regression runs we sometimes only need the core tables
@@ -610,7 +900,8 @@ class Database:
                     source_post_url TEXT,
                     source_chat_id INTEGER,
                     source_message_id INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
@@ -625,6 +916,7 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            await _add_column(conn, "festival", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
             # Parser-related fields (Universal Festival Parser)
             await _add_column(conn, "festival", "source_url TEXT")
             await _add_column(conn, "festival", "source_type TEXT")
@@ -654,6 +946,12 @@ class Database:
                 await conn.execute(
                     "UPDATE festival SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"
                 )
+            if "updated_at" not in festival_column_names:
+                await conn.execute("ALTER TABLE festival ADD COLUMN updated_at TIMESTAMP")
+            await conn.execute(
+                "UPDATE festival SET updated_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP) "
+                "WHERE updated_at IS NULL"
+            )
 
             await conn.execute(
                 """
@@ -667,6 +965,125 @@ class Database:
                     WHERE id = NEW.id;
                 END;
                 """
+            )
+            await conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS festival_set_updated_at
+                AFTER UPDATE ON festival
+                FOR EACH ROW
+                WHEN NEW.updated_at IS NULL OR NEW.updated_at = OLD.updated_at
+                BEGIN
+                    UPDATE festival
+                    SET updated_at = CURRENT_TIMESTAMP
+                    WHERE id = NEW.id;
+                END;
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS festival_queue(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    source_kind TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    source_text TEXT,
+                    source_chat_username TEXT,
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER,
+                    source_group_id INTEGER,
+                    source_post_id INTEGER,
+                    festival_context TEXT,
+                    festival_name TEXT,
+                    festival_full TEXT,
+                    festival_series TEXT,
+                    dedup_links_json JSON NOT NULL DEFAULT '[]',
+                    signals_json JSON NOT NULL DEFAULT '{}',
+                    result_json JSON NOT NULL DEFAULT '{}',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await _add_column(conn, "festival_queue", "status TEXT NOT NULL DEFAULT 'pending'")
+            await _add_column(conn, "festival_queue", "source_kind TEXT")
+            await _add_column(conn, "festival_queue", "source_url TEXT")
+            await _add_column(conn, "festival_queue", "source_text TEXT")
+            await _add_column(conn, "festival_queue", "source_chat_username TEXT")
+            await _add_column(conn, "festival_queue", "source_chat_id INTEGER")
+            await _add_column(conn, "festival_queue", "source_message_id INTEGER")
+            await _add_column(conn, "festival_queue", "source_group_id INTEGER")
+            await _add_column(conn, "festival_queue", "source_post_id INTEGER")
+            await _add_column(conn, "festival_queue", "festival_context TEXT")
+            await _add_column(conn, "festival_queue", "festival_name TEXT")
+            await _add_column(conn, "festival_queue", "festival_full TEXT")
+            await _add_column(conn, "festival_queue", "festival_series TEXT")
+            await _add_column(conn, "festival_queue", "dedup_links_json JSON NOT NULL DEFAULT '[]'")
+            await _add_column(conn, "festival_queue", "signals_json JSON NOT NULL DEFAULT '{}'")
+            await _add_column(conn, "festival_queue", "result_json JSON NOT NULL DEFAULT '{}'")
+            await _add_column(conn, "festival_queue", "attempts INTEGER NOT NULL DEFAULT 0")
+            await _add_column(conn, "festival_queue", "last_error TEXT")
+            await _add_column(conn, "festival_queue", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            await _add_column(conn, "festival_queue", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            await _add_column(conn, "festival_queue", "next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_festival_queue_status_next_run ON festival_queue(status, next_run_at)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_festival_queue_source_kind ON festival_queue(source_kind)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_festival_queue_source_url ON festival_queue(source_url)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ticket_site_queue(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    site_kind TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    event_id INTEGER,
+                    source_post_url TEXT,
+                    source_chat_username TEXT,
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    last_result_json JSON NOT NULL DEFAULT '{}',
+                    last_run_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await _add_column(conn, "ticket_site_queue", "status TEXT NOT NULL DEFAULT 'active'")
+            await _add_column(conn, "ticket_site_queue", "site_kind TEXT")
+            await _add_column(conn, "ticket_site_queue", "url TEXT")
+            await _add_column(conn, "ticket_site_queue", "event_id INTEGER")
+            await _add_column(conn, "ticket_site_queue", "source_post_url TEXT")
+            await _add_column(conn, "ticket_site_queue", "source_chat_username TEXT")
+            await _add_column(conn, "ticket_site_queue", "source_chat_id INTEGER")
+            await _add_column(conn, "ticket_site_queue", "source_message_id INTEGER")
+            await _add_column(conn, "ticket_site_queue", "attempts INTEGER NOT NULL DEFAULT 0")
+            await _add_column(conn, "ticket_site_queue", "last_error TEXT")
+            await _add_column(conn, "ticket_site_queue", "last_result_json JSON NOT NULL DEFAULT '{}'")
+            await _add_column(conn, "ticket_site_queue", "last_run_at TIMESTAMP")
+            await _add_column(conn, "ticket_site_queue", "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            await _add_column(conn, "ticket_site_queue", "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            await _add_column(conn, "ticket_site_queue", "next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_site_queue_status_next_run ON ticket_site_queue(status, next_run_at)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_site_queue_site_kind ON ticket_site_queue(site_kind)"
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_ticket_site_queue_url ON ticket_site_queue(url)"
             )
 
             await conn.execute(
@@ -702,6 +1119,8 @@ class Database:
                     location TEXT,
                     default_time TEXT,
                     default_ticket_link TEXT,
+                    festival_source BOOLEAN DEFAULT 0,
+                    festival_series TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -711,6 +1130,8 @@ class Database:
             )
 
             await _add_column(conn, "vk_source", "default_ticket_link TEXT")
+            await _add_column(conn, "vk_source", "festival_source BOOLEAN DEFAULT 0")
+            await _add_column(conn, "vk_source", "festival_series TEXT")
 
             # Seed well-known VK sources with stable defaults so live E2E / fresh prod
             # snapshots don't lose operator UX improvements after DB refresh.
@@ -752,6 +1173,29 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_vk_tmp_post_batch ON vk_tmp_post(batch, id)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_post_metric(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    post_id INTEGER NOT NULL,
+                    age_day INTEGER NOT NULL,
+                    source_url TEXT,
+                    post_ts INTEGER,
+                    collected_ts INTEGER NOT NULL,
+                    views INTEGER,
+                    likes INTEGER,
+                    UNIQUE(group_id, post_id, age_day)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_vk_metric_group_age ON vk_post_metric(group_id, age_day)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_vk_metric_group_post ON vk_post_metric(group_id, post_id)"
             )
 
             await conn.execute(
@@ -861,6 +1305,39 @@ class Database:
                     spent_tokens INTEGER NOT NULL DEFAULT 0
                 )
                 """
+            )
+
+            # Cache: resolve city/settlement -> (is in Kaliningrad oblast?) via Wikidata/LLM.
+            # Used to deterministically filter out-of-region events without repeatedly
+            # querying external sources for the same city names.
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS geo_city_region_cache(
+                    city_norm TEXT PRIMARY KEY,
+                    is_kaliningrad_oblast BOOLEAN,
+                    region_code TEXT,
+                    region_name TEXT,
+                    source TEXT,
+                    wikidata_qid TEXT,
+                    details JSON,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await _add_column(
+                conn,
+                "geo_city_region_cache",
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            )
+            await conn.execute(
+                "UPDATE geo_city_region_cache "
+                "SET created_at = COALESCE(created_at, updated_at, CURRENT_TIMESTAMP) "
+                "WHERE created_at IS NULL"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_geo_city_region_cache_created_at "
+                "ON geo_city_region_cache(created_at)"
             )
 
             await conn.execute(
@@ -1020,17 +1497,11 @@ class Database:
 
     @asynccontextmanager
     async def get_session(self):
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+        from sqlalchemy.ext.asyncio import AsyncSession
         from sqlalchemy.orm import sessionmaker
-        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
-            self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}",
-                future=True,
-                poolclass=NullPool,
-                connect_args={"timeout": self._sqlite_timeout_sec()},
-            )
+            self._orm_engine = self._create_orm_engine()
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
                 self._orm_engine, expire_on_commit=False, class_=AsyncSession
@@ -1040,16 +1511,8 @@ class Database:
 
     @property
     def engine(self):
-        from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy.pool import NullPool
-
         if self._orm_engine is None:
-            self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}",
-                future=True,
-                poolclass=NullPool,
-                connect_args={"timeout": self._sqlite_timeout_sec()},
-            )
+            self._orm_engine = self._create_orm_engine()
         return self._orm_engine
 
     async def exec_driver_sql(

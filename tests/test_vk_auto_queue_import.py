@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -27,6 +28,27 @@ class DummyBot:
         class Me:
             username = "eventsbotTestBot"
         return Me()
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_import_requests_strict_chronological_pick_next(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_pick_next(_db, _operator_id, _batch_id, **kwargs):
+        calls.append(dict(kwargs))
+        return None
+
+    monkeypatch.setattr(vk_auto_queue.vk_review, "pick_next", fake_pick_next)
+
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=1, operator_id=123)
+
+    assert calls, "expected at least one pick_next call"
+    assert calls[0].get("prefer_oldest") is True
+    assert calls[0].get("strict_chronological") is True
 
 
 @pytest.mark.asyncio
@@ -74,7 +96,13 @@ async def test_vk_auto_import_cancellation_notice_marks_existing_event_inactive(
     )
 
     async def fake_fetch(*_args, **_kwargs):
-        return cancel_text, [], datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc)
+        return (
+            cancel_text,
+            [],
+            datetime(2026, 2, 14, 12, 0, tzinfo=timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
 
     async def should_not_be_called(*_args, **_kwargs):
         raise AssertionError("build_event_drafts must not be called for cancellation notices")
@@ -118,7 +146,13 @@ async def test_vk_auto_import_marks_inbox_imported_and_links_multiple_events(tmp
         await conn.commit()
 
     async def fake_fetch(*_args, **_kwargs):
-        return "text", ["https://example.com/a.jpg"], datetime.now(timezone.utc)
+        return (
+            "text",
+            ["https://example.com/a.jpg"],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
 
     async def fake_build_event_drafts(*_args, **_kwargs):
         d1 = vk_intake.EventDraft(title="E1", date="2026-12-31", time="18:30", venue="Научная библиотека")
@@ -183,7 +217,13 @@ async def test_vk_auto_import_rejects_low_confidence_drafts(tmp_path, monkeypatc
         await conn.commit()
 
     async def fake_fetch(*_args, **_kwargs):
-        return "text", [], datetime.now(timezone.utc)
+        return (
+            "text",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
 
     async def fake_build_event_drafts(*_args, **_kwargs):
         d1 = vk_intake.EventDraft(
@@ -212,6 +252,102 @@ async def test_vk_auto_import_rejects_low_confidence_drafts(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_vk_auto_import_skips_festival_helper_for_regular_sources(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link, festival_source) VALUES(?,?,?,?,?,?,?)",
+            (1, "club1", "Regular Community", None, None, None, 0),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 100, 0, "stub", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*_args, **_kwargs):
+        return (
+            "text",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
+
+    seen: dict[str, object] = {}
+
+    async def fake_build_event_drafts(*_args, **kwargs):
+        seen["festival_names"] = kwargs.get("festival_names")
+        seen["festival_alias_pairs"] = kwargs.get("festival_alias_pairs")
+        seen["festival_hint"] = kwargs.get("festival_hint")
+        return [], None
+
+    async def fake_load_festival_hints(_db):
+        return ["Fest"], [("fest", 0)]
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch)
+    monkeypatch.setattr(vk_auto_queue, "_load_festival_hints", fake_load_festival_hints)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build_event_drafts)
+
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=1, operator_id=123)
+
+    assert seen["festival_names"] is None
+    assert seen["festival_alias_pairs"] is None
+    assert seen["festival_hint"] is False
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_import_keeps_festival_helper_for_festival_sources(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link, festival_source) VALUES(?,?,?,?,?,?,?)",
+            (1, "club1", "Festival Community", None, None, None, 1),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 100, 0, "stub", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*_args, **_kwargs):
+        return (
+            "text",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
+
+    seen: dict[str, object] = {}
+
+    async def fake_build_event_drafts(*_args, **kwargs):
+        seen["festival_names"] = kwargs.get("festival_names")
+        seen["festival_alias_pairs"] = kwargs.get("festival_alias_pairs")
+        seen["festival_hint"] = kwargs.get("festival_hint")
+        return [], None
+
+    async def fake_load_festival_hints(_db):
+        return ["Fest"], [("fest", 0)]
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch)
+    monkeypatch.setattr(vk_auto_queue, "_load_festival_hints", fake_load_festival_hints)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build_event_drafts)
+
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=1, operator_id=123)
+
+    assert seen["festival_names"] == ["Fest"]
+    assert seen["festival_alias_pairs"] == [("fest", 0)]
+    assert seen["festival_hint"] is True
+
+
+@pytest.mark.asyncio
 async def test_vk_auto_import_include_skipped_requeues_and_imports(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -228,7 +364,13 @@ async def test_vk_auto_import_include_skipped_requeues_and_imports(tmp_path, mon
         await conn.commit()
 
     async def fake_fetch(*_args, **_kwargs):
-        return "text", [], datetime.now(timezone.utc)
+        return (
+            "text",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
 
     async def fake_build_event_drafts(*_args, **_kwargs):
         d1 = vk_intake.EventDraft(title="E1", date="2026-12-31", time="18:30", venue="Научная библиотека")
@@ -263,12 +405,238 @@ async def test_vk_auto_import_include_skipped_requeues_and_imports(tmp_path, mon
         operator_id=123,
         include_skipped=True,
     )
-    assert report.skipped_requeued == 1
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_import_prefetch_does_not_reprocess_current_locked_row(tmp_path, monkeypatch):
+    """Regression: prefetch must not pick the currently locked row again.
+
+    Previously, run_vk_auto_import() picked the "next" post while the current post
+    was still locked. vk_review.pick_next() prefers resuming locked rows for the
+    operator, so it returned the same row and the importer processed it twice.
+    """
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    future1 = now + 100_000
+    future2 = now + 200_000
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "Научная библиотека", None, None),
+        )
+        await conn.executemany(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 1, 100, now, "Концерт 31.12.2099", "k", 1, future1, "pending"),
+                (2, 1, 200, now + 1, "Концерт 01.01.2100", "k", 1, future2, "pending"),
+            ],
+        )
+        await conn.commit()
+
+    async def fake_fetch(group_id, post_id, *_args, **_kwargs):
+        return (
+            f"text {group_id}_{post_id}",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
+
+    async def fake_build_event_drafts(*_args, **_kwargs):
+        return [vk_intake.EventDraft(title="E", date="2026-12-31", time="18:30", venue="Научная библиотека")], None
+
+    calls: list[str] = []
+
+    async def fake_persist(*_args, **kwargs):
+        calls.append(str(kwargs.get("source_post_url") or ""))
+        n = len(calls)
+        return vk_intake.PersistResult(
+            event_id=2000 + n,
+            telegraph_url="",
+            ics_supabase_url="",
+            ics_tg_url="",
+            event_date="2026-12-31",
+            event_end_date=None,
+            event_time="18:30",
+            event_type=None,
+            is_free=False,
+            smart_status="created",
+            smart_created=True,
+            smart_merged=False,
+        )
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build_event_drafts)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=2, operator_id=123)
+
+    assert calls == [
+        "https://vk.com/wall-1_100",
+        "https://vk.com/wall-1_200",
+    ]
 
     async with db.raw_conn() as conn:
         cur = await conn.execute("SELECT status FROM vk_inbox WHERE id=1")
         (status,) = await cur.fetchone()
         assert status == "imported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("inline_jobs_env", "expected_wait_for_telegraph"),
+    [
+        (None, False),
+        ("0", True),
+    ],
+)
+async def test_vk_auto_import_skips_redundant_telegraph_wait_when_inline_jobs_enabled(
+    tmp_path,
+    monkeypatch,
+    inline_jobs_env,
+    expected_wait_for_telegraph,
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "Научная библиотека", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 100, 0, "stub", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    if inline_jobs_env is None:
+        monkeypatch.delenv("VK_AUTO_IMPORT_INLINE_JOBS", raising=False)
+    else:
+        monkeypatch.setenv("VK_AUTO_IMPORT_INLINE_JOBS", inline_jobs_env)
+
+    async def fake_fetch(*_args, **_kwargs):
+        return (
+            "text",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
+
+    async def fake_build_event_drafts(*_args, **_kwargs):
+        return [vk_intake.EventDraft(title="E", date="2026-12-31", time="18:30", venue="Научная библиотека")], None
+
+    captured_waits: list[bool] = []
+
+    async def fake_persist(*_args, **kwargs):
+        captured_waits.append(bool(kwargs.get("wait_for_telegraph_url", True)))
+        return vk_intake.PersistResult(
+            event_id=1001,
+            telegraph_url="",
+            ics_supabase_url="",
+            ics_tg_url="",
+            event_date="2026-12-31",
+            event_end_date=None,
+            event_time="18:30",
+            event_type=None,
+            is_free=False,
+            smart_status="created",
+            smart_created=True,
+            smart_merged=False,
+        )
+
+    async def fake_run_jobs(*_args, **_kwargs):
+        return None
+
+    async def fake_report(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build_event_drafts)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+    monkeypatch.setattr(main, "run_event_update_jobs", fake_run_jobs)
+    monkeypatch.setattr(vk_auto_queue, "_send_unified_event_report", fake_report)
+
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=1, operator_id=123)
+
+    assert captured_waits == [expected_wait_for_telegraph]
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_import_logs_stage_timings_for_slow_rows_without_pipeline_timings(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "Научная библиотека", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 100, 0, "stub", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    monkeypatch.setenv("VK_AUTO_IMPORT_INLINE_JOBS", "0")
+    monkeypatch.setenv("VK_AUTO_IMPORT_SLOW_ROW_LOG_SEC", "0")
+    monkeypatch.delenv("PIPELINE_TIMINGS", raising=False)
+
+    async def fake_fetch(*_args, **_kwargs):
+        return (
+            "text",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
+
+    async def fake_build_event_drafts(*_args, **_kwargs):
+        return [vk_intake.EventDraft(title="E", date="2026-12-31", time="18:30", venue="Научная библиотека")], None
+
+    async def fake_persist(*_args, **_kwargs):
+        return vk_intake.PersistResult(
+            event_id=1001,
+            telegraph_url="",
+            ics_supabase_url="",
+            ics_tg_url="",
+            event_date="2026-12-31",
+            event_end_date=None,
+            event_time="18:30",
+            event_type=None,
+            is_free=False,
+            smart_status="created",
+            smart_created=True,
+            smart_merged=False,
+        )
+
+    async def fake_report(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build_event_drafts)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+    monkeypatch.setattr(vk_auto_queue, "_send_unified_event_report", fake_report)
+
+    caplog.set_level(logging.INFO)
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=1, operator_id=123)
+
+    assert any(
+        "timing vk_auto_import_row" in rec.message and "persist_total" in rec.message
+        for rec in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -306,7 +674,10 @@ async def test_vk_auto_report_is_unified_and_contains_fact_stats(tmp_path, monke
     _chat_id, text = bot.messages[-1]
     assert "Smart Update (детали событий)" in text
     assert "✅ Созданные события: 1" in text
-    assert "Telegraph:" in text
+    # Telegraph link is now embedded into the event title; the duplicated "Telegraph:" line
+    # should not be present when telegraph_url exists.
+    assert 'href="https://telegra.ph/Figaro-02-11"' in text
+    assert "Telegraph:" not in text
     assert "Факты: ✅5 ↩️3 ⚠️1 ℹ️2" in text
     assert "Иллюстрации:" in text
     assert "start=log_2417" in text
@@ -340,11 +711,16 @@ async def test_fetch_vk_post_text_and_photos_accepts_unwrapped_response(monkeypa
 
     monkeypatch.setattr(main, "vk_api", fake_vk_api)
 
-    text, photos, published_at = await vk_auto_queue.fetch_vk_post_text_and_photos(30777579, 14572)
+    text, photos, published_at, metrics, status = await vk_auto_queue.fetch_vk_post_text_and_photos(
+        30777579, 14572
+    )
 
     assert text == "Тестовый пост"
     assert photos == ["https://img.test/p1.jpg"]
     assert published_at is not None
+    assert metrics is None
+    assert status.ok is True
+    assert status.kind == "ok"
 
 
 @pytest.mark.asyncio
@@ -368,12 +744,85 @@ async def test_fetch_vk_post_text_and_photos_includes_repost_text(monkeypatch):
 
     monkeypatch.setattr(main, "vk_api", fake_vk_api)
 
-    text, photos, published_at = await vk_auto_queue.fetch_vk_post_text_and_photos(1, 1)
+    text, photos, published_at, metrics, status = await vk_auto_queue.fetch_vk_post_text_and_photos(1, 1)
 
     assert "Комментарий к репосту" in text
     assert "Основной текст события в репосте" in text
     assert photos == []
     assert published_at is not None
+    assert metrics is None
+    assert status.ok is True
+    assert status.kind == "ok"
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_queue_rejects_deleted_post_when_vk_fetch_not_found(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, status, locked_by, locked_at, review_batch)
+            VALUES(?, ?, ?, ?, ?, NULL, 1, 'locked', 777, CURRENT_TIMESTAMP, 'batch-x')
+            """,
+            (1, 29891284, 12930, 0, "cached text"),
+        )
+        await conn.commit()
+
+    async def fake_fetch_vk_post_text_and_photos(_group_id, _post_id, *, db, bot):  # noqa: ARG001
+        return (
+            "",
+            [],
+            None,
+            None,
+            vk_auto_queue.VkFetchStatus(False, "not_found", error_code=100, error="Post was deleted"),
+        )
+
+    async def should_not_be_called(*_args, **_kwargs):
+        raise AssertionError("build_event_drafts must not be called when VK post is not found")
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch_vk_post_text_and_photos)
+    monkeypatch.setattr(vk_auto_queue.vk_intake, "build_event_drafts", should_not_be_called)
+
+    report = vk_auto_queue.VkAutoImportReport(batch_id="batch-x")
+    post = SimpleNamespace(
+        id=1,
+        group_id=29891284,
+        post_id=12930,
+        date=0,
+        text="cached text",
+        event_ts_hint=None,
+    )
+
+    class DummyBot:
+        pass
+
+    await vk_auto_queue._process_vk_inbox_row(  # type: ignore[attr-defined]
+        db,
+        DummyBot(),
+        chat_id=1,
+        operator_id=1,
+        batch_id="batch-x",
+        post=post,
+        source_url="https://vk.com/wall-29891284_12930",
+        report=report,
+        festival_names=None,
+        festival_alias_pairs=None,
+        progress_message_id=None,
+        progress_current_no=1,
+        progress_total_txt="1",
+    )
+
+    assert report.inbox_rejected == 1
+    assert report.inbox_failed == 0
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE id=?", (1,))
+        row = await cur.fetchone()
+    assert row[0] == "rejected"
 
 
 def test_build_smart_update_posters_falls_back_to_vk_photo_url_when_catbox_missing():
@@ -423,6 +872,36 @@ def test_build_smart_update_posters_uses_source_photos_when_ocr_items_absent():
     assert [p.catbox_url for p in posters] == photos
 
 
+def test_build_smart_update_posters_routes_supabase_urls_into_supabase_field():
+    draft = vk_intake.EventDraft(
+        title="Тест",
+        date="2026-02-20",
+        time="19:00",
+        venue="Локация",
+    )
+    draft.poster_media = [
+        PosterMedia(
+            data=b"img",
+            name="poster.jpg",
+            catbox_url="https://project.supabase.co/storage/v1/object/public/events-media/p/dh16/ab/abc.webp",
+        )
+    ]
+
+    class _Poster:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    posters = vk_intake._build_smart_update_posters(
+        draft,
+        photos=None,
+        poster_cls=_Poster,
+    )
+
+    assert len(posters) == 1
+    assert posters[0].catbox_url is None
+    assert posters[0].supabase_url == draft.poster_media[0].catbox_url
+
+
 @pytest.mark.asyncio
 async def test_vk_build_event_drafts_does_not_fail_on_ocr_errors(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -456,7 +935,7 @@ async def test_vk_build_event_drafts_does_not_fail_on_ocr_errors(tmp_path, monke
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
     monkeypatch.setattr(vk_intake, "process_media", fake_process_media)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     drafts, _fest = await vk_intake.build_event_drafts(
         "Текст",

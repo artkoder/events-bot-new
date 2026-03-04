@@ -121,6 +121,16 @@ class FakeDB:
 async def test_optimize_month_chunks_preserves_exhibitions(tmp_path, monkeypatch):
     """If события влезают в лимит, выставки не должны пропадать при split."""
     month = "2025-07"  # smaller slice keeps test fast
+    # Make the month "current" for the renderer so exhibitions survive the "ongoing today" filter.
+    from datetime import datetime, timezone
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+            return base.astimezone(tz or timezone.utc)
+
+    monkeypatch.setattr(main, "datetime", _FixedDateTime, raising=False)
     monkeypatch.setattr(main, "ensure_event_telegraph_link", AsyncMock())
     events, exhibitions, fest_map = await _load_month_data(tmp_path, month)
 
@@ -145,6 +155,7 @@ async def test_optimize_month_chunks_preserves_exhibitions(tmp_path, monkeypatch
             fest_map,
             continuation_url,
             size_limit,
+            None,
             None,
             include_ics,
             include_details,
@@ -198,6 +209,16 @@ async def test_optimize_month_chunks_preserves_exhibitions(tmp_path, monkeypatch
 async def test_split_month_until_ok_updates_page_object(tmp_path, monkeypatch):
     """split_month_until_ok should mutate переданный MonthPage (path/url)."""
     month = "2025-07"  # smaller slice keeps test fast
+    # Keep time anchored in the tested month.
+    from datetime import datetime, timezone
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            base = datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+            return base.astimezone(tz or timezone.utc)
+
+    monkeypatch.setattr(main, "datetime", _FixedDateTime, raising=False)
     monkeypatch.setattr(main, "ensure_event_telegraph_link", AsyncMock())
     events, exhibitions, fest_map = await _load_month_data(tmp_path, month)
 
@@ -222,6 +243,7 @@ async def test_split_month_until_ok_updates_page_object(tmp_path, monkeypatch):
             fest_map,
             continuation_url,
             size_limit,
+            None,
             None,
             include_ics,
             include_details,

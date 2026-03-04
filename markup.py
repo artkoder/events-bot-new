@@ -2,14 +2,14 @@ import html, re, logging
 from typing import List
 from functools import lru_cache
 
-MD_BOLD   = re.compile(r'(?<!\w)(\*\*|__)(.+?)\1(?!\w)', re.S)
-MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)', re.S)
+MD_BOLD   = re.compile(r'(?<!\w)(\*\*|__)(.+?)\1(?!\w)')
+MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)')
 
 MD_LINK   = re.compile(r'\[([^\]]+?)\]\((https?://(?:\\\)|[^)])+?)\)')
 MD_HEADER = re.compile(r'^(#{1,6})\s+(.+)$', re.M)
 
 _BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
-_TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
+_TEXT_LINK_RE = re.compile(r'([^<>\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 _TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
 
@@ -40,34 +40,141 @@ def _unescape_md_url(url: str) -> str:
 def simple_md_to_html(text: str) -> str:
     """Конвертирует небольшой подмножество markdown → HTML для Telegraph."""
     text = html.escape(text)
-    text = MD_HEADER.sub(lambda m: f'<h{len(m[1])}>{m[2]}</h{len(m[1])}>', text)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
-    text = MD_BOLD.sub(r'<b>\2</b>', text)
-    text = MD_ITALIC.sub(r'<i>\2</i>', text)
+    text = MD_BOLD.sub(r"<b>\2</b>", text)
+    text = MD_ITALIC.sub(r"<i>\2</i>", text)
 
-    # Blockquotes: lines starting with "> " become <blockquote> blocks.
-    # Note: at this point the input is already HTML-escaped, so ">" becomes "&gt;".
-    lines = text.split("\n")
-    out: list[str] = []
-    quote_lines: list[str] = []
+    header_re = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
+    quote_re = re.compile(r"^\s*&gt;\s+(.+?)\s*$")
+    ul_re = re.compile(r"^\s*(?:•\s*|[-*]\s+)(.+?)\s*$")
+    ol_re = re.compile(r"^\s*(\d{1,3})[.)]\s+(.+?)\s*$")
+    indent_re = re.compile(r"^(?:\s{2,}|\t+)(\S.*)$")
 
-    def flush_quote() -> None:
-        nonlocal quote_lines
-        if not quote_lines:
-            return
-        out.append("<blockquote>" + "\n".join(quote_lines) + "</blockquote>")
-        quote_lines = []
+    def is_block_start(line: str) -> bool:
+        if not line.strip():
+            return False
+        return bool(
+            header_re.match(line)
+            or quote_re.match(line)
+            or ul_re.match(line)
+            or ol_re.match(line)
+        )
 
-    for raw in lines:
-        m = re.match(r"^\s*&gt;\s+(.+)$", raw)
-        if m:
-            quote_lines.append(m.group(1))
+    def split_inline_bullets(line: str) -> list[str]:
+        stripped = line.strip()
+        if not stripped.startswith("•"):
+            return [line]
+        if stripped.count("•") < 2:
+            return [line]
+        # Some upstream normalizers can collapse "• item\n• item" into one line:
+        # "•item •item". Split it back into list items.
+        parts = [p.strip() for p in stripped.split("•") if p.strip()]
+        if len(parts) < 2:
+            return [line]
+        return [f"• {p}" for p in parts]
+
+    raw_lines = text.split("\n")
+    lines: list[str] = []
+    for ln in raw_lines:
+        lines.extend(split_inline_bullets(ln))
+
+    blocks: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
             continue
-        flush_quote()
-        out.append(raw)
-    flush_quote()
 
-    return "\n".join(out).replace("\n", "<br>")
+        mh = header_re.match(line)
+        if mh:
+            level = len(mh.group(1))
+            content = mh.group(2).strip()
+            blocks.append(f"<h{level}>{content}</h{level}>")
+            i += 1
+            continue
+
+        mq = quote_re.match(line)
+        if mq:
+            quote_lines: list[str] = []
+            while i < len(lines):
+                mq2 = quote_re.match(lines[i])
+                if not mq2:
+                    break
+                quote_lines.append(mq2.group(1).strip())
+                i += 1
+            blocks.append("<blockquote>" + "<br>".join(quote_lines) + "</blockquote>")
+            continue
+
+        mol = ol_re.match(line)
+        mul = ul_re.match(line)
+        if mol or mul:
+            is_ordered = mol is not None
+            tag = "ol" if is_ordered else "ul"
+            items: list[str] = []
+
+            def parse_item(idx: int) -> tuple[str, int]:
+                src = lines[idx]
+                if is_ordered:
+                    m = ol_re.match(src)
+                    assert m is not None
+                    item = m.group(2).strip()
+                else:
+                    m = ul_re.match(src)
+                    assert m is not None
+                    item = m.group(1).strip()
+                idx += 1
+                # Continuation lines: indented lines belong to the previous list item.
+                while idx < len(lines):
+                    cont = lines[idx]
+                    if not cont.strip():
+                        break
+                    if is_block_start(cont):
+                        break
+                    mc = indent_re.match(cont)
+                    if not mc:
+                        break
+                    item += "<br>" + mc.group(1).strip()
+                    idx += 1
+                return item, idx
+
+            while i < len(lines):
+                if not lines[i].strip():
+                    break
+                if is_ordered:
+                    if not ol_re.match(lines[i]):
+                        break
+                else:
+                    if not ul_re.match(lines[i]):
+                        break
+                item, i = parse_item(i)
+                items.append(item)
+            blocks.append(
+                f"<{tag}>"
+                + "".join(f"<li>{it}</li>" for it in items if it)
+                + f"</{tag}>"
+            )
+            continue
+
+        # Paragraph: keep explicit line breaks inside a paragraph.
+        para_lines: list[str] = []
+        while i < len(lines):
+            ln = lines[i]
+            if not ln.strip():
+                break
+            if is_block_start(ln):
+                break
+            para_lines.append(ln.strip())
+            i += 1
+        if para_lines:
+            blocks.append("<p>" + "<br>".join(para_lines) + "</p>")
+            continue
+
+        # Fallback: emit line as-is (should be unreachable).
+        blocks.append(line)
+        i += 1
+
+    return "\n".join(blocks)
 
 
 
@@ -217,11 +324,13 @@ WEND_START = lambda key: Marker(f"<!--WEEKEND:{key} START-->")
 WEND_END = lambda key: Marker(f"<!--WEEKEND:{key} END-->")
 PERM_START: Marker = Marker("<!--PERMANENT_EXHIBITIONS START-->")
 PERM_END: Marker = Marker("<!--PERMANENT_EXHIBITIONS END-->")
-# Canonical festival navigation markers used across the project
-# ``FEST_NAV_*`` names are kept for backwards compatibility but map to the
-# new ``near-festivals`` markers required by the idempotent block logic.
-NEAR_FESTIVALS_START: Marker = Marker("<!-- near-festivals:start -->")
-NEAR_FESTIVALS_END: Marker = Marker("<!-- near-festivals:end -->")
+# Canonical festival navigation markers used across the project.
+#
+# Telegraph strips HTML comments and may render escaped comment-like strings as visible text.
+# To keep markers persistent *and* invisible, we use anchor tags with a zero-width character.
+# The href carries a stable marker key; the anchor text is U+200B (ZWSP), so it doesn't show.
+NEAR_FESTIVALS_START: Marker = Marker('<a href="#near-festivals:start">\u200b</a>')
+NEAR_FESTIVALS_END: Marker = Marker('<a href="#near-festivals:end">\u200b</a>')
 FEST_NAV_START: Marker = NEAR_FESTIVALS_START
 FEST_NAV_END: Marker = NEAR_FESTIVALS_END
 
@@ -275,6 +384,94 @@ def sanitize_telegram_html(html: str) -> str:
     cleaned = _ESCAPED_TG_TAG_RE.sub("", cleaned)
     return cleaned
 
+
+def balance_telegraph_html_tags(raw: str) -> str:
+    """Best-effort balancer for Telegraph-friendly HTML.
+
+    Our lightweight Markdown renderer is regex-based and can produce mis-nested inline tags
+    (e.g. `**bold _italic** text_` -> `<b>..<i>..</b>..</i>`), which breaks
+    `telegraph.utils.html_to_nodes`. This balancer is intentionally conservative and
+    handles only a small set of Telegraph-supported tags.
+    """
+    tag_re = re.compile(
+        r"<(/?)(h[1-6]|p|blockquote|ul|ol|li|b|i|a|pre|code|table|figure)\b([^>]*)>",
+        re.IGNORECASE,
+    )
+    block_tags = {
+        "p",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "blockquote",
+        "ul",
+        "ol",
+        "li",
+        "pre",
+        "table",
+        "figure",
+    }
+    inline_tags = {"b", "i", "a", "code"}
+    result: list[str] = []
+    pos = 0
+    stack: list[str] = []
+
+    def _flush_all() -> None:
+        while stack:
+            result.append(f"</{stack.pop()}>")
+
+    def _flush_inline() -> None:
+        while stack and stack[-1] in inline_tags:
+            result.append(f"</{stack.pop()}>")
+
+    # Allow a small set of nested block constructs that are valid HTML and supported by Telegraph.
+    # The balancer exists mostly to prevent *inline* tags from leaking across block boundaries;
+    # it must not break lists like `<ul><li>...</li></ul>`.
+    _ALLOWED_NESTED_BLOCKS: set[tuple[str, str]] = {
+        ("ul", "li"),
+        ("ol", "li"),
+        ("li", "ul"),
+        ("li", "ol"),
+    }
+
+    for match in tag_re.finditer(raw):
+        start, end = match.span()
+        result.append(raw[pos:start])
+        closing = match.group(1) == "/"
+        tag = match.group(2).lower()
+        tail = match.group(3) or ""
+        if not closing:
+            if tag in block_tags:
+                # Never allow inline tags to leak across block boundaries.
+                _flush_inline()
+                if stack and stack[-1] in block_tags:
+                    prev = stack[-1]
+                    # Do not auto-close valid nested block structures (notably lists).
+                    if (prev, tag) not in _ALLOWED_NESTED_BLOCKS:
+                        _flush_all()
+            stack.append(tag)
+            result.append(f"<{tag}{tail}>")
+        else:
+            if not stack:
+                pos = end
+                continue
+            if tag not in stack:
+                _flush_all()
+                pos = end
+                continue
+            while stack and stack[-1] != tag:
+                result.append(f"</{stack.pop()}>")
+            if stack and stack[-1] == tag:
+                stack.pop()
+                result.append(f"</{tag}>")
+        pos = end
+    result.append(raw[pos:])
+    _flush_all()
+    return "".join(result)
+
+
 @lru_cache(maxsize=8)
 def md_to_html(text: str) -> str:
     html_text = simple_md_to_html(text)
@@ -285,4 +482,5 @@ def md_to_html(text: str) -> str:
     # Telegraph API does not allow h1/h2 or Telegram-specific tags
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
     html_text = sanitize_telegram_html(html_text)
+    html_text = balance_telegraph_html_tags(html_text)
     return html_text

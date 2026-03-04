@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from calendar import monthrange
+import math
 import json
 import logging
 import os
 import time
 import re
+import textwrap
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -139,13 +142,33 @@ SMART_UPDATE_PRESERVE_LISTS_RULE = (
     "НЕ сворачивай его в одну общую фразу. Перенеси список полностью, сохрани порядок и нумерацию/маркеры. "
     "Названия песен/произведений/имён НЕ перефразируй: копируй дословно."
 )
+SMART_UPDATE_FACTS_PRESERVE_COMPACT_PROGRAM_LISTS_RULE = (
+    "Если в источнике есть короткий список программы/репертуара/треклиста/участников/фильмов (2–12 строк подряд), "
+    "верни каждый пункт отдельным фактом ДОСЛОВНО, сохрани порядок (можно занять на это большую часть лимита facts). "
+    "Пример: после строки `Программа:` идут 5 строк `«Название» — Автор` → верни эти 5 строк как отдельные facts. "
+    "Не сворачивай список в общую фразу и не пиши «и другие»."
+)
+SMART_UPDATE_OPTIONAL_HEADINGS_RULE = (
+    "Структурируй description: добавь 1–3 коротких подзаголовка в Markdown формате `### ...` "
+    "(например «Программа», «Условия участия», «Состав/участники», «Как добраться»). "
+    "Если текст содержит 2+ абзаца — хотя бы 1 подзаголовок обязателен. "
+    "Подзаголовки должны быть КОРОТКИМИ (до ~60 символов, без точек/полных предложений) и стоять отдельной строкой. "
+    "Не создавай пустых подзаголовков: после строки `### ...` должен идти хотя бы 1 непустой абзац/список/цитата "
+    "до следующего подзаголовка. Не ставь два `### ...` подряд без текста между ними. "
+    "Если хочешь сделать общий раздел и подпункты — используй вложенный уровень `#### ...` для подпунктов "
+    "или оставь только конкретные `### ...` без общего контейнера. "
+    "Не помещай целые абзацы в подзаголовки и не используй технические метки вроде `Facts:`/`Факты:`. "
+    "Не делай больше 4 подзаголовков."
+)
 SMART_UPDATE_VISITOR_CONDITIONS_RULE = (
     "Условия участия/посещения (длительность, возраст, максимальный размер группы, формат/что взять/как одеться, "
     "что входит/не входит в оплату, нужен ли отдельный входной билет) считаются фактами о событии и должны попадать "
-    "в описание и в facts/added_facts. "
+    "в описание (description). "
+    "В description описывай это обычным связным текстом (или под подходящим подзаголовком), а НЕ отдельным блоком «фактов». "
+    "Если отдельно формируется список facts (атомарных фактов) — включай туда 1–3 факта про условия участия/посещения. "
     "Для description: не вставляй ссылки/телефоны и не указывай точные цены — пиши нейтрально "
     "(например «оплачивается отдельно», «входной билет нужен дополнительно»). "
-    "Для facts/added_facts: точная сумма допускается только если она уточняет, что цена относится к части услуги "
+    "Для фактов: точная сумма допускается только если она уточняет, что цена относится к части услуги "
     "(например «стоимость экскурсии X; входной билет отдельно»); не более 1 такого факта."
 )
 
@@ -175,6 +198,31 @@ SMART_UPDATE_REWRITE_MAX_TOKENS = _env_int(
     # Default kept fairly high: we want a full description, not a short snippet.
     "SMART_UPDATE_REWRITE_MAX_TOKENS", 1400, lo=120, hi=6500
 )
+
+# Optional: allow light emoji usage in *full* public descriptions (Telegraph/body).
+# Must not affect `search_digest` (explicitly emoji-free by prompt).
+# Default: enabled (light). Can be disabled via ENV if it turns out noisy.
+SMART_UPDATE_DESCRIPTION_EMOJI_MODE = (os.getenv("SMART_UPDATE_DESCRIPTION_EMOJI_MODE", "light") or "").strip().lower()
+if SMART_UPDATE_DESCRIPTION_EMOJI_MODE in {"1", "true", "yes", "on", "light"}:
+    SMART_UPDATE_DESCRIPTION_EMOJI_MODE = "light"
+else:
+    SMART_UPDATE_DESCRIPTION_EMOJI_MODE = "off"
+SMART_UPDATE_DESCRIPTION_MAX_EMOJIS = _env_int(
+    "SMART_UPDATE_DESCRIPTION_MAX_EMOJIS",
+    3,
+    lo=0,
+    hi=8,
+)
+SMART_UPDATE_DESCRIPTION_EMOJI_ALLOWLIST = (os.getenv("SMART_UPDATE_DESCRIPTION_EMOJI_ALLOWLIST") or "").strip()
+
+# Fact-first mode: build public narrative from extracted facts (not from raw sources).
+# Enabled by default; can be disabled for rollback/experiments.
+SMART_UPDATE_FACT_FIRST = (os.getenv("SMART_UPDATE_FACT_FIRST", "1") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Serialize Smart Update calls within a single bot process to avoid LLM/provider contention
 # and to keep operator-visible logs deterministic.
@@ -222,8 +270,16 @@ class EventCandidate:
     title: str | None = None
     date: str | None = None
     time: str | None = None
+    # True when time comes from per-source default_time (a low-priority guess).
+    time_is_default: bool = False
     end_date: str | None = None
+    end_date_is_inferred: bool = False
     festival: str | None = None
+    festival_context: str | None = None
+    festival_full: str | None = None
+    festival_dedup_links: list[str] = field(default_factory=list)
+    festival_source: bool | None = None
+    festival_series: str | None = None
     location_name: str | None = None
     location_address: str | None = None
     city: str | None = None
@@ -245,6 +301,7 @@ class EventCandidate:
     creator_id: int | None = None
     trust_level: str | None = None
     metrics: dict[str, Any] | None = None
+    links_payload: Any | None = None
 
 
 @dataclass(slots=True)
@@ -258,6 +315,7 @@ class SmartUpdateResult:
     added_facts: list[str] = field(default_factory=list)
     skipped_conflicts: list[str] = field(default_factory=list)
     reason: str | None = None
+    queue_notes: list[str] = field(default_factory=list)
 
 
 MATCH_RESPONSE_FORMAT = {
@@ -313,8 +371,10 @@ CREATE_BUNDLE_RESPONSE_FORMAT = {
         "schema": {
             "type": "object",
             "properties": {
+                "title": {"type": ["string", "null"]},
                 "description": {"type": ["string", "null"]},
                 "search_digest": {"type": ["string", "null"]},
+                "short_description": {"type": ["string", "null"]},
                 "facts": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["description", "facts"],
@@ -324,6 +384,32 @@ CREATE_BUNDLE_RESPONSE_FORMAT = {
 }
 
 CREATE_BUNDLE_SCHEMA = CREATE_BUNDLE_RESPONSE_FORMAT["json_schema"]["schema"]
+
+MATCH_CREATE_BUNDLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "EventMatchOrCreateBundle",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["match", "create"]},
+                "match_event_id": {"type": ["integer", "null"]},
+                "confidence": {"type": "number"},
+                "reason_short": {"type": "string"},
+                "bundle": {
+                    "anyOf": [
+                        CREATE_BUNDLE_SCHEMA,
+                        {"type": "null"},
+                    ]
+                },
+            },
+            "required": ["action", "match_event_id", "confidence", "reason_short", "bundle"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+MATCH_CREATE_BUNDLE_SCHEMA = MATCH_CREATE_BUNDLE_RESPONSE_FORMAT["json_schema"]["schema"]
 
 
 def _norm_space(text: str) -> str:
@@ -351,6 +437,153 @@ def _strip_private_use(text: str | None) -> str | None:
     return cleaned or None
 
 
+def _fix_inline_bullet_lists(text: str | None) -> str | None:
+    """Convert jammed '•' bullets into a proper multiline Markdown list.
+
+    Gemma sometimes outputs list items on a single line like:
+      "-Пункт 1 •Пункт 2 •Пункт 3"
+    Telegraph renders this as a single paragraph. We only touch paragraphs that
+    clearly look like inline bullet sequences.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    paras = [p for p in re.split(r"\n{2,}", raw) if p.strip()]
+    out: list[str] = []
+    for para in paras:
+        p = para.strip()
+        if "\n" in p:
+            out.append(p)
+            continue
+        if "•" not in p:
+            out.append(p)
+            continue
+        if p.count("•") < 1:
+            out.append(p)
+            continue
+        if not p.lstrip().startswith(("-", "•")):
+            out.append(p)
+            continue
+        parts = [x.strip() for x in p.split("•") if x.strip()]
+        items: list[str] = []
+        for part in parts:
+            item = part.lstrip("-•").strip()
+            if not item:
+                continue
+            if item.startswith("-") and len(item) > 1 and not item[1].isspace():
+                item = f"- {item[1:].lstrip()}"
+            items.append(f"- {item}" if not item.startswith("- ") else item)
+        if len(items) >= 2:
+            out.append("\n".join(items).strip())
+        else:
+            out.append(p)
+    return "\n\n".join(out).strip() or None
+
+
+_BULLET_LINE_PREFIX_RE = re.compile(r"(?m)^[ \t]*[•·▪‣⁃]+[ \t]*")
+
+
+def _normalize_bullet_markers(text: str | None) -> str | None:
+    """Normalize non-ASCII bullet markers to Markdown list items.
+
+    Telegram sources often use middle-dot bullets (`·`) which models may not treat
+    as a list. Converting them to `- ` increases the chance of list preservation
+    in the rewritten Telegraph description.
+    """
+    raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw.strip():
+        return None
+    normalized = _BULLET_LINE_PREFIX_RE.sub("- ", raw)
+    return normalized if normalized.strip() else None
+
+
+def _extract_small_source_list_items(text: str | None, *, max_items: int = 8) -> list[str]:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw.strip():
+        return []
+    out: list[str] = []
+    for ln in raw.splitlines():
+        s = (ln or "").strip()
+        if not s:
+            continue
+        m = re.match(r"^(?:[-*•·]|\d+[.)])\s+(\S.*)$", s)
+        if not m:
+            continue
+        item = (m.group(1) or "").strip()
+        if not item:
+            continue
+        # Keep it safe: do not pull links/handles into description via this deterministic fallback.
+        if "http://" in item or "https://" in item or "@" in item:
+            continue
+        low = item.casefold()
+        if low.startswith(("билеты", "вход", "стоимость", "сбор гостей", "начало")):
+            continue
+        if "подписаться" in low or "зарегистрироваться" in low:
+            continue
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _append_missing_small_list(
+    *,
+    description: str | None,
+    source_text: str | None,
+    source_type: str | None,
+) -> str | None:
+    """Append a small bullet list from the source when the rewrite dropped it.
+
+    Conservative: only targets Telegram-style short lists (2–6 items) and avoids
+    links/contacts (they belong to the infoblock).
+    """
+    desc = (description or "").strip()
+    src = (source_text or "").strip()
+    if not desc or not src:
+        return desc or src or None
+    if str(source_type or "").strip().lower() not in {"telegram", "tg"}:
+        return desc
+    # If the output already contains a list, do not interfere.
+    if re.search(r"(?m)^\s*(?:[-*]|\d+[.)])\s+\S+", desc):
+        return desc
+
+    items = _extract_small_source_list_items(src, max_items=8)
+    if not (2 <= len(items) <= 6):
+        return desc
+
+    desc_cf = desc.casefold()
+    missing = [it for it in items if it.casefold() not in desc_cf]
+    if len(missing) < max(2, int(len(items) * 0.5)):
+        return desc
+
+    block = "### Что вас ждёт\n" + "\n".join(f"- {it}" for it in items)
+    return (desc + "\n\n" + block).strip()
+
+
+_HEADING_LINE_RE = re.compile(r"(?m)^#{1,6}\s+\S")
+
+
+def _ensure_minimal_description_headings(text: str | None) -> str | None:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if _HEADING_LINE_RE.search(raw):
+        return raw
+    blocks = [b.strip() for b in re.split(r"\n{2,}", raw) if b.strip()]
+    if len(blocks) < 2:
+        return raw
+    # Deterministic fallback: if the model returned 2+ paragraphs but no headings,
+    # inject a single neutral subheading to keep Telegraph pages readable.
+    heading = "### О событии"
+    first = blocks[0]
+    rest = "\n\n".join(blocks[1:]).strip()
+    if not rest:
+        return raw
+    if re.match(r"(?m)^\s*(?:[-*]|\d+[.)])\s+\S+", first) or first.lstrip().startswith(">"):
+        return f"{heading}\n\n{raw}".strip()
+    return f"{first}\n\n{heading}\n\n{rest}".strip()
+
+
 def _normalize_plaintext_paragraphs(text: str | None) -> str | None:
     """Normalize LLM output while preserving paragraph breaks.
 
@@ -374,6 +607,73 @@ def _normalize_plaintext_paragraphs(text: str | None) -> str | None:
     raw = re.sub(r"[ \t]+\n", "\n", raw)
     raw = re.sub(r"\n[ \t]+", "\n", raw)
     raw = raw.strip()
+    raw = _fix_inline_bullet_lists(raw) or raw
+
+    # Drop "orphan" headings: cases where the model outputs two headings in a row
+    # (or a trailing heading at the end) without any paragraph/list/quote under the first one.
+    # This is a pure formatting cleanup: we do not invent any missing text.
+    def _drop_orphan_headings(value: str) -> str:
+        def _strip_zw(s: str) -> str:
+            return _ZERO_WIDTH_RE.sub("", s or "")
+
+        blocks: list[str] = []
+        for b in re.split(r"\n{2,}", value.strip()):
+            if not b:
+                continue
+            if not _strip_zw(b).strip():
+                continue
+            blocks.append(b.strip())
+        if len(blocks) < 2:
+            return value.strip()
+        heading_re = re.compile(r"^\s*(#{1,6})\s+\S")
+
+        def _nonempty_lines(block: str) -> list[str]:
+            lines: list[str] = []
+            for ln in (block or "").splitlines():
+                if not _strip_zw(ln).strip():
+                    continue
+                lines.append(ln.strip())
+            return lines
+
+        def _heading_level(line: str) -> int | None:
+            m = heading_re.match(line)
+            if not m:
+                return None
+            return len(m.group(1))
+
+        def _is_heading_only(block: str) -> tuple[bool, int | None]:
+            lines = _nonempty_lines(block)
+            if len(lines) != 1:
+                return False, None
+            level = _heading_level(lines[0])
+            return (level is not None), level
+
+        def _starts_with_heading(block: str) -> int | None:
+            lines = _nonempty_lines(block)
+            if not lines:
+                return None
+            return _heading_level(lines[0])
+
+        out: list[str] = []
+        i = 0
+        while i < len(blocks):
+            cur = blocks[i]
+            is_heading, cur_level = _is_heading_only(cur)
+            nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+            if is_heading:
+                if nxt is None:
+                    i += 1
+                    continue
+                nxt_level = _starts_with_heading(nxt or "")
+                if nxt_level is not None and cur_level is not None and nxt_level <= cur_level:
+                    i += 1
+                    continue
+            out.append(cur)
+            i += 1
+        cleaned = "\n\n".join(out).strip()
+        return cleaned or value.strip()
+
+    raw = _drop_orphan_headings(raw)
 
     # NOTE: We intentionally avoid heuristic paragraph splitting here.
     # Paragraphing is part of LLM output quality. If the model returns a single
@@ -406,8 +706,8 @@ def _fix_broken_initial_paragraph_splits(text: str | None) -> str | None:
             # Join when we ended a paragraph on a single-letter initial and the next
             # paragraph starts with a surname-like token.
             if (
-                re.search(r"(?:^|\\s)[А-ЯЁA-Z]\\.$", cur)
-                and re.match(r"^[А-ЯЁ][а-яё]+\\b", nxt)
+                re.search(r"(?:^|\s)[А-ЯЁA-Z]\.$", cur)
+                and re.match(r"^[А-ЯЁ][а-яё]+\b", nxt)
                 and ("перевод" in cur_cf or "в переводе" in cur_cf)
             ):
                 cur = f"{cur} {nxt}"
@@ -423,10 +723,93 @@ def _fix_broken_initial_paragraph_splits(text: str | None) -> str | None:
 _NEURAL_CLICHE_RE = re.compile(
     r"(?i)\bобеща\w+\s+(?:стать|быть)\b|\bярк\w+\s+событ\w+\b|\bзаметн\w+\s+событ\w+\b|"
     r"\bкультурн\w+\s+жизн\w+\b|\bне\s+остав\w+\s+равнодуш\w+\b|\bнезабываем\w+\b|"
-    r"\bуникальн\w+\s+возможн\w+\b"
+    r"\bуникальн\w+\s+возможн\w+\b|\bэто\s+созда[её]т\b|\bсозда[её]т\s+атмосфер\w*\b|"
+    r"\bатмосфер\w+\s+(?:спонтанност|вовлеч[её]нност)\w*\b"
 )
 
 _LIST_ITEM_LINE_RE = re.compile(r"^\s*(?:\d{1,3}[.)]|[-*•])\s+\S")
+
+_DEFAULT_DESCRIPTION_EMOJI_ALLOWLIST = "🎭 🎨 🎵 🎬 🎤 📚 🖼️"
+
+
+def _description_emoji_prompt_rule() -> str:
+    """Prompt rule for optional emoji usage in full descriptions.
+
+    Keep it accessibility-friendly: emojis are optional, few, never replace words,
+    and should not be used as list markers.
+    """
+    if SMART_UPDATE_DESCRIPTION_EMOJI_MODE != "light":
+        return "Без эмодзи. "
+    max_emojis = int(SMART_UPDATE_DESCRIPTION_MAX_EMOJIS or 0)
+    if max_emojis <= 0:
+        return "Без эмодзи. "
+    allowlist = SMART_UPDATE_DESCRIPTION_EMOJI_ALLOWLIST or _DEFAULT_DESCRIPTION_EMOJI_ALLOWLIST
+    allowlist = re.sub(r"\s+", " ", allowlist).strip()
+    return (
+        f"Эмодзи допускаются умеренно: максимум {max_emojis} на весь текст description; "
+        "не ставь несколько эмодзи подряд и не используй их как маркеры списка. "
+        "Не заменяй слова эмодзи (эмодзи только как мягкий визуальный акцент). "
+        "Лучше всего ставить 0–1 эмодзи в конце подзаголовков `### ...` (не в начале строки). "
+        f"Используй только уместные эмодзи из списка: {allowlist}. "
+    )
+
+
+# Emoji limiting is a *display-level* safeguard; it should not change factual content.
+_EMOJI_BASE_CLASS = (
+    r"[\U0001F1E6-\U0001F1FF"  # flags
+    r"\U0001F300-\U0001F5FF"  # symbols & pictographs
+    r"\U0001F600-\U0001F64F"  # emoticons
+    r"\U0001F680-\U0001F6FF"  # transport & map
+    r"\U0001F700-\U0001F77F"  # alchemical symbols (rare but emoji-like)
+    r"\U0001F780-\U0001F7FF"  # geometric extended
+    r"\U0001F800-\U0001F8FF"  # arrows-C
+    r"\U0001F900-\U0001F9FF"  # supplemental symbols & pictographs
+    r"\U0001FA00-\U0001FAFF"  # symbols & pictographs extended-A
+    r"\u2600-\u26FF"          # misc symbols
+    r"\u2700-\u27BF"          # dingbats
+    r"]"
+)
+_EMOJI_SEQ_RE = re.compile(
+    rf"(?:{_EMOJI_BASE_CLASS})(?:[\uFE0E\uFE0F])?(?:[\U0001F3FB-\U0001F3FF])?"
+    rf"(?:\u200D(?:{_EMOJI_BASE_CLASS})(?:[\uFE0E\uFE0F])?(?:[\U0001F3FB-\U0001F3FF])?)*"
+)
+
+
+def _limit_emoji_sequences(text: str, *, max_keep: int) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if max_keep < 0:
+        max_keep = 0
+    matches = list(_EMOJI_SEQ_RE.finditer(raw))
+    if not matches:
+        return raw
+    if len(matches) <= max_keep:
+        return raw
+    out: list[str] = []
+    last = 0
+    kept = 0
+    for m in matches:
+        out.append(raw[last : m.start()])
+        if kept < max_keep:
+            out.append(m.group(0))
+            kept += 1
+        last = m.end()
+    out.append(raw[last:])
+    cleaned = "".join(out)
+    # Fix excessive spaces left after emoji removal; keep paragraph breaks intact.
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _limit_description_emojis(text: str | None) -> str | None:
+    if text is None:
+        return None
+    if SMART_UPDATE_DESCRIPTION_EMOJI_MODE != "light":
+        return text
+    max_keep = int(SMART_UPDATE_DESCRIPTION_MAX_EMOJIS or 0)
+    return _limit_emoji_sequences(text, max_keep=max_keep) or None
 
 
 def _looks_like_list_block(text: str) -> bool:
@@ -460,64 +843,179 @@ def _sanitize_description_output(
     *,
     source_text: str | None,
 ) -> str | None:
-    """Enforce "no hallucinated evaluations" invariants on LLM output.
+    """Best-effort *non-semantic* cleanup of LLM output for public Telegraph pages.
 
-    We keep the output LLM-authored, but remove a small set of high-risk patterns
-    that routinely appear as generic marketing clichés or unsupported claims.
+    Project rule: meaning-bearing operations on text should be done by LLM, not by
+    deterministic regex cutting. This function therefore limits itself to:
+    - trimming/normalizing whitespace
+    - removing standalone internal/technical headings that must not leak publicly
+
+    Anything more aggressive (cliche removal, logistics removal, etc.) must be
+    handled in prompts / LLM editor passes.
     """
     raw = (text or "").strip()
     if not raw:
         return None
 
-    source_cf = (source_text or "").casefold()
+    internal_heading_re = re.compile(
+        r"(?i)^\s*(?:#{1,6}\s*)?(?:"
+        r"facts\s*(?:/\s*)?added\s*facts|facts|added\s*facts|"
+        r"факты\s*(?:/\s*)?добавленные\s*факты|"
+        r"факты\s+о\s+событии|"
+        r"факты\s+для\s+лога\s+источник\w*|"
+        r"факты|добавленные\s*факты"
+        r")\s*:?\s*$"
+    )
+    # "Facts for source log" is strictly internal and must never leak publicly.
+    # If the LLM emits a whole paragraph that starts with such heading, drop it.
+    internal_log_prefix_re = re.compile(r"(?i)^\s*(?:факты\s+для\s+лога|facts\s+for\s+source)\b")
 
-    # Drop generic marketing clichés sentence-by-sentence.
     parts: list[str] = []
     for para in re.split(r"\n{2,}", raw):
         s = para.strip()
         if not s:
             continue
-        if _looks_like_structured_block(s):
-            # Do not mutate multi-line quotes: they are often exact phrases from the source.
-            if re.search(r"(?m)^\s*>", s):
-                parts.append(s)
-                continue
-            kept_lines: list[str] = []
-            for line in s.splitlines():
-                st = line.strip()
-                if not st:
-                    continue
-                if _NEURAL_CLICHE_RE.search(st):
-                    continue
-                # Do not claim "premiere" unless the word (or close form) exists in the source.
-                if re.search(r"(?i)\bпремьер\w+\b", st) and "премьер" not in source_cf:
-                    continue
-                kept_lines.append(st)
-            if kept_lines:
-                parts.append("\n".join(kept_lines))
+        if internal_heading_re.match(s):
             continue
-
-        kept_sentences: list[str] = []
-        normalized = re.sub(r"\s+", " ", s).strip()
-        # Crude sentence splitter: good enough for removing obvious boilerplate.
-        for sent in re.split(r"(?<=[.!?])\s+", normalized):
-            st = sent.strip()
-            if not st:
+        # If a paragraph starts with an internal heading (e.g. "Facts:"), strip only that
+        # heading line and keep the content (non-semantic cleanup of a display artifact).
+        lines = [ln.rstrip() for ln in s.splitlines()]
+        # Find first non-empty line.
+        first_idx = None
+        for i, ln in enumerate(lines):
+            if ln.strip():
+                first_idx = i
+                break
+        if first_idx is not None:
+            first = lines[first_idx].strip()
+            if internal_log_prefix_re.match(first):
+                # Entire block is internal (facts for /log), drop it.
                 continue
-            if _NEURAL_CLICHE_RE.search(st):
-                continue
-            # Do not claim "premiere" unless the word (or close form) exists in the source.
-            if re.search(r"(?i)\bпремьер\w+\b", st) and "премьер" not in source_cf:
-                continue
-            kept_sentences.append(st)
-        if kept_sentences:
-            parts.append(" ".join(kept_sentences))
+            if internal_heading_re.match(first):
+                # Drop only the heading line.
+                lines = lines[:first_idx] + lines[first_idx + 1 :]
+                s2 = "\n".join([ln for ln in lines]).strip()
+                if not s2:
+                    continue
+                s = s2
+        parts.append(s)
     cleaned = "\n\n".join(parts).strip()
+
+    # Unescape backslash-escaped quotes that sometimes leak from JSON-ish sources
+    # (e.g. `\\\"Сигнал\\\"` or `\"Сигнал\"`). This is a display-level cleanup
+    # and should not change meaning.
+    cleaned = cleaned.replace("\\\\\"", "\"")
+    cleaned = cleaned.replace("\\\"", "\"")
+
+    def _demote_overlong_headings(value: str) -> str:
+        """Demote headings that look like full paragraphs (formatting-only fix)."""
+        if not value:
+            return value
+        out_lines: list[str] = []
+        heading_re = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
+        for ln in value.splitlines():
+            m = heading_re.match(ln)
+            if not m:
+                out_lines.append(ln)
+                continue
+            hashes = m.group(1)
+            content = (m.group(2) or "").strip()
+            # Strip internal "Facts:" prefix even if it got embedded into a heading line.
+            content = re.sub(r"(?i)^(?:facts|факты)\s*:\s*", "", content).strip()
+            # Heuristic: headings should be short; if it's long or looks like a sentence, demote.
+            word_count = len(re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", content))
+            # Keep headings short for Telegraph readability: long headings look like giant paragraphs.
+            too_long = len(content) >= 80 or word_count >= 12
+            if too_long:
+                out_lines.append(content)
+            else:
+                out_lines.append(f"{hashes} {content}".rstrip())
+        return "\n".join(out_lines).strip()
+
+    def _strip_inline_facts_prefixes(value: str) -> str:
+        """Strip 'Facts:' / 'Факты:' prefixes (display artifact)."""
+        if not value:
+            return value
+        patt = re.compile(
+            r"(?i)(?:^|(?<=\s))(?:\*\*|__)?(?:facts|факты)\s*:\s*(?:\*\*|__)?(?:\s+|$)"
+        )
+        out: list[str] = []
+        for ln in value.splitlines():
+            out.append(patt.sub("", ln))
+        return "\n".join(out).strip()
 
     # Avoid leading blank lines/spacers before the first heading.
     cleaned = re.sub(r"^\s*\n+", "", cleaned)
+    cleaned = _demote_overlong_headings(cleaned)
+    cleaned = _strip_inline_facts_prefixes(cleaned)
     cleaned = cleaned.strip()
+    cleaned = _limit_description_emojis(cleaned) or cleaned
     return cleaned or None
+
+
+def _normalize_for_similarity(text: str | None, *, drop_structured: bool = True) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    raw = unicodedata.normalize("NFKC", raw)
+    raw = raw.replace("\xa0", " ")
+    lines: list[str] = []
+    for ln in raw.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if drop_structured:
+            # Ignore structured/quoted blocks: they may be verbatim by design.
+            if s.startswith(">"):
+                continue
+            if re.search(r"^\s*#{1,6}\s+\S", s):
+                continue
+            if _LIST_ITEM_LINE_RE.match(s):
+                continue
+        lines.append(s)
+    cleaned = " ".join(lines)
+    cleaned = _LOGISTICS_URL_RE.sub(" ", cleaned)
+    cleaned = _LOGISTICS_PHONE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.casefold().replace("ё", "е")
+    return cleaned
+
+
+def _description_too_verbatim(description: str | None, *, source_text: str | None) -> bool:
+    desc_norm = _normalize_for_similarity(description, drop_structured=True)
+    src_norm = _normalize_for_similarity(source_text, drop_structured=True)
+    desc_norm_strict = _normalize_for_similarity(description, drop_structured=False)
+    src_norm_strict = _normalize_for_similarity(source_text, drop_structured=False)
+    if not (desc_norm and src_norm) and not (desc_norm_strict and src_norm_strict):
+        return False
+    # Only enforce on sufficiently long texts; small snippets can be legitimately similar.
+    if (
+        (desc_norm and len(desc_norm) < 180)
+        or (src_norm and len(src_norm) < 240)
+    ) and (
+        (desc_norm_strict and len(desc_norm_strict) < 220)
+        or (src_norm_strict and len(src_norm_strict) < 260)
+    ):
+        return False
+    try:
+        from difflib import SequenceMatcher
+    except Exception:  # pragma: no cover
+        return False
+    if desc_norm and src_norm and desc_norm in src_norm and len(desc_norm) >= 240:
+        return True
+    if desc_norm_strict and src_norm_strict and desc_norm_strict in src_norm_strict and len(desc_norm_strict) >= 280:
+        return True
+    ratio = (
+        SequenceMatcher(None, desc_norm, src_norm).ratio()
+        if (desc_norm and src_norm)
+        else 0.0
+    )
+    ratio_strict = (
+        SequenceMatcher(None, desc_norm_strict, src_norm_strict).ratio()
+        if (desc_norm_strict and src_norm_strict)
+        else 0.0
+    )
+    return ratio >= 0.88 or ratio_strict >= 0.90
 
 
 _LOGISTICS_PHONE_RE = re.compile(
@@ -681,7 +1179,10 @@ def _strip_infoblock_logistics_from_description(
         s = re.sub(r"\s+", " ", s).strip()
         s = re.sub(r"\s+([,.;:!?])", r"\1", s)
         s = re.sub(r"^[,.;:!?]+\s*", "", s).strip()
-        s = re.sub(r"\s*[,.;:!?]+\s*$", "", s).strip()
+        # Keep sentence-ending punctuation (., !, ?, …). Removing it makes Telegraph text
+        # look ungrammatical (common operator complaint). We only trim "soft" trailing
+        # punctuation that often becomes dangling after stripping URLs/prices.
+        s = re.sub(r"\s*[,;:]+\s*$", "", s).strip()
 
         # If we stripped the key payload (price/ticket) and left a dangling clause,
         # drop the sentence entirely to avoid broken Russian like "... составит".
@@ -820,40 +1321,9 @@ def _description_needs_channel_promo_strip(text: str | None) -> bool:
 
 
 def _strip_channel_promo_from_description(text: str | None) -> str | None:
-    """Remove generic promo sentences about where to find more announcements."""
+    # Deterministic sentence-level cutting is not allowed (LLM handles this).
     raw = (text or "").strip()
-    if not raw:
-        return None
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", raw) if p.strip()]
-    if not paragraphs:
-        return None
-    sent_split = re.compile(r"(?<=[.!?…])\s+")
-    out_paras: list[str] = []
-    for para in paragraphs:
-        if para.lstrip().startswith(">") or re.match(r"^\s*#{1,6}\s+\S", para) or re.match(r"^\s*[-*•]\s+\S", para):
-            out_paras.append(para)
-            continue
-        sents = [s.strip() for s in sent_split.split(re.sub(r"\s*\n\s*", " ", para)) if s.strip()]
-        kept: list[str] = []
-        for sent in sents:
-            if _DESCRIPTION_CHANNEL_PROMO_SENT_RE.search(sent) and (
-                "t.me/" in sent.lower() or "телеграм" in sent.lower() or "telegram" in sent.lower()
-            ):
-                # Try to salvage the "event fact" prefix if the promo is appended to it.
-                m = _DESCRIPTION_CHANNEL_PROMO_PHRASE_RE.search(sent)
-                if m and m.start() > 0:
-                    prefix = (sent[: m.start()] or "").rstrip()
-                    prefix = re.sub(r"[\s,;:—–-]+$", "", prefix).strip()
-                    if prefix and _has_datetime_signals(prefix):
-                        kept.append(prefix)
-                continue
-            kept.append(sent)
-        merged = " ".join(kept).strip()
-        if merged:
-            out_paras.append(merged)
-    cleaned = "\n\n".join(out_paras).strip()
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    return cleaned or None
+    return raw or None
 
 
 def _norm_text_for_fact_presence(text: str) -> str:
@@ -894,11 +1364,31 @@ def _is_anchor_or_service_fact(fact: str) -> bool:
     if not f:
         return True
     # Do not force anchors / service notes into narrative coverage checks.
-    if re.search(r"(?i)^(дата|время|локац|адрес|город|источник)\\b", f):
+    if re.search(r"(?i)^(дата|время|локац\w*|адрес\w*|город\w*|источник)\b", f):
         return True
-    if re.search(r"(?i)^(текст\\s+очищен|llm\\s+недоступна|добавлена\\s+афиша)\\b", f):
+    # Dates/times often appear as free-form sentences, not only as `Дата:`/`Время:`.
+    if re.search(r"\b\d{4}-\d{2}-\d{2}\b", f):  # 2026-03-03
         return True
-    if "http://" in f or "https://" in f:
+    if re.search(r"\b\d{1,2}[:.]\d{2}\b", f):  # 18:30 / 18.30
+        return True
+    if re.search(r"\b\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\b", f):  # 03.03 / 03.03.2026
+        return True
+    if re.search(
+        r"(?i)\b\d{1,2}\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b",
+        f,
+    ):
+        return True
+    # Location/logistics phrasing (must stay in infoblock, not in narrative).
+    if re.search(r"(?i)\b(по\s+адресу|\d+\s*этаж\w*|этаж\w*|зал\w*|аудитори\w*)\b", f):
+        return True
+    # Event type is provided separately to the narrative generator; keep `Тип:` out of text_clean.
+    if re.search(r"(?i)^тип\b", f):
+        return True
+    if re.search(r"(?i)^(текст\s+очищен|llm\s+недоступна|добавлена\s+афиша)\b", f):
+        return True
+    if "http://" in f or "https://" in f or "www." in f.casefold():
+        if _fact_first_urls_are_allowed(f):
+            return False
         return True
     return False
 
@@ -914,8 +1404,9 @@ def _find_missing_facts_in_description(
         if not f or _is_anchor_or_service_fact(f):
             continue
         is_quoted = bool(re.fullmatch(r'["«].+["»]\s*', f)) or ("«" in f and "»" in f) or ('"' in f)
-        # Only enforce coverage for short facts, unless they are explicit slogans/quotes.
-        if not is_quoted and len(f) > 90:
+        # Only enforce coverage for short facts, unless they are explicit slogans/quotes
+        # or an allowlisted content URL (playlist).
+        if not is_quoted and len(f) > 90 and not _fact_first_urls_are_allowed(f):
             continue
         # Prefer checking the "inner" content for quoted slogan-like facts.
         inner = f
@@ -974,6 +1465,758 @@ async def _llm_integrate_missing_facts_into_description(
         temperature=0.0,
     )
     return text.strip() if text else None
+
+
+_FACT_FIRST_CTA_RE = re.compile(
+    r"(?i)\b("
+    r"приглашаем|приходите|жд[её]м\s+вас|не\s+пропуст\w*|успей\w*|"
+    r"присоединяйтесь|подписывайтесь|подпиш\w*|репост\w*|лайк\w*|"
+    r"делитесь|расскажите|рекомендуем|советуем|жми|жмите|"
+    r"покупай\w*|купите|брониру\w*|зарегистриру\w*|записывайтесь|"
+    r"встречайте"
+    r")\b"
+)
+_FACT_FIRST_TICKET_WORD_RE = re.compile(
+    r"(?i)\b(билет\w*|вход\w*|регистрац\w*|запис\w*|брон\w*|бесплатн\w*)\b"
+)
+_FACT_FIRST_PRICE_RE = re.compile(r"(?i)\b\d{1,6}\s*(?:₽|руб\.?|р\.)\b")
+_FACT_FIRST_AGE_RE = re.compile(r"\b\d{1,2}\+\b")
+_FACT_FIRST_PUSHKIN_RE = re.compile(r"(?i)\bпушкинск\w*\s+карт\w*\b")
+_FACT_FIRST_URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)\S+")
+_FACT_FIRST_PHONE_RE = re.compile(r"(?i)\+7\D*\d{3}\D*\d{3}\D*\d{2}\D*\d{2}")
+_FACT_FIRST_HASH_RE = re.compile(r"(?m)(?:^|\s)#[A-Za-zА-Яа-яЁё0-9_]{2,}")
+_FACT_FIRST_ALLOWED_CONTENT_URL_RE = re.compile(
+    r"(?i)https?://music\.yandex\.ru/users/[^\s/]+/playlists/\d+\S*"
+)
+
+
+def _fact_first_extract_urls(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    return [m.group(0) for m in _FACT_FIRST_URL_RE.finditer(raw)]
+
+
+def _fact_first_urls_are_allowed(text: str) -> bool:
+    urls = _fact_first_extract_urls(text)
+    if not urls:
+        return False
+    return all(bool(_FACT_FIRST_ALLOWED_CONTENT_URL_RE.search(url)) for url in urls)
+
+
+def _fact_first_has_disallowed_urls(text: str) -> bool:
+    urls = _fact_first_extract_urls(text)
+    if not urls:
+        return False
+    return any(not _FACT_FIRST_ALLOWED_CONTENT_URL_RE.search(url) for url in urls)
+
+
+def _fact_first_bucket(fact: str) -> str:
+    """Classify a fact into a bucket for fact-first narrative generation.
+
+    Buckets:
+    - text_clean: publishable narrative facts
+    - infoblock: logistics/tickets/prices/contacts/anchors (must not go into narrative)
+    - drop: promo/CTA/noise (must not go into narrative)
+    """
+    f = str(fact or "").strip()
+    if not f:
+        return "drop"
+    if _is_anchor_or_service_fact(f):
+        return "infoblock"
+    if _FACT_FIRST_PHONE_RE.search(f):
+        return "infoblock"
+    if _FACT_FIRST_URL_RE.search(f) and not _fact_first_urls_are_allowed(f):
+        return "infoblock"
+    if _FACT_FIRST_TICKET_WORD_RE.search(f) or _FACT_FIRST_PRICE_RE.search(f):
+        return "infoblock"
+    if _FACT_FIRST_AGE_RE.search(f) or _FACT_FIRST_PUSHKIN_RE.search(f):
+        return "infoblock"
+    if re.search(r"(?i)\b(афиш\w*|постер\w*)\b", f):
+        return "infoblock"
+    if _FACT_FIRST_HASH_RE.search(f) or _FACT_FIRST_CTA_RE.search(f):
+        return "drop"
+    return "text_clean"
+
+
+def _facts_text_clean_from_facts(
+    facts: Sequence[str],
+    *,
+    max_items: int = 28,
+    anchors: Sequence[str] | None = None,
+) -> list[str]:
+    anchors_norm: list[str] = []
+    for a in anchors or []:
+        s = str(a or "").strip()
+        if not s:
+            continue
+        # Avoid filtering by very short/common tokens.
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", s)
+        if not tokens:
+            continue
+        if len(s) < 5 and all(len(t) < 5 for t in tokens):
+            continue
+        anchors_norm.append(s.casefold())
+
+    out: list[str] = []
+    for fact in facts or []:
+        cleaned = _normalize_fact_item(str(fact or ""), limit=180)
+        if not cleaned:
+            continue
+        bucket = _fact_first_bucket(cleaned)
+        if bucket != "text_clean":
+            # Participant chats are useful as a *fact*, but their links are forbidden in narrative text.
+            # Keep the meaning, drop the URL.
+            if (
+                bucket == "infoblock"
+                and _FACT_FIRST_URL_RE.search(cleaned)
+                and re.search(r"(?iu)\bчат\w*\b", cleaned)
+            ):
+                without_urls = _FACT_FIRST_URL_RE.sub("", cleaned)
+                without_urls = re.sub(r"\s+", " ", without_urls).strip()
+                without_urls = re.sub(r"[\s:—–-]+$", "", without_urls).strip()
+                if without_urls and _fact_first_bucket(without_urls) == "text_clean":
+                    cleaned = without_urls
+                else:
+                    continue
+            else:
+                continue
+        if anchors_norm:
+            cleaned_cf = cleaned.casefold()
+            if any(a in cleaned_cf for a in anchors_norm):
+                continue
+        out.append(cleaned)
+        if len(out) >= max_items * 2:
+            break
+    return _dedupe_source_facts(out)[:max_items]
+
+
+def _pick_epigraph_fact(facts_text_clean: Sequence[str]) -> str | None:
+    facts = [str(f or "").strip() for f in (facts_text_clean or []) if str(f or "").strip()]
+    if not facts:
+        return None
+    # Prefer a direct quote-like fact.
+    for f in facts:
+        if ("«" in f and "»" in f) or re.search(r"(?i)^\s*цитата\b", f):
+            return f
+    # Fallback: short "tagline" fact with an em dash, avoiding key-value facts.
+    for f in facts:
+        if ":" in f:
+            continue
+        if re.search(r"(?i)^(ведущ\w*|лектор\w*|спикер\w*|гост\w*)\b", f):
+            continue
+        if "—" in f and 20 <= len(f) <= 140:
+            return f
+    return None
+
+
+_FACT_FIRST_POSV_WORD_RE = re.compile(r"(?i)\bпосвящ\w*\b")
+
+
+def _sanitize_fact_text_clean_for_prompt(fact: str) -> str:
+    """Pre-sanitize text_clean facts for the narrative prompt.
+
+    Goal: keep the meaning, but avoid strictly forbidden lexical markers that
+    models tend to copy verbatim from facts (e.g. "посвящ..." in Russian).
+    This is *not* persisted as a source fact; it only affects the description prompt.
+    """
+    s = str(fact or "").strip()
+    if not s or not _FACT_FIRST_POSV_WORD_RE.search(s):
+        return s
+
+    # Common pattern: "<event> посвящена/посвящён ... <topic>" -> "Тема: <topic>."
+    m = re.match(
+        r"(?i)^\s*(?:лекци\w*|встреч\w*|бесед\w*|показ\w*|концерт\w*|спектакл\w*|"
+        r"мастер-?класс\w*|мастерск\w*|заняти\w*|экскурс\w*|презентац\w*|выставк\w*)\s+"
+        r"посвящ\w+\s+(.+?)\s*[.!?]?\s*$",
+        s,
+    )
+    if m:
+        topic = (m.group(1) or "").strip()
+        if topic:
+            return f"Тема: {topic}."
+    return s
+
+
+def _estimate_fact_first_description_budget_chars(facts_text_clean: Sequence[str]) -> int:
+    facts_chars = sum(len(str(f or "")) for f in (facts_text_clean or []) if str(f or "").strip())
+    # Budget should scale with fact volume: if we have many (already de-duped) facts,
+    # the narrative should be allowed to be longer (Telegraph can render long texts).
+    budget = int(facts_chars * 1.10 + 420)
+    return max(800, min(SMART_UPDATE_DESCRIPTION_MAX_CHARS, budget))
+
+
+def _estimate_fact_first_description_max_tokens(
+    *, budget_chars: int, floor: int = 1700, ceil: int = 4500
+) -> int:
+    """Best-effort output token budget for fact-first description.
+
+    We keep this deterministic and conservative: it only sets an upper bound for the
+    provider call. The prompt still instructs the model to stay within
+    `description_budget_chars`.
+    """
+    # Rough heuristic for Russian text + Markdown: ~3.2 chars per token.
+    est = int(math.ceil(float(max(0, int(budget_chars or 0))) / 3.2)) + 200
+    return max(int(floor), min(int(ceil), est))
+
+
+def _fact_first_description_prompt(
+    *,
+    title: str | None,
+    event_type: str | None,
+    facts_text_clean: Sequence[str],
+    epigraph_fact: str | None,
+) -> str:
+    facts_block = "\n".join(f"- {str(f).strip()}" for f in (facts_text_clean or []) if str(f or "").strip())
+    budget_chars = _estimate_fact_first_description_budget_chars(facts_text_clean)
+    return textwrap.dedent(
+        f"""\
+        Ты пишешь Markdown‑анонс события для Telegram в стиле культурного журналиста: живо, конкретно, без рекламы.
+
+        Источник истины: ТОЛЬКО список facts_text_clean ниже. Нельзя добавлять новые сведения.
+
+        Цель: связный текст, где каждая деталь из фактов упомянута и при этом нет смысловых повторов.
+
+        {SMART_UPDATE_YO_RULE}
+
+        Структура:
+        - Если epigraph_fact не null:
+          - Если в нём есть длинная прямая речь в «...!»/«...?» — оформи эпиграф 2 строками:
+            `> «...»
+            > — ...` (атрибуция только из слов epigraph_fact; без новых глаголов типа «восхищается/говорит»).
+          - Иначе — одна строка `> epigraph_fact`.
+          - После эпиграфа: пустая строка, затем лид ОДНИМ абзацем (1–2 предложения) без заголовка (без переносов строки).
+          - В теле текста НЕ повторяй и НЕ пересказывай epigraph_fact: он уже прозвучал в эпиграфе.
+        - Если epigraph_fact null: просто лид ОДНИМ абзацем (1–2 предложения) без заголовка (без переносов строки).
+        - Затем 2–3 блока с подзаголовками `### ...` (только `###`).
+        - Подзаголовки короткие (до ~60 символов), без точек, не полные предложения; не делай пустых блоков.
+        - Подзаголовки должны быть информативными; избегай общих вроде «Подробности».
+        - Под каждым `###` должно быть либо 2–4 предложения, либо список (2+ пунктов).
+        - Абзацы средней длины: обычно 2–4 предложения; избегай микро‑абзацев из одной короткой фразы.
+        - Объём: старайся уложиться примерно в лимит `description_budget_chars` символов, без воды.
+        - Эмодзи: 1–2 штуки, как навигация (в лид/в 1 заголовке), без «ёлки».
+        - Если факты дают несколько тем/пунктов (вопросы лекции, пункты программы и т.п.) — сгруппируй их в ОДИН раздел и оформи списком; не делай отдельный `###` для каждого пункта.
+
+        Стиль C («Сцена → смысл → детали»):
+        - Начни с короткой «картинки/настроения» из фактов.
+          Если в фактах есть строка `Атмосфера ...` — используй её ДОСЛОВНО.
+          Если такой строки нет — НЕ придумывай новую «атмосферу», начни с конкретики из фактов.
+        - Во 2‑й фразе лида дай понять, что это за событие (спектакль/концерт/показ фильма/игра/мастерская и т.п.).
+        - Если среди фактов есть строка `Формат: ...` — обозначь формат ЯВНО (ключевые слова после `:` должны прозвучать).
+        - Условия участия/просмотра из фактов (длительность, язык/субтитры, что взять/что предоставляется, количество участников/игроков) — ОБЯЗАТЕЛЬНО упомяни явно.
+
+        Как работать с фактами:
+        - Объединяй и перестраивай фразы, но аккуратно: не добавляй новых смыслов/обещаний/обобщений.
+        - Не превращай текст в «перечень фактов» и не копируй подряд несколько фактов как готовые предложения: перепиши связно, сохранив детали.
+        - Если в факте есть список/перечень/треклист/набор пунктов — сохрани ВСЕ элементы ДОСЛОВНО и лучше оформи списком (каждый пункт на отдельной строке).
+        - Сохраняй ключевые слова и образы из фактов; не подменяй «образные» слова синонимами.
+        - Если в факте есть ЦИФРЫ/диапазон/рейтинги — эти же цифры должны появиться в тексте.
+
+        Запреты:
+        - Нельзя: дату/время/город/площадку/адрес, URL/телефоны (кроме ссылок на плейлист Я.Музыки из facts_text_clean), билеты/вход/регистрацию/запись, цены/донаты, возраст, «Пушкинская карта», афиши.
+        - Нельзя CTA‑слова: «приглашаем», «приходите», «ждём/ждем вас», «не пропустите», «успейте», «присоединяйтесь», «предлагаем», «встречайте».
+        - Не используй слово «посвящён/посвящена/посвящено».
+          Если в фактах встречается «... посвящ... ...» — перефразируй без этого слова: «лекция о ...», «разговор про ...», «в центре — ...».
+        - Запрещён штамп: «это ... не ..., а ...».
+
+        Контекст:
+        - title: {(title or '').strip()}
+        - event_type: {(event_type or '').strip()}
+        - epigraph_fact (если null — эпиграф НЕ нужен): {epigraph_fact if epigraph_fact is not None else 'null'}
+        - description_budget_chars: {budget_chars}
+
+        Факты (facts_text_clean):
+        {facts_block}
+
+        Верни только Markdown‑текст описания (без JSON).
+        """
+    ).strip()
+
+
+def _fact_first_coverage_prompt(
+    *,
+    facts_text_clean: Sequence[str],
+    description: str,
+) -> tuple[str, dict[str, Any]]:
+    payload = {
+        "facts_text_clean": [str(x).strip() for x in (facts_text_clean or []) if str(x or "").strip()],
+        "description_md": _clip((description or "").strip(), 6500),
+    }
+    prompt = (
+        "Ты проверяешь полноту и строгость описания относительно списка фактов.\n\n"
+        "Найди:\n"
+        "- missing: факты из списка facts_text_clean, которые НЕ отражены в описании.\n"
+        "- extra: утверждения из описания, которые НЕ подтверждаются ни одним фактом.\n\n"
+        "ВАЖНО:\n"
+        "- Считай факт отражённым, если он перефразирован/встроен в предложение и при этом сохранены ключевые сущности и детали.\n"
+        "- Допустимы синонимы и формы, если смысл и ключевые детали сохранены.\n"
+        "- Если факт содержит несколько элементов, считай его отражённым только если в тексте присутствуют ВСЕ элементы.\n"
+        "- Служебные перефразы для структурных фактов НЕ считаются extra, если они явно отсылают к фактам.\n"
+        "- Для missing используй ТОЛЬКО строки фактов ВЕРБАТИМ (копируй из списка facts_text_clean; не перефразируй).\n"
+        "- Для extra используй ТОЛЬКО короткие ВЕРБАТИМ-фрагменты из description_md (копируй из текста; не выдумывай), до 12 слов.\n\n"
+        "Верни JSON по схеме.\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    schema = {
+        "type": "object",
+        "properties": {
+            "missing": {"type": "array", "items": {"type": "string"}},
+            "extra": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["missing", "extra"],
+        "additionalProperties": False,
+    }
+    return prompt, schema
+
+
+def _fact_first_revise_prompt(
+    *,
+    title: str | None,
+    event_type: str | None,
+    epigraph_fact: str | None,
+    facts_text_clean: Sequence[str],
+    description: str,
+    missing: Sequence[str],
+    extra: Sequence[str],
+    policy_issues: Sequence[str],
+) -> str:
+    budget_chars = _estimate_fact_first_description_budget_chars(facts_text_clean)
+    facts_block = "\n".join(f"- {str(f).strip()}" for f in (facts_text_clean or []) if str(f or "").strip())
+    return textwrap.dedent(
+        f"""\
+        Отредактируй Markdown‑анонс события. Если проще — перепиши его заново, но строго по фактам.
+
+        Источник истины: только `facts_text_clean` (нельзя добавлять новые сведения вне списка).
+
+        Цели (строго):
+        - missing = [] (все факты отражены)
+        - extra = [] (нет неподтверждённых утверждений)
+        - нет запрещённых маркеров/логистики/промо
+        - нет смысловых повторов
+
+        {SMART_UPDATE_YO_RULE}
+        Объём: старайся уложиться примерно в `description_budget_chars` символов, без воды.
+
+        Контекст:
+        - title: {(title or '').strip()}
+        - event_type: {(event_type or '').strip()}
+        - epigraph_fact: {epigraph_fact if epigraph_fact is not None else 'null'}
+        - description_budget_chars: {budget_chars}
+
+        Факты (facts_text_clean):
+        {facts_block}
+
+        Исправь проблемы:
+        - policy_issues:
+        {chr(10).join('  - ' + str(i) for i in (policy_issues or [])) if policy_issues else '  - (нет)'}
+        - missing (добавь, не теряя деталей; цифры/имена/названия/элементы списков сохранить):
+        {chr(10).join('  - ' + str(f) for f in (missing or [])) if missing else '  - (нет)'}
+        - extra (удали/перепиши так, чтобы этих подстрок не осталось):
+        {chr(10).join('  - ' + str(e) for e in (extra or [])) if extra else '  - (нет)'}
+
+        Текущее описание:
+        {description}
+
+        Правила редактуры:
+        - Списки/перечни/треклисты: элементы НЕ перефразируй; каждый пункт — отдельной строкой (можно списком `- ...`).
+        - Факты вида `Формат: ...`: отрази формат явно; ключевые слова после `:` должны прозвучать.
+        - Факты с цифрами/рейтинги/диапазоны: цифры должны совпадать с фактами.
+        - Эпиграф: если epigraph_fact не null — blockquote до первого `###` и только один раз.
+        - Структура: лид (1–2 предложения) без заголовка, ОДНИМ абзацем → 2–3 блока `### ...` → абзацы средней длины.
+          Под каждым `###` — 2+ предложения ИЛИ список (2+ пунктов). Не дроби на микро‑разделы по 1 фразе.
+        - Подзаголовки должны быть информативными; избегай общих вроде «Подробности».
+        - Эмодзи: 1–2 штуки, без «ёлки».
+        - Запреты: нет даты/времени/города/площадки/адреса; нет URL/телефонов (кроме ссылок на плейлист Я.Музыки из facts_text_clean); нет цен/донатов; нет билетов/входа/регистрации/записи; нет возраста; нет «Пушкинская карта»; нет афиш.
+          Не используй «посвящ...»: перефразируй через «о/про/в центре — ...».
+
+        Верни только обновлённый Markdown‑текст (без JSON).
+        """
+    ).strip()
+
+
+def _fact_first_remove_posv_prompt(
+    *,
+    title: str | None,
+    event_type: str | None,
+    epigraph_fact: str | None,
+    facts_text_clean: Sequence[str],
+    description: str,
+) -> str:
+    """Targeted cleanup prompt for stubborn `посвящ...` leaks.
+
+    Some models keep copying "лекция посвящена ..." despite explicit bans. This
+    prompt is a last-mile, single-purpose fix: keep the same facts and structure,
+    but ensure the forbidden root never appears.
+    """
+    payload = {
+        "title": (title or "").strip(),
+        "event_type": (event_type or "").strip(),
+        "epigraph_fact": epigraph_fact if epigraph_fact is not None else None,
+        "facts_text_clean": [str(x).strip() for x in (facts_text_clean or []) if str(x or "").strip()],
+        "description_md": _clip((description or "").strip(), 3200),
+    }
+    return (
+        "В описании найден запрещённый корень «посвящ…» (посвящён/посвящена/посвящено и т.п.).\n"
+        "Твоя задача: отредактировать `description_md` так, чтобы этот корень НЕ встречался нигде.\n\n"
+        "Правила:\n"
+        "- Верни ПОЛНЫЙ Markdown-текст (не частями).\n"
+        "- Нельзя добавлять новые факты: источник истины — только `facts_text_clean`.\n"
+        "- Сохрани структуру: эпиграф (если есть) остаётся blockquote до первого `###`; затем лид; затем 2–3 `###`.\n"
+        "- Нельзя добавлять логистику/CTA/ссылки/контакты/цены/возраст/афиши.\n"
+        "- Слово/корень «посвящ» запрещён полностью. Перефразируй через «о/про/в центре — …», "
+        "исправляя падежи/согласование.\n\n"
+        f"{SMART_UPDATE_YO_RULE}\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _fact_first_forbidden_reasons(description: str, *, anchors: Sequence[str]) -> list[str]:
+    text = str(description or "")
+    reasons: list[str] = []
+    if re.search(r"(?m)^\s*#{1,2}\s+\S", text):
+        reasons.append("h1h2_heading")
+    if _fact_first_has_disallowed_urls(text):
+        reasons.append("url")
+    if _FACT_FIRST_PHONE_RE.search(text):
+        reasons.append("phone")
+    if _FACT_FIRST_PRICE_RE.search(text):
+        reasons.append("price")
+    if _FACT_FIRST_TICKET_WORD_RE.search(text):
+        reasons.append("tickets")
+    if _FACT_FIRST_AGE_RE.search(text):
+        reasons.append("age")
+    if _FACT_FIRST_PUSHKIN_RE.search(text):
+        reasons.append("pushkin_card")
+    if re.search(r"(?i)\bафиш\w*\b", text):
+        reasons.append("poster")
+    if re.search(r"(?i)\bпосвящ\w*\b", text):
+        reasons.append("посвящ*")
+    if _FACT_FIRST_CTA_RE.search(text) or _FACT_FIRST_HASH_RE.search(text):
+        reasons.append("cta_or_hashtag")
+    if re.search(r"(?i)\bэто\b[^.!?\n]{0,60}\bне\b[^.!?\n]{0,60}\bа\b", text):
+        reasons.append("cliche_not_about_but_about")
+    if re.search(r"\b\d{4}-\d{2}-\d{2}\b", text):
+        reasons.append("date_iso")
+    if re.search(r"\b\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\b", text):
+        reasons.append("date_ddmm")
+    if re.search(
+        r"(?i)\b\d{1,2}\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b",
+        text,
+    ):
+        reasons.append("date_ru_words")
+    if re.search(r"\b\d{1,2}[:.]\d{2}\b", text):
+        reasons.append("time_hhmm")
+
+    text_lc = text.lower()
+    for a in anchors or []:
+        s = str(a or "").strip()
+        if not s:
+            continue
+        # Avoid flagging short/common tokens.
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", s)
+        if not tokens:
+            continue
+        if len(s) < 5 and all(len(t) < 5 for t in tokens):
+            continue
+        if s.lower() in text_lc:
+            reasons.append("anchor_leak")
+            break
+    return _dedupe_source_facts(reasons)
+
+
+def _fact_first_lead_paragraph_count(description_md: str) -> int:
+    """Count lead paragraphs (text before the first `### ...`), excluding epigraph blockquote."""
+    raw = (description_md or "").strip()
+    if not raw:
+        return 0
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    lines = raw.splitlines()
+
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    # Drop epigraph (blockquote at the top).
+    while i < len(lines) and lines[i].lstrip().startswith(">"):
+        i += 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+
+    lead_lines: list[str] = []
+    for j in range(i, len(lines)):
+        if re.match(r"^\s*###\s+\S", lines[j] or ""):
+            break
+        lead_lines.append(lines[j])
+    lead = "\n".join(lead_lines).strip()
+    if not lead:
+        return 0
+    paras = [p.strip() for p in re.split(r"\n{2,}", lead) if p.strip()]
+    return len(paras)
+
+
+def _fact_first_micro_h3_headings(description_md: str) -> list[str]:
+    """Return headings whose bodies are too short (micro-sections)."""
+    raw = (description_md or "").strip()
+    if not raw:
+        return []
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    h3_re = re.compile(r"^\s*###\s+(\S.*)$")
+
+    micro: list[str] = []
+    current_heading: str | None = None
+    body_lines: list[str] = []
+
+    def _flush() -> None:
+        nonlocal current_heading, body_lines
+        if current_heading is None:
+            return
+        body = "\n".join(body_lines).strip()
+        list_items = sum(1 for ln in body.splitlines() if _LIST_ITEM_LINE_RE.match((ln or "").strip()))
+        sentence_count = len(re.findall(r"[.!?]+", body))
+        body_chars = len(body)
+
+        ok = False
+        if list_items >= 2:
+            ok = True
+        elif sentence_count >= 2:
+            ok = True
+        elif body_chars >= 220:
+            ok = True
+
+        if not ok:
+            micro.append(current_heading.strip())
+        current_heading = None
+        body_lines = []
+
+    for line in raw.splitlines():
+        m = h3_re.match(line or "")
+        if m:
+            _flush()
+            current_heading = (m.group(1) or "").strip()
+            body_lines = []
+            continue
+        if current_heading is not None:
+            body_lines.append(line)
+    _flush()
+    return micro
+
+
+async def _llm_fact_first_description_md(
+    *,
+    title: str | None,
+    event_type: str | None,
+    facts_text_clean: Sequence[str],
+    anchors: Sequence[str],
+    label: str,
+) -> str | None:
+    """Generate description strictly from `facts_text_clean` (fact-first, C+D).
+
+    Uses LLM for:
+    - writing the narrative text,
+    - coverage check (missing/extra),
+    - revision loop (bounded and intentionally small to keep Gemma call counts predictable).
+    """
+    if SMART_UPDATE_LLM_DISABLED:
+        return None
+    facts = [str(f or "").strip() for f in (facts_text_clean or []) if str(f or "").strip()]
+    if not facts:
+        return None
+
+    # Keep the prompt bounded; fact-first relies on extracted facts, not raw sources.
+    facts = _dedupe_source_facts(facts)[:28]
+    facts = _dedupe_source_facts([_sanitize_fact_text_clean_for_prompt(f) for f in facts])[:28]
+    epigraph_fact = _pick_epigraph_fact(facts)
+    budget_chars = _estimate_fact_first_description_budget_chars(facts)
+    desc_max_tokens = _estimate_fact_first_description_max_tokens(budget_chars=budget_chars, floor=1700)
+    revise_max_tokens = _estimate_fact_first_description_max_tokens(budget_chars=budget_chars, floor=1900)
+
+    def _cleanup_description(value: str | None) -> str | None:
+        """Format-only cleanup (must not change meaning)."""
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        raw = _strip_private_use(raw) or raw
+        raw = _fix_inline_bullet_lists(raw) or raw
+        raw = _normalize_bullet_markers(raw) or raw
+        raw = _normalize_blockquote_markers(raw) or raw
+        raw = _limit_description_emojis(raw) or raw
+        raw = _sanitize_description_output(raw, source_text="") or raw
+        # Important: sanitize can normalize headings (e.g. strip "Facts:" prefix), so
+        # dedupe/orphan-heading cleanup must happen AFTER it to avoid duplicate empty sections.
+        raw = _dedupe_description(raw) or raw
+        raw = _normalize_plaintext_paragraphs(raw) or raw
+        raw = _ensure_minimal_description_headings(raw) or raw
+        return raw.strip() or None
+
+    def _collect_policy_issues(value: str) -> list[str]:
+        desc_s = str(value or "")
+        issues: list[str] = []
+
+        # Headings count: keep it readable and consistent with the prompt.
+        h3 = len(re.findall(r"(?m)^###\s+\S", desc_s))
+        if h3 < 2 or h3 > 3:
+            issues.append(
+                f"Сейчас заголовков `###` = {h3}; нужно 2–3. "
+                "Объедини близкие разделы и оставь ровно 2–3 информативных подзаголовка."
+            )
+
+        lead_paras = _fact_first_lead_paragraph_count(desc_s)
+        if lead_paras == 0:
+            issues.append("Добавь лид одним абзацем (1–2 предложения) перед первым `###`.")
+        elif lead_paras > 1:
+            issues.append(
+                "Лид до первого `###` должен быть ОДНИМ абзацем (1–2 предложения), без лишних переносов строки."
+            )
+
+        h3_titles = [
+            re.sub(r"\s+", " ", (m.group(1) or "")).strip()
+            for m in re.finditer(r"(?m)^###\s+(.+?)\s*$", desc_s)
+            if (m.group(1) or "").strip()
+        ]
+        if any(t.casefold() == "подробности" for t in h3_titles):
+            issues.append("Не используй общий заголовок «Подробности»: убери его или замени на конкретный.")
+
+        # Prevent repeated identical headings (they create empty/micro sections on Telegraph).
+        if h3_titles:
+            seen_keys: set[str] = set()
+            dup_titles: list[str] = []
+            for t in h3_titles:
+                t_norm = re.sub(r"\s+", " ", t).strip()
+                t_norm = _EMOJI_SEQ_RE.sub("", t_norm).strip()
+                key = re.sub(r"\s+", " ", t_norm).strip().casefold()
+                if not key:
+                    continue
+                if key in seen_keys:
+                    dup_titles.append(t.strip())
+                seen_keys.add(key)
+            if dup_titles:
+                uniq = _dedupe_source_facts([d for d in dup_titles if d])
+                shown = ", ".join(uniq[:4])
+                more = "" if len(uniq) <= 4 else f" (+{len(uniq) - 4})"
+                issues.append(
+                    "Повторяются одинаковые подзаголовки `### ...`: "
+                    f"{shown}{more}. Заголовки должны быть уникальными — объедини секции или переименуй."
+                )
+
+        micro_h3 = _fact_first_micro_h3_headings(desc_s)
+        if micro_h3:
+            shown = ", ".join(micro_h3[:4])
+            more = "" if len(micro_h3) <= 4 else f" (+{len(micro_h3) - 4})"
+            issues.append(
+                "Слишком дробные секции под `###`: "
+                f"{shown}{more}. Объедини близкие разделы: 2–3 `###` всего; "
+                "под каждым — 2+ предложения или список (2+ пунктов)."
+            )
+
+        if epigraph_fact:
+            if not re.search(r"(?m)^>\s*\S", desc_s):
+                issues.append("Если epigraph_fact не null — добавь эпиграф blockquote перед лидом (до первого `###`).")
+        else:
+            if re.search(r"(?m)^>\s*\S", desc_s):
+                issues.append("Если epigraph_fact = null — убери blockquote-эпиграф из начала текста.")
+
+        forbidden = _fact_first_forbidden_reasons(desc_s, anchors=anchors)
+        if forbidden:
+            for r in forbidden:
+                if r == "посвящ*":
+                    issues.append(
+                        "Запрещено слово/корень «посвящ…» — убери его полностью и перефразируй без него "
+                        "(например: «лекция о …», «разговор про …», «в центре — …»)."
+                    )
+                    continue
+                issues.append(f"forbidden_marker({r})")
+
+        return issues
+
+    description = await _ask_gemma_text(
+        _fact_first_description_prompt(
+            title=title,
+            event_type=event_type,
+            facts_text_clean=facts,
+            epigraph_fact=epigraph_fact,
+        ),
+        max_tokens=desc_max_tokens,
+        label=f"{label}:fact_first_desc",
+        temperature=0.0,
+    )
+    description = _cleanup_description(description)
+    if not description:
+        return None
+
+    cov_prompt, cov_schema = _fact_first_coverage_prompt(facts_text_clean=facts, description=description)
+    cov = await _ask_gemma_json(
+        cov_prompt,
+        cov_schema,
+        max_tokens=500,
+        label=f"{label}:fact_first_cov",
+    )
+    missing: list[str] = []
+    extra: list[str] = []
+    if isinstance(cov, dict):
+        missing = [str(x).strip() for x in (cov.get("missing") or []) if str(x or "").strip()]
+        extra = [str(x).strip() for x in (cov.get("extra") or []) if str(x or "").strip()]
+    missing = _dedupe_source_facts(missing)[:12]
+    extra = _dedupe_source_facts(extra)[:12]
+
+    policy_issues = _collect_policy_issues(description)
+    if not missing and not extra and not policy_issues:
+        return description.strip() or None
+
+    revised = await _ask_gemma_text(
+        _fact_first_revise_prompt(
+            title=title,
+            event_type=event_type,
+            epigraph_fact=epigraph_fact,
+            facts_text_clean=facts,
+            description=description,
+            missing=missing,
+            extra=extra,
+            policy_issues=policy_issues,
+        ),
+        max_tokens=revise_max_tokens,
+        label=f"{label}:fact_first_revise",
+        temperature=0.0,
+    )
+    description2 = _cleanup_description(revised) or description
+    policy_issues2 = _collect_policy_issues(description2)
+    if not policy_issues2:
+        return description2.strip() or None
+
+    # Final attempt: fix policy issues only (do not redo coverage to keep call count bounded).
+    # Prefer a dedicated "посвящ..." remover when it's the only remaining forbidden marker.
+    forbidden2 = _fact_first_forbidden_reasons(description2, anchors=anchors)
+    if forbidden2 == ["посвящ*"] and len(policy_issues2) == 1:
+        revised3 = await _ask_gemma_text(
+            _fact_first_remove_posv_prompt(
+                title=title,
+                event_type=event_type,
+                epigraph_fact=epigraph_fact,
+                facts_text_clean=facts,
+                description=description2,
+            ),
+            max_tokens=revise_max_tokens,
+            label=f"{label}:fact_first_remove_posv",
+            temperature=0.0,
+        )
+        fixed = _cleanup_description(revised3) or description2
+        return fixed.strip() or None
+
+    revised2 = await _ask_gemma_text(
+        _fact_first_revise_prompt(
+            title=title,
+            event_type=event_type,
+            epigraph_fact=epigraph_fact,
+            facts_text_clean=facts,
+            description=description2,
+            missing=missing,
+            extra=extra,
+            policy_issues=policy_issues2,
+        ),
+        max_tokens=revise_max_tokens,
+        label=f"{label}:fact_first_revise_policy",
+        temperature=0.0,
+    )
+    description3 = _cleanup_description(revised2) or description2
+    return description3.strip() or None
 
 
 def _has_overlong_paragraph(text: str | None, *, limit: int = 900) -> bool:
@@ -1093,7 +2336,7 @@ def _promote_inline_quoted_direct_speech_to_blockquotes(text: str | None) -> str
     raw = (text or "").strip()
     if not raw:
         return None
-    if re.search(r"(?m)^>\\s+", raw):
+    if re.search(r"(?m)^>\s+", raw):
         return raw
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     paragraphs = [p.strip() for p in re.split(r"\n{2,}", raw) if p.strip()]
@@ -1104,6 +2347,9 @@ def _promote_inline_quoted_direct_speech_to_blockquotes(text: str | None) -> str
     promoted = False
 
     quote_re = re.compile(r"(?s)«(?P<q>[^»]{25,900})»")
+    context_re = re.compile(
+        r"(?i)\b(цитат\w*|по\s+словам|говорит|отмечает|подч[её]ркивает|пишет|организатор\w*|автор\w*)\b"
+    )
     for para in paragraphs:
         if promoted:
             out.append(para)
@@ -1120,7 +2366,18 @@ def _promote_inline_quoted_direct_speech_to_blockquotes(text: str | None) -> str
             out.append(para)
             continue
         q = re.sub(r"\s+", " ", (m.group("q") or "").strip())
-        if not q or not _FIRST_PERSON_QUOTE_RE.match(q.lower()):
+        if not q:
+            out.append(para)
+            continue
+        q_words = re.findall(r"[a-zа-яё0-9]{2,}", q, flags=re.IGNORECASE)
+        looks_like_title = len(q_words) <= 6 and not re.search(r"[.!?…]", q)
+        promote = bool(_FIRST_PERSON_QUOTE_RE.match(q.lower()))
+        if not promote:
+            if context_re.search(para):
+                promote = True
+            elif not looks_like_title and len(q_words) >= 10 and len(q) >= 60:
+                promote = True
+        if not promote:
             out.append(para)
             continue
 
@@ -1546,44 +2803,503 @@ def _looks_like_promo_or_congrats(*texts: str | None) -> bool:
     return False
 
 
-def _strip_promo_lines(text: str | None) -> str | None:
-    if not text:
+_RU_MONTHS_GENITIVE_RE = (
+    "января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря"
+)
+_DEADLINE_RE = re.compile(
+    rf"(?i)\b(?:до|дедлайн|срок(?:\s+подачи)?|успеть)\s+"
+    rf"(?:\d{{1,2}}[./]\d{{1,2}}(?:[./](?:19|20)\d{{2}})?|\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE}))\b"
+)
+_FROM_DATE_RE = re.compile(
+    rf"(?iu)\bс\s+\d{{1,2}}(?:[./]\d{{1,2}}(?:[./](?:19|20)\d{{2}})?|\s+(?:{_RU_MONTHS_GENITIVE_RE}))\b"
+)
+_OPEN_CALL_RE = re.compile(
+    r"(?iu)\b("
+    r"open\s*call|"
+    r"опен\s*колл|"
+    r"опенколл|"
+    r"конкурсн\w*\s+отбор|"
+    r"при[её]м\s+заявок|"
+    r"подать\s+заявк\w*|"
+    r"заявк\w*\s+принима\w*"
+    r")\b"
+)
+_NON_EVENT_NOTICE_RE = re.compile(
+    r"(?i)\b("
+    r"налогов\w*\s+вычет|"
+    r"госуслуг\w*|"
+    r"государственн\w*\s+услуг\w*|"
+    r"субсид\w*|"
+    r"льгот\w*|"
+    r"компенсац\w*|"
+    r"пособи\w*|"
+    r"постановлени\w*|"
+    r"перечен\w*|"
+    r"утвержда\w*|"
+    r"заявк\w*\s+на\s+включени\w*"
+    r")\b"
+)
+_VENUE_STATUS_UPDATE_RE = re.compile(
+    r"(?iu)\b("
+    r"отсрочк\w*|"
+    r"продл(?:или|им|ят|ение|ен\w*)|"
+    r"город\s+может\s+потерять|"
+    r"можем\s+потерять|"
+    r"потеря\w*|"
+    r"закры(вают|ваем|вается|тие|ют)\w*|"
+    r"высел\w*|"
+    r"аренд\w*|"
+    r"съезжа\w*|"
+    r"петици\w*|"
+    r"сбор\s+средств|"
+    r"поддерж(ите|ать)|"
+    r"нужна\s+помощь|"
+    r"помогите"
+    r")\b"
+)
+_COURSE_PROMO_RE = re.compile(
+    r"(?i)\b("
+    r"старт\s+курс\w*|"
+    r"набор\s+на\s+курс|"
+    r"курс\w*|"
+    r"обучени\w*|"
+    r"программ\w*\s+курс\w*|"
+    r"поток\s+|"
+    r"модул\w*|"
+    r"домашн\w*\s+задан\w*|"
+    r"куратор\w*|"
+    r"сертификат\w*|"
+    r"професси\w*\s+переподготовк\w*"
+    r")\b"
+)
+
+_SERVICE_PROMO_OCCASION_RE = re.compile(
+    r"(?iu)\b("
+    r"выпускн\w*|"
+    r"свадьб\w*|"
+    r"корпоратив\w*|"
+    r"тимбилдинг\w*|"
+    r"день\s+рождени\w*|"
+    r"юбиле\w*|"
+    r"банкет\w*|"
+    r"фуршет\w*"
+    r")\b"
+)
+_SERVICE_PROMO_OFFER_RE = re.compile(
+    r"(?iu)\b("
+    r"пакетн\w*\s+программ\w*|"
+    r"комплексн\w*\s+программ\w*|"
+    r"бронирован\w*|"
+    r"брониру\w*|"
+    r"заброниру\w*|"
+    r"бронь\b|"
+    r"заказ\w*|"
+    r"организу\w*|"
+    r"помож\w*\s+организ\w*|"
+    r"стоимость\s*(?:—|-|:)?\s*от\b|"
+    r"/\s*чел\b|"
+    r"на\s+чел(?:овек[ао]?)?\b"
+    r")\b"
+)
+_SERVICE_PROMO_CONTACT_RE = re.compile(
+    r"(?iu)\b("
+    r"телефон|"
+    r"whatsapp|"
+    r"вайбер|"
+    r"viber|"
+    r"telegram|"
+    r"tg|"
+    r"max|"
+    r"звоните|"
+    r"пишите|"
+    r"контакт\w*"
+    r")\b|"
+    r"(?:\+7|8)\s*\(?\d{3}\)?\s*\d{3}[\s-]*\d{2}[\s-]*\d{2}"
+)
+
+_WORK_SCHEDULE_RE = re.compile(
+    r"(?iu)\b("
+    r"график\s+работ\w*|"
+    r"расширенн\w*\s+график\w*|"
+    r"режим\s+работ\w*|"
+    r"часы\s+работ\w*|"
+    r"в\s+праздничн\w*\s+дни|"
+    r"в\s+выходн\w*\s+дни|"
+    r"праздничн\w*\s+дни|"
+    r"выходн\w*\s+дни|"
+    r"санитарн\w*\s+день|"
+    r"не\s+работа(?:ет|ют)|"
+    r"работаем\s+по\s+(?:обычн\w*|нов\w*)\s+график\w*|"
+    r"музе[йя]\s+работа(?:ет|ют)"
+    r")\b"
+)
+
+_WORK_SCHEDULE_DETAIL_RE = re.compile(
+    r"(?iu)\b("
+    r"понедельник|вторник|среда|четверг|пятниц[ауы]|суббот[ауы]|воскресень[ея]|"
+    r"пн|вт|ср|чт|пт|сб|вс|"
+    r"выходн\w*|санитарн\w*|"
+    r"с\s*\d{1,2}[:.]\d{2}\s*до\s*\d{1,2}[:.]\d{2}|"
+    r"\d{1,2}[:.]\d{2}\s*[–—-]\s*\d{1,2}[:.]\d{2}|"
+    r"\d{1,2}[./]\d{1,2}"
+    r")\b"
+)
+
+_EVENT_ACTION_INVITE_RE = re.compile(
+    r"(?iu)\b("
+    r"состо(ится|ятся)|"
+    r"пройд(ёт|ет|ут)|"
+    r"приглаша(ем|ю|ет)|"
+    r"встречаемс\w*|"
+    r"открыт(ие|ый)\s+урок|"
+    r"открыти(е|я)\s+выставк\w*|"
+    r"старт(?:ует|уем)\s+в\b|"
+    r"начал(о|а)\s+в\b"
+    r")\b"
+)
+
+_PRICE_CONTEXT_RE = re.compile(
+    r"(?iu)(?:"
+    r"\b(?:цена|стоимост\w*|руб(?:\.|л[её]й|ля|лей)?)\b"
+    r"|₽"
+    r"|р\."
+    r")"
+)
+_PRICE_NUMBER_RE = re.compile(r"(?u)\b\d{2,6}\b")
+_EVENT_INVITE_RE = re.compile(
+    r"(?i)\b("
+    r"состо(ится|ятся)|"
+    r"пройд(ёт|ет|ут)|"
+    r"приглаша(ем|ю|ет)|"
+    r"встречаемс\w*|"
+    r"открыт(ие|ый)\s+урок|"
+    r"мастер-?класс|"
+    r"лекци\w*|"
+    r"спектакл\w*|"
+    r"концерт\w*|"
+    r"показ\w*|"
+    r"выставк\w*"
+    r")\b"
+)
+
+_TOO_SOON_NOTICE_RE = re.compile(
+    r"(?iu)\b("
+    r"уже\s+через\s+\d{1,3}\s+минут|"
+    r"через\s+\d{1,3}\s+минут\s+(?:старт|начал\w*|начинаем)|"
+    r"стартует\s+через\s+\d{1,3}\s+минут|"
+    r"начинаем\s+через\s+\d{1,3}\s+минут"
+    r")\b"
+)
+_ONLINE_EVENT_RE = re.compile(
+    r"(?iu)\b("
+    r"онлайн|zoom|вебинар|webinar|телемост|"
+    r"стрим|трансляц\w*|youtube|"
+    r"подключайтес\w*|ссылка\s+на\s+подключен\w*"
+    r")\b"
+)
+_BOOK_REVIEW_RE = re.compile(r"(?iu)(#книг\w*|\bкниг\w*\b|\bчтени\w*\b|\bфл[эе]т\s+уайт\b)")
+_BOOK_EVENT_KEEP_RE = re.compile(
+    r"(?iu)\b(обсуждени\w*|книжн\w*\s+клуб|встреч\w*|дискусси\w*|презентац\w*|лекци\w*)\b"
+)
+_PHOTO_DAY_RE = re.compile(r"(?iu)\b(фото\s*дня|фотодня|photo\s+of\s+the\s+day)\b")
+_PHOTO_DAY_KEEP_ACTION_RE = re.compile(
+    r"(?iu)\b("
+    r"приглаша(ем|ю|ет)|"
+    r"приходите|"
+    r"жд[её]м\s+вас|"
+    r"состо(ится|ятся)|"
+    r"пройд(ёт|ет|ут)|"
+    r"открыти(е|я)|"
+    r"начал(о|а)|"
+    r"презентац\w*|"
+    r"экскурси\w*|"
+    r"лекци\w*|"
+    r"концерт\w*|"
+    r"спектакл\w*|"
+    r"мастер-?класс"
+    r")\b"
+)
+_PHOTO_DAY_TICKET_RE = re.compile(r"(?iu)\b(регистрац\w*|билет\w*|вход\w*|оплат\w*|бронь)\b")
+_PHOTO_DAY_PERIOD_RE = re.compile(
+    rf"(?iu)\b(?:с\s+\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE})\s+по\s+\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE})|"
+    rf"до\s+\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE})|"
+    rf"по\s+\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE}))\b"
+)
+
+
+def _looks_like_too_soon_notice(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    return bool(_TOO_SOON_NOTICE_RE.search(combined))
+
+
+def _looks_like_online_event(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    return bool(_ONLINE_EVENT_RE.search(combined))
+
+
+def _looks_like_book_review_not_event(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    if not _BOOK_REVIEW_RE.search(combined):
+        return False
+    # If it's framed as an event (discussion/club/lecture), keep it.
+    if _BOOK_EVENT_KEEP_RE.search(combined):
+        return False
+    # If there is a concrete start time/date anchor, treat as a real event instead of a review.
+    if re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", combined):
+        return False
+    if re.search(r"\b\d{1,2}[./]\d{1,2}\b", combined):
+        return False
+    if re.search(r"(?iu)\b(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\b", combined):
+        return False
+    return True
+
+
+def _looks_like_photo_day_not_event(
+    title: str | None,
+    text: str | None,
+    *,
+    candidate: EventCandidate | None = None,
+) -> bool:
+    """Detect rubric posts like "Фото дня" that should not become events.
+
+    "Фото дня" is a strong non-event hint, but we keep the post if it still contains
+    strong event signals (explicit time, period, tickets/registration, or an invite).
+    """
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    if not _PHOTO_DAY_RE.search(low):
+        return False
+    # Keep if the candidate already has explicit scheduling/ticket fields.
+    if candidate is not None:
+        if str(getattr(candidate, "time", "") or "").strip():
+            return False
+        if str(getattr(candidate, "end_date", "") or "").strip():
+            return False
+        if str(getattr(candidate, "ticket_link", "") or "").strip():
+            return False
+        if (
+            getattr(candidate, "ticket_price_min", None) is not None
+            or getattr(candidate, "ticket_price_max", None) is not None
+        ):
+            return False
+    # Keep if there's an explicit start time in the text.
+    if re.search(r"\b([01]?\d|2[0-3])[:.][0-5]\d\b", combined):
+        return False
+    # Keep if the post contains an exhibition-like period ("с ... по ...", "до ...", "по ...").
+    if _PHOTO_DAY_PERIOD_RE.search(low):
+        return False
+    # Keep if there's ticket/registration language.
+    if _PHOTO_DAY_TICKET_RE.search(low):
+        return False
+    # Keep if the post looks like an actual invite/announcement.
+    if _PHOTO_DAY_KEEP_ACTION_RE.search(low):
+        return False
+    return True
+
+
+def _looks_like_non_event_notice(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    if not _NON_EVENT_NOTICE_RE.search(low):
+        return False
+    # If the post looks like an actionable announcement for a specific event, keep it.
+    if _EVENT_INVITE_RE.search(combined):
+        return False
+    # Deadline-heavy informational posts are not events.
+    if _DEADLINE_RE.search(combined):
+        return True
+    # Strong "service notice" keywords alone are enough in practice.
+    return True
+
+
+def _looks_like_venue_status_update_not_event(title: str | None, text: str | None) -> bool:
+    """Detect non-event status updates about a venue/organisation.
+
+    Examples: "город может потерять площадку с 1 мая", "дана отсрочка до 1 июня",
+    eviction/lease issues, petitions, fundraising — these should not become events
+    to attend.
+    """
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    if not _VENUE_STATUS_UPDATE_RE.search(low):
+        return False
+    # Require a deadline-like date anchor to avoid skipping unrelated discussions.
+    if not (_DEADLINE_RE.search(combined) or _FROM_DATE_RE.search(low)):
+        return False
+    # If the post looks like a real event invite/announcement, keep it.
+    if _EVENT_INVITE_RE.search(combined):
+        return False
+    # If there is an explicit start time, treat as a likely event.
+    if re.search(r"\b([01]?\d|2[0-3])[:.][0-5]\d\b", combined):
+        return False
+    return True
+
+
+def _looks_like_open_call_not_event(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    if not _OPEN_CALL_RE.search(low):
+        return False
+    # If the post is clearly an actionable one-off event invite with a concrete start time,
+    # do not treat it as an open-call notice.
+    if re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", combined) and _EVENT_INVITE_RE.search(combined):
+        return False
+    return True
+
+
+def _looks_like_course_promo(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    if not _COURSE_PROMO_RE.search(combined):
+        return False
+    # If it's clearly a one-off masterclass/lecture with concrete start time, keep it.
+    if re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", combined) and _EVENT_INVITE_RE.search(combined):
+        return False
+    # "Старт курса" and multi-session language strongly indicates non-event promo content.
+    if re.search(r"(?i)\bна\s+кажд(ом|ом\s+из)\s+заняти\w*\b", combined):
+        return True
+    if re.search(r"(?i)\bстарт\s+курс\w*\b", combined):
+        return True
+    return True
+
+
+def _looks_like_service_promo_not_event(title: str | None, text: str | None) -> bool:
+    """Detect promotions for "event hosting services" (packages/booking), not one-off events.
+
+    Example: "Выпускные 2026 ... пакетные программы ... бронирование открыто ... телефон ...".
+    """
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    # If there are explicit date/time anchors, treat it as a potential real event.
+    # This filter targets promos without a concrete schedule.
+    if _has_datetime_signals(combined):
+        return False
+    low = combined.casefold()
+    if not _SERVICE_PROMO_OCCASION_RE.search(low):
+        return False
+    if not _SERVICE_PROMO_OFFER_RE.search(low):
+        return False
+    # Reduce false positives: require either explicit contacts or price-like signals.
+    if _SERVICE_PROMO_CONTACT_RE.search(combined):
+        return True
+    if _PRICE_CONTEXT_RE.search(combined) and _PRICE_NUMBER_RE.search(combined):
+        return True
+    return False
+
+
+def _looks_like_work_schedule_notice(title: str | None, text: str | None) -> bool:
+    """Institution work schedules must not become events."""
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    has_schedule_headline = bool(_WORK_SCHEDULE_RE.search(low))
+    has_schedule_details = bool(_WORK_SCHEDULE_DETAIL_RE.search(combined))
+    if not (has_schedule_headline or (("музей" in low or "библиотек" in low) and has_schedule_details)):
+        return False
+    # If the post is clearly announcing a concrete attendable event, keep it.
+    # Use action verbs, not generic nouns ("выставка/концерт"), otherwise
+    # work-schedule notices with occasional cultural terms slip through.
+    if _EVENT_ACTION_INVITE_RE.search(combined):
+        return False
+    # Explicit timetable-like details are a strong non-event signal.
+    if has_schedule_details:
+        return True
+    return True
+
+
+def _looks_like_congrats_notice_not_event(title: str | None, text: str | None) -> bool:
+    """Congratulation/holiday promos are not events unless there's an explicit event invite."""
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    if not _CONGRATS_RE.search(low):
+        return False
+    # If it looks like a real event invite/announcement, keep.
+    if _EVENT_INVITE_RE.search(combined):
+        return False
+    return True
+
+
+def _has_price_evidence(text: str | None, *values: int | None) -> bool:
+    """Return True when source text contains price-like context + numbers.
+
+    Deterministic guardrail to prevent LLM/extractor hallucinations for ticket prices.
+    """
+    raw = str(text or "")
+    if not raw:
+        return False
+    if not (_PRICE_CONTEXT_RE.search(raw) and _PRICE_NUMBER_RE.search(raw)):
+        return False
+    nums = {int(v) for v in values if isinstance(v, int) and v > 0}
+    if not nums:
+        return True
+    for n in nums:
+        if re.search(rf"(?u)\b{re.escape(str(n))}\b", raw):
+            return True
+    # If we have price context but none of the specific values appear, treat as unsupported.
+    return False
+
+
+_UTILITY_OUTAGE_RE = re.compile(
+    r"(?iu)\b("
+    r"отключен\w*\s+(?:электроэнерг\w*|свет\w*|вод\w*|тепл\w*|газ\w*)|"
+    r"времен\w*\s+отключен\w*|"
+    r"планов\w*\s+отключен\w*|"
+    r"аварийн\w*\s+отключен\w*|"
+    r"перерыв\w*\s+в\s+(?:электроснабжен\w*|водоснабжен\w*|теплоснабжен\w*|газоснабжен\w*)|"
+    r"(?:электроснабжен\w*|водоснабжен\w*|теплоснабжен\w*|газоснабжен\w*)\s+(?:будет|ограничен\w*|отключен\w*)|"
+    r"перекрыт\w*\s+(?:движен\w*|дорог\w*|улиц\w*|проезд\w*)|"
+    r"ограничен\w*\s+(?:движен\w*|проезд\w*)|"
+    r"закрыт\w*\s+(?:движен\w*|проезд\w*)"
+    r")\b"
+)
+
+
+def _looks_like_utility_outage_or_road_closure(title: str | None, text: str | None) -> str | None:
+    """
+    Municipal notices (utility outages / road closures) must not become events.
+    Deterministic guard: no LLM, no content rewriting.
+    Returns a reason suffix for SmartUpdateResult.reason when matched.
+    """
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
         return None
-    lines: list[str] = []
-    # Some offline fixtures use literal "\\n" sequences instead of real newlines.
-    raw = str(text).replace("\\n", "\n")
-    for line in raw.splitlines():
-        # Drop generic "promo of announcement channel" lines: they are not event facts and
-        # routinely bloat descriptions (e.g. "Информация о событиях ... в Telegram-канале ...").
-        if _CHANNEL_PROMO_STRIP_RE.search(line):
-            if not _has_datetime_signals(line):
-                continue
-        # Promotions often appear inside a real announcement. Drop ONLY "pure promo" lines
-        # that don't carry event facts (date/time/title-like signals).
-        if _PROMO_STRIP_RE.search(line):
-            if not _has_datetime_signals(line) and not _EVENT_SIGNAL_RE.search(line):
-                continue
-        lines.append(line)
-    cleaned = "\n".join(lines).strip()
-    return cleaned or None
+    if not _UTILITY_OUTAGE_RE.search(combined):
+        return None
+    low = combined.casefold()
+    if "перекры" in low or "огранич" in low or "проезд" in low or "движен" in low:
+        return "road_closure"
+    return "utility_outage"
+
+
+def _strip_promo_lines(text: str | None) -> str | None:
+    # Deterministic line-level cutting is not allowed (LLM handles this).
+    raw = str(text or "").replace("\\n", "\n").strip()
+    return raw or None
 
 
 def _strip_giveaway_lines(text: str | None) -> str | None:
-    """Remove giveaway mechanics while preserving event facts when present."""
-    if not text:
-        return None
-    kept: list[str] = []
-    # Some offline fixtures use literal "\\n" sequences instead of real newlines.
-    raw = str(text).replace("\\n", "\n")
-    for line in raw.splitlines():
-        if _GIVEAWAY_LINE_RE.search(line):
-            # Keep a line if it looks like it contains event facts (date/time/title-ish).
-            if _has_datetime_signals(line) or _EVENT_SIGNAL_RE.search(line):
-                kept.append(line)
-            continue
-        kept.append(line)
-    cleaned = "\n".join(kept).strip()
-    return cleaned or None
+    # Deterministic line-level cutting is not allowed (LLM handles this).
+    raw = str(text or "").replace("\\n", "\n").strip()
+    return raw or None
 
 
 def _candidate_has_event_anchors(candidate: EventCandidate) -> bool:
@@ -1640,10 +3356,34 @@ def _extract_quote_candidates(text: str | None, *, max_items: int = 2) -> list[s
     if not raw:
         return []
     raw = raw.replace("\r", "\n")
-    # Split by sentence-ish boundaries while keeping it simple and deterministic.
-    chunks = re.split(r"[.!?…]\s+|\n{2,}|\n", raw)
     candidates: list[str] = []
     seen: set[str] = set()
+
+    # Deterministic direct speech in «...»: keep valuable quotes verbatim even when
+    # they're not first-person. This helps Telegraph formatting (blockquote) and
+    # prevents the LLM from paraphrasing away the original wording.
+    for m in re.finditer(r"(?s)«([^»]{25,900})»", raw):
+        q = re.sub(r"\s+", " ", (m.group(1) or "").strip())
+        if not q:
+            continue
+        words = re.findall(r"[a-zа-яё0-9]{2,}", q, flags=re.IGNORECASE)
+        looks_like_title = len(words) <= 6 and not re.search(r"[.!?…]", q)
+        if looks_like_title:
+            continue
+        if len(words) < 8:
+            continue
+        cleaned_q = _normalize_fact_item(q, limit=170)
+        if not cleaned_q:
+            continue
+        key_q = cleaned_q.lower()
+        if key_q in seen:
+            continue
+        seen.add(key_q)
+        candidates.append(cleaned_q)
+        if len(candidates) >= max_items:
+            return candidates
+    # Split by sentence-ish boundaries while keeping it simple and deterministic.
+    chunks = re.split(r"[.!?…]\s+|\n{2,}|\n", raw)
     sched_re = re.compile(r"^\s*\d{1,2}\.\d{1,2}\s*\|\s*.+$")
     # Russian first-person / opinion markers.
     fp_re = re.compile(
@@ -1692,7 +3432,7 @@ def _extract_director_name_hint(
 
     # Generic RU "First Last" name capture near "режисс".
     # Example: "Режиссёр спектакля — Егор Равинский."
-    name_re = re.compile(r"(?i)\bрежисс\w*\b[^\\n]{0,80}?([А-ЯЁ][а-яё]+\\s+[А-ЯЁ][а-яё]+)")
+    name_re = re.compile(r"(?i)\bрежисс\w*\b[^\n]{0,80}?([А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+)")
     m = name_re.search(text)
     if m:
         return m.group(1).strip()
@@ -1718,7 +3458,7 @@ def _inject_direct_quote_blockquote(
     q = (quote or "").strip()
     if not desc or not q:
         return description
-    if re.search(r"(?m)^>\\s+", desc):
+    if re.search(r"(?m)^>\s+", desc):
         return description
 
     # Avoid duplicating the same quote if it already appears verbatim.
@@ -1805,7 +3545,7 @@ async def _ensure_direct_quote_blockquote(
     desc = (description or "").strip()
     if not desc:
         return description
-    if re.search(r"(?m)^>\\s+", desc):
+    if re.search(r"(?m)^>\s+", desc):
         return description
 
     qc = [str(q or "").strip() for q in (quote_candidates or []) if str(q or "").strip()]
@@ -1814,7 +3554,7 @@ async def _ensure_direct_quote_blockquote(
 
     quote = qc[0]
     enforced = await _llm_enforce_blockquote(description=desc, quote=quote, label=label)
-    if enforced and re.search(r"(?m)^>\\s+", enforced):
+    if enforced and re.search(r"(?m)^>\s+", enforced):
         director = _extract_director_name_hint(candidate_text=candidate_text, facts_before=facts_before)
         return _ensure_blockquote_has_attribution(description=enforced, attribution_name=director)
 
@@ -2103,6 +3843,28 @@ def _initial_textual_facts(candidate: EventCandidate, *, max_items: int = 2) -> 
     return out
 
 
+def _render_location_fact_value(
+    *,
+    location_name: str | None,
+    location_address: str | None,
+    city: str | None,
+) -> str | None:
+    name = (location_name or "").strip()
+    if not name:
+        return None
+    # If location_name already looks like a canonical full line ("name, address, city"),
+    # do not duplicate address/city from separate fields in source logs.
+    if name.count(",") >= 2:
+        return name
+    parts = [
+        name,
+        (location_address or "").strip(),
+        (city or "").strip(),
+    ]
+    value = ", ".join(part for part in parts if part)
+    return value or None
+
+
 def _initial_added_facts(candidate: EventCandidate) -> list[str]:
     facts: list[str] = []
     if candidate.date:
@@ -2111,12 +3873,11 @@ def _initial_added_facts(candidate: EventCandidate) -> list[str]:
         facts.append(f"Дата окончания: {candidate.end_date}")
     if candidate.time:
         facts.append(f"Время: {candidate.time}")
-    location_parts = [
-        candidate.location_name,
-        candidate.location_address,
-        candidate.city,
-    ]
-    location = ", ".join(part.strip() for part in location_parts if part and part.strip())
+    location = _render_location_fact_value(
+        location_name=candidate.location_name,
+        location_address=candidate.location_address,
+        city=candidate.city,
+    )
     if location:
         facts.append(f"Локация: {location}")
     if candidate.is_free is True:
@@ -2135,6 +3896,8 @@ def _initial_added_facts(candidate: EventCandidate) -> list[str]:
         facts.append(f"Тип: {candidate.event_type}")
     if candidate.festival:
         facts.append(f"Фестиваль: {candidate.festival}")
+    if candidate.festival_full:
+        facts.append(f"Выпуск фестиваля: {candidate.festival_full}")
     if candidate.pushkin_card is True:
         facts.append("Пушкинская карта")
     # IMPORTANT: Do not emit "Тезис: ..." pseudo-facts. Operator log must contain facts only.
@@ -2162,12 +3925,11 @@ def _candidate_anchor_facts_for_log(candidate: EventCandidate) -> list[str]:
         facts.append(f"Дата окончания: {candidate.end_date}")
     if candidate.time:
         facts.append(f"Время: {candidate.time}")
-    location_parts = [
-        candidate.location_name,
-        candidate.location_address,
-        candidate.city,
-    ]
-    location = ", ".join(part.strip() for part in location_parts if part and part.strip())
+    location = _render_location_fact_value(
+        location_name=candidate.location_name,
+        location_address=candidate.location_address,
+        city=candidate.city,
+    )
     if location:
         facts.append(f"Локация: {location}")
     if candidate.is_free is True:
@@ -2184,6 +3946,8 @@ def _candidate_anchor_facts_for_log(candidate: EventCandidate) -> list[str]:
         facts.append(f"Тип: {candidate.event_type}")
     if candidate.festival:
         facts.append(f"Фестиваль: {candidate.festival}")
+    if candidate.festival_full:
+        facts.append(f"Выпуск фестиваля: {candidate.festival_full}")
     if candidate.pushkin_card is True:
         facts.append("Пушкинская карта")
 
@@ -2314,7 +4078,12 @@ def _canonicalize_location_fields(
 def _normalize_location(value: str | None) -> str:
     if not value:
         return ""
-    norm = _norm_space(value)
+    # Normalize for matching only (not for public display): remove punctuation noise and
+    # make "Янтарь-холл" ~= "Янтарь холл, Ленина 11".
+    norm = _normalize_location_compact(value)
+    norm = norm.replace("-", " ").replace("—", " ")
+    norm = re.sub(r"[«»\"']", " ", norm)
+    norm = re.sub(r"\s+", " ", norm).strip()
     norm = _LOCATION_NOISE_PREFIXES_RE.sub("", norm).strip()
     # Canonicalize aliases of Kaliningrad Regional Scientific Library.
     # Do NOT merge BFU library names into this bucket.
@@ -2338,6 +4107,26 @@ def _location_matches(a: str | None, b: str | None) -> bool:
     if na in nb or nb in na:
         return True
     return False
+
+
+def _apply_soft_city_filter(stmt, city: str | None):
+    """Filter by candidate city, but keep legacy rows with empty city.
+
+    Telegram/VK imports can create an event with `city=""` first, then a later
+    source of the same event may resolve city correctly (e.g. "Калининград").
+    Strict city equality would hide the existing row from shortlist and create
+    a duplicate instead of merge.
+    """
+    city_value = str(city or "").strip()
+    if not city_value:
+        return stmt
+    return stmt.where(
+        or_(
+            Event.city == city_value,
+            Event.city.is_(None),
+            Event.city == "",
+        )
+    )
 
 
 @lru_cache(maxsize=1)
@@ -2774,6 +4563,7 @@ async def _llm_extract_candidate_facts(
         "additionalProperties": False,
     }
     payload = {
+        "today": date.today().isoformat(),
         "title": candidate.title,
         "date": candidate.date,
         "time": candidate.time,
@@ -2803,12 +4593,15 @@ async def _llm_extract_candidate_facts(
         "(если в источнике есть кавычки, сохрани кавычки).\n"
         "- НЕ включай дату/время/адрес/город как отдельные факты (они фиксируются отдельно).\n"
         "- НЕ включай строки расписания вида `DD.MM | Название`.\n"
+        f"- {SMART_UPDATE_FACTS_PRESERVE_COMPACT_PROGRAM_LISTS_RULE}\n"
         "- Не используй хэштеги (`#...`) в формулировках фактов.\n"
         "- НЕ включай рекламные призывы, скидки/промокоды, механику розыгрыша.\n"
         "- НЕ включай промо-упоминания «где следить за анонсами» и ссылки на каналы/чаты с афишей "
         "(например «Информация о событиях ... доступна в Telegram-канале ...»).\n"
         "- Включай условия участия/посещения (длительность, возраст, максимальный размер группы, формат/что взять/как одеться, "
-        "что входит/не входит в оплату, нужен ли отдельный входной билет). Не вставляй ссылки/телефоны; "
+        "что входит/не входит в оплату, нужен ли отдельный входной билет). Не вставляй ссылки/телефоны, "
+        "КРОМЕ: если в источнике есть ссылка на плейлист Я.Музыки (music.yandex.ru/users/.../playlists/...), "
+        "можно вернуть 1 факт с этой ссылкой; "
         "точную сумму указывай только если это важно, чтобы пояснить «что оплачивается отдельно» (не более 1 факта).\n"
         "- НЕ включай факты про общие новости площадки/организации, если они не описывают само событие "
         "(например отчёты о работе филиала, планы на год, пресс-анонсы о будущих репортажах).\n"
@@ -2898,7 +4691,69 @@ async def _llm_enforce_blockquote(
     return text.strip() if text else None
 
 
-async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | None:
+async def _llm_remove_infoblock_logistics(
+    *,
+    description: str,
+    candidate: EventCandidate,
+    label: str,
+) -> str | None:
+    """Ask LLM to remove duplicated logistics from narrative text (infoblock already covers it).
+
+    NOTE: We intentionally do NOT do deterministic regex-based cutting here. If the model
+    fails, we prefer keeping duplicates over breaking grammar or deleting meaning.
+    """
+    if SMART_UPDATE_LLM_DISABLED:
+        return None
+    desc = (description or "").strip()
+    if not desc:
+        return None
+    payload = {
+        "title": candidate.title,
+        "date": candidate.date,
+        "time": candidate.time,
+        "end_date": candidate.end_date,
+        "location_name": candidate.location_name,
+        "location_address": candidate.location_address,
+        "city": candidate.city,
+        "ticket_link": candidate.ticket_link,
+        "ticket_status": candidate.ticket_status,
+        "ticket_price_min": candidate.ticket_price_min,
+        "ticket_price_max": candidate.ticket_price_max,
+        "is_free": candidate.is_free,
+        "event_type": candidate.event_type,
+        "festival": candidate.festival,
+        "description": _clip(desc, 6500),
+    }
+    prompt = (
+        "Ты — редактор текста анонса.\n"
+        "Задача: убрать из описания повторы логистики, потому что она уже показывается отдельным инфоблоком сверху.\n"
+        "Что убрать (если встречается в описании как отдельная логистика):\n"
+        "- дата/время/диапазон дат\n"
+        "- площадка, точный адрес, город\n"
+        "- ссылки/телефон/контакты\n"
+        "- точные цены/стоимость билетов/регистрации\n"
+        "Правила:\n"
+        "- Верни ПОЛНЫЙ обновлённый текст описания.\n"
+        "- Не вырезай смысловые фрагменты и не ломай грамматику.\n"
+        "- Не добавляй новых фактов. Не меняй стиль.\n"
+        "- Сохраняй пунктуацию и абзацы. Не превращай текст в список, если он был прозой.\n"
+        f"{SMART_UPDATE_YO_RULE}\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    text = await _ask_gemma_text(
+        prompt,
+        max_tokens=900,
+        label=label,
+        temperature=0.0,
+    )
+    return text.strip() if text else None
+
+
+async def _rewrite_description_journalistic(
+    candidate: EventCandidate,
+    *,
+    strict_nonverbatim: bool = False,
+) -> str | None:
     """Produce a non-verbatim, journalist-style description for external imports.
 
     Keep this best-effort: failures must not block event creation/merge.
@@ -2914,11 +4769,25 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
     # description for Telegraph.
     excerpt_raw = (candidate.raw_excerpt or "").strip()
     source_raw = (candidate.source_text or "").strip()
-    base = excerpt_raw or source_raw
+    poster_raw = "\n\n".join(
+        [
+            (p.ocr_text or "").strip()
+            for p in (candidate.posters or [])[:2]
+            if (p.ocr_text or "").strip()
+        ]
+    ).strip()
+    base = excerpt_raw or source_raw or poster_raw
     if _should_prefer_source_text_for_description(source_raw, excerpt_raw):
         base = source_raw
     base = _strip_promo_lines(base) or base
     base = _strip_private_use(base) or base
+    base = _normalize_bullet_markers(base) or base
+    if len(base) < 80 and poster_raw:
+        poster_clean = _strip_promo_lines(poster_raw) or poster_raw
+        poster_clean = _strip_private_use(poster_clean) or poster_clean
+        poster_clean = _normalize_bullet_markers(poster_clean) or poster_clean
+        if len((poster_clean or "").strip()) >= 80:
+            base = (poster_clean or "").strip()
     if len(base) < 80:
         return None
 
@@ -2938,7 +4807,8 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         "source_type": candidate.source_type,
         "raw_excerpt": _clip(_strip_promo_lines(candidate.raw_excerpt) or candidate.raw_excerpt, 1200),
         "source_text": _clip(
-            _strip_promo_lines(candidate.source_text) or candidate.source_text,
+            _normalize_bullet_markers(_strip_promo_lines(candidate.source_text) or candidate.source_text)
+            or (_strip_promo_lines(candidate.source_text) or candidate.source_text),
             SMART_UPDATE_REWRITE_SOURCE_MAX_CHARS,
         ),
         "quote_candidates": _extract_quote_candidates(
@@ -2946,17 +4816,57 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
             max_items=2,
         ),
         "poster_texts": [_clip(p.ocr_text, 500) for p in candidate.posters if p.ocr_text][:3],
+        "poster_titles": [
+            _clip(p.ocr_title, 140)
+            for p in candidate.posters
+            if (p.ocr_title or "").strip()
+        ][:3],
     }
+    strict_block = ""
+    if strict_nonverbatim:
+        strict_block = (
+            "СТРОГОЕ требование к анти-дословности:\n"
+            "- Не копируй предложения из источника дословно.\n"
+            "- Не допускай длинных совпадающих фрагментов (ориентир: не более 8–10 слов подряд).\n"
+            "- Если перефразировать нельзя без потери смысла — лучше сократи этот фрагмент.\n\n"
+        )
+    telegram_block = ""
+    tone_hint = "Передай суть и атмосферу"
+    if candidate.source_type == "telegram":
+        tone_hint = "Передай суть"
+        short_base_len = len(base.strip())
+        if 80 <= short_base_len <= 350:
+            cap_hint = max(220, short_base_len + 100)
+            telegram_block = (
+                "Особенности Telegram (короткий источник):\n"
+                f"- Длина результата: не длиннее {cap_hint} символов.\n"
+                "- Не раздувай текст и не добавляй общие фразы «про атмосферу/вовлечённость/уникальность».\n"
+                "- Запрещены штампы вроде «это создаёт ...».\n"
+                "- Не добавляй технические заголовки/секции про факты: `Facts`, `Added Facts`, `Facts/Added Facts`, "
+                "а также «Факты…», «Факты о событии».\n"
+                "- Если есть прямая речь в «...» — сохрани её ДОСЛОВНО и оформи как blockquote (`>`).\n\n"
+            )
+        else:
+            telegram_block = (
+                "Особенности Telegram:\n"
+                "- Избегай клише и пустых фраз (особенно «это создаёт ...»).\n"
+                "- Не добавляй технические заголовки/секции про факты: `Facts`, `Added Facts`, `Facts/Added Facts`, "
+                "а также «Факты…», «Факты о событии».\n\n"
+            )
     prompt = (
         "Ты — культурный журналист. Сделай журналистский рерайт анонса мероприятия. "
-        "Передай суть и атмосферу, но НЕ копируй исходные фразы дословно. "
+        f"{tone_hint}, но НЕ копируй исходные фразы дословно. "
         "Не добавляй выдуманных фактов, используй только то, что есть в данных. "
         "Запрещено придумывать утверждения вроде 'премьера', 'впервые', 'аншлаг' и т.п., "
         "если это явно не сказано в источнике. "
         f"{SMART_UPDATE_YO_RULE} "
         f"{SMART_UPDATE_PRESERVE_LISTS_RULE} "
         f"{SMART_UPDATE_VISITOR_CONDITIONS_RULE} "
-        "Без эмодзи и без хэштегов. "
+        f"{SMART_UPDATE_OPTIONAL_HEADINGS_RULE} "
+        f"{_description_emoji_prompt_rule()}"
+        "Без хэштегов. "
+        "Не добавляй отдельные секции/заголовки про факты (например «Факты…», «Факты о событии», "
+        "«Facts/Added Facts»): факты формируются и показываются отдельно. "
         "Важно: НЕ повторяй в описании логистику (дата/время/площадка/точный адрес/город/ссылки/телефон/контакты/точные цены) — "
         "она показывается отдельным инфоблоком сверху. "
         "Убери промо чужих/вспомогательных каналов с анонсами и призывы подписаться "
@@ -2964,9 +4874,13 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         "Можно использовать минимальную разметку для читабельности: "
         "заголовки `###`, цитаты блоком `> ...`, редкое выделение `**...**`. "
         "НЕ используй Markdown-ссылки вида `[текст](url)` и не вставляй таблицы. "
+        "Согласуй время повествования с датой события: "
+        "если дата события в будущем (относительно поля `today`) — используй будущее время "
+        "(например «пройдёт», «состоится»), а не «проходит». "
         "Убери рекламные и акционные фрагменты (скидки/промокоды/акция) и механику розыгрыша, если они не являются частью сути события. "
         "Не включай малозначимые и повторяющиеся строки (например `DD.MM | Название`, повтор даты/заголовка, «представление состоится ...» при уже указанной дате/времени). "
         "Если в источнике есть обрыв фразы/текста (в т.ч. обрезано на середине слова), не вставляй это дословно: либо перефразируй, либо опусти. "
+        "Не экранируй кавычки обратным слэшем (не пиши `\\\"...\\\"`). "
         "Если в тексте есть прямая речь/цитата (1-е лицо: 'я/мне/кажется/думаю' и т.п.), "
         "НЕ переписывай её в косвенную речь: включи её ДОСЛОВНО как цитату блоком `>` и не дублируй ту же мысль пересказом рядом. "
         "Если понятно, кто автор цитаты (например режиссёр), добавь атрибуцию: `— Имя Фамилия` рядом с цитатой. "
@@ -2987,6 +4901,8 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         "- В тексте НЕТ ссылок/телефонов/точных адресов/цен/времени/дат (они уже в инфоблоке).\n"
         "- НЕТ обрывов фраз (например «стоимость … составит» без продолжения).\n"
         "- НЕТ странных/непонятных слов и опечаток; если слово выглядит ошибочным — перефразируй.\n\n"
+        f"{telegram_block}"
+        f"{strict_block}"
         f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     text = await _ask_gemma_text(
@@ -3021,7 +4937,7 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         description=cleaned,
         attribution_name=director_name_hint,
     )
-    if quote_candidates and not re.search(r"(?m)^>\\s+", cleaned):
+    if quote_candidates and not re.search(r"(?m)^>\s+", cleaned):
         cleaned = await _ensure_direct_quote_blockquote(
             description=cleaned,
             quote_candidates=quote_candidates,
@@ -3038,11 +4954,28 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         )
 
     if _description_needs_infoblock_logistics_strip(cleaned, candidate=candidate):
-        stripped = _strip_infoblock_logistics_from_description(cleaned, candidate=candidate)
-        if stripped:
-            cleaned = stripped
+        try:
+            edited = await _llm_remove_infoblock_logistics(
+                description=cleaned,
+                candidate=candidate,
+                label="rewrite_remove_logistics",
+            )
+        except Exception:  # pragma: no cover - network failures
+            edited = None
+        if edited:
+            edited = _normalize_plaintext_paragraphs(edited) or edited
+            cleaned = edited
     if _description_needs_channel_promo_strip(cleaned):
         cleaned = _strip_channel_promo_from_description(cleaned) or cleaned
+
+    cleaned = (
+        _append_missing_small_list(
+            description=cleaned,
+            source_text=base,
+            source_type=candidate.source_type,
+        )
+        or cleaned
+    )
 
     # For short Telegram snippets (1-2 lines), keep rewrite volume near source size.
     # This prevents aggressive expansion/hallucinated "long reads" when source is concise.
@@ -3051,7 +4984,7 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         if 80 <= short_base_len <= 350:
             max_allowed = min(
                 SMART_UPDATE_DESCRIPTION_MAX_CHARS,
-                max(260, int(short_base_len * 1.9) + 120),
+                max(220, int(short_base_len) + 100),
             )
             if len(cleaned) > max_allowed:
                 logger.info(
@@ -3098,13 +5031,25 @@ _LONG_EVENT_TEXT_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ACTION_TITLE_RE = re.compile(r"(?i)\bакци\w*\b")
+_ONE_DAY_ACTION_HINT_RE = re.compile(
+    r"(?i)\b("
+    r"билет\w*\s+действ\w*.*\bтолько\b|"
+    r"только\s+(?:сегодня|завтра)|"
+    r"на\s+завтра|"
+    r"на\s+сегодня|"
+    r"указанн\w+\s+дат\w+|"
+    r"одн[ау]\s+дат[ау]\b"
+    r")\b"
+)
+
 
 def _has_long_event_duration_signals(text: str | None) -> bool:
     raw = str(text or "").strip()
     if not raw:
         return False
     month_pat = "|".join(sorted(map(re.escape, _RU_MONTHS_GENITIVE.keys()), key=len, reverse=True))
-    if re.search(r"\b20\d{2}-\d{2}-\d{2}\s*\\.\\.\\s*20\d{2}-\d{2}-\d{2}\b", raw):
+    if re.search(r"\b20\d{2}-\d{2}-\d{2}\s*\.\.\s*20\d{2}-\d{2}-\d{2}\b", raw):
         return True
     if re.search(r"\b\d{1,2}[./]\d{1,2}\s*[-–—]\s*\d{1,2}[./]\d{1,2}\b", raw):
         return True
@@ -3142,13 +5087,47 @@ def _maybe_apply_default_end_date_for_long_event(candidate: EventCandidate) -> s
             str(candidate.source_text or ""),
         ]
     ).strip()
+    # "Акция" posts (free ticket days, service campaigns) are not long-running exhibitions.
+    # Even if they mention "экспозиции", they should not become 1-month ranges by default.
+    if _ACTION_TITLE_RE.search(str(candidate.title or "")) and _ONE_DAY_ACTION_HINT_RE.search(hay):
+        return None
     if hay and not (_LONG_EVENT_TEXT_HINT_RE.search(hay) or _has_long_event_duration_signals(hay)):
         return None
     start = _parse_iso_date(candidate.date)
     if not start:
         return None
     candidate.end_date = _add_one_calendar_month(start).isoformat()
+    candidate.end_date_is_inferred = True
     return candidate.end_date
+
+
+def _apply_event_end_date(
+    event_db: Event,
+    *,
+    end_date: str | None,
+    inferred: bool,
+    updated_keys: list[str],
+) -> bool:
+    if not end_date:
+        return False
+    current_end_date = getattr(event_db, "end_date", None)
+    current_inferred = bool(getattr(event_db, "end_date_is_inferred", False))
+
+    if current_end_date and (not current_inferred) and inferred:
+        return False
+
+    changed = False
+    if current_end_date != end_date:
+        event_db.end_date = end_date
+        changed = True
+        if "end_date" not in updated_keys:
+            updated_keys.append("end_date")
+    if current_inferred != inferred:
+        event_db.end_date_is_inferred = inferred
+        changed = True
+        if "end_date_is_inferred" not in updated_keys:
+            updated_keys.append("end_date_is_inferred")
+    return changed
 
 
 def _event_date_range(ev: Event) -> tuple[date | None, date | None]:
@@ -3194,7 +5173,7 @@ def _is_http_url(url: str | None) -> bool:
 
 
 _VK_WALL_URL_RE = re.compile(
-    r"^https?://(?:m\\.)?vk\\.com/wall-?\\d+_\\d+/?$",
+    r"^https?://(?:m\.)?vk\.com/wall-?\d+_\d+/?$",
     re.IGNORECASE,
 )
 
@@ -3267,6 +5246,226 @@ async def _ensure_legacy_event_sources(session, event: Event | None) -> int:
     return added
 
 
+SMART_UPDATE_LEGACY_DESC_FACT_MAX_CHARS = _env_int(
+    "SMART_UPDATE_LEGACY_DESC_FACT_MAX_CHARS", 900, lo=200, hi=2500
+)
+SMART_UPDATE_LEGACY_DESC_FACT_EXTRACT_MIN_CHARS = _env_int(
+    # Avoid extracting facts from ultra-short legacy descriptions: the risk of hallucination is high.
+    "SMART_UPDATE_LEGACY_DESC_FACT_EXTRACT_MIN_CHARS",
+    160,
+    lo=80,
+    hi=2000,
+)
+
+_LEGACY_LEAK_RE = re.compile(r"(?i)\bsmart\s*update\b")
+
+
+def _drop_legacy_leak_from_description(description: str | None) -> str | None:
+    """Remove a previously injected legacy snapshot block from a description.
+
+    This is a backward-compat cleanup for a historical bug where a legacy snapshot
+    was treated as an "added fact" and ended up in the public description.
+    The heuristic is intentionally narrow: it only drops paragraphs that mention
+    "Smart Update" and look like a quoted service block.
+    """
+    raw = (description or "").strip()
+    if not raw:
+        return None
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    paras = [p.strip() for p in re.split(r"\n{2,}", raw) if p.strip()]
+    if not paras:
+        return None
+    kept: list[str] = []
+    for p in paras:
+        low = p.casefold()
+        looks_like_quote = p.startswith(("«", ">", "“", '"', "'"))
+        looks_like_service = _LEGACY_LEAK_RE.search(p) and (":" in p[:60]) and ("текст" in low or "legacy" in low)
+        if looks_like_quote and looks_like_service:
+            continue
+        kept.append(p)
+    cleaned = "\n\n".join(kept).strip()
+    return cleaned or None
+
+
+def _legacy_description_to_fact(description: str | None) -> str | None:
+    raw = (description or "").strip()
+    if not raw:
+        return None
+
+    # Keep it compact and neutral: a one-time backfill for legacy events that existed
+    # before Smart Update/source facts. This must not inject new claims.
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"(?m)^\s*#+\s+", "", text)  # markdown headings
+    text = re.sub(r"(?m)^\s*>\s*", "", text)  # markdown quotes
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+    return _clip(text, SMART_UPDATE_LEGACY_DESC_FACT_MAX_CHARS)
+
+
+async def _ensure_legacy_description_fact(
+    session,
+    *,
+    event: Event | None,
+    legacy_description: str | None,
+) -> list[str]:
+    """Persist a legacy description snapshot (and optionally backfill baseline facts).
+
+    For events created before Smart Update/source facts, a merge can overwrite the previous
+    narrative too aggressively. We store a compact snapshot of the old description as a
+    dedicated legacy source. In fact-first mode, we also extract atomic baseline facts from
+    that legacy text and store them under the legacy source so future fact-first builds do
+    not lose pre-existing details.
+
+    Important: we do NOT feed legacy facts into `facts_before` for LLM merge (see query that
+    excludes `source_type == "legacy"`). This prevents non-source "snapshots" from polluting
+    per-source merge reasoning while still allowing fact-first to use the backfilled facts.
+    """
+
+    if not event or not event.id:
+        return []
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    legacy_url = f"legacy:event_description:{int(event.id)}"
+    source = (
+        await session.execute(
+            select(EventSource).where(
+                EventSource.event_id == int(event.id),
+                EventSource.source_url == legacy_url,
+            )
+        )
+    ).scalar_one_or_none()
+    created_source = False
+
+    snapshot: str | None = None
+    if source and getattr(source, "source_text", None):
+        snapshot = str(getattr(source, "source_text", None) or "").strip() or None
+
+    if not source:
+        snapshot = _legacy_description_to_fact(legacy_description)
+        if not snapshot:
+            return []
+
+        # Only create a legacy snapshot when the event has no canonical facts yet (legacy/pre-Smart Update).
+        # Notes/service rows do not count: we need at least one `added/duplicate` fact from a real source.
+        exists_non_legacy = (
+            await session.execute(
+                select(EventSourceFact.id)
+                .join(EventSource, EventSourceFact.source_id == EventSource.id)
+                .where(
+                    EventSourceFact.event_id == int(event.id),
+                    EventSourceFact.status.in_(("added", "duplicate")),
+                    EventSource.source_type != "legacy",
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if exists_non_legacy is not None:
+            return []
+
+        source = EventSource(
+            event_id=int(event.id),
+            source_type="legacy",
+            source_url=legacy_url,
+            source_text=snapshot,
+            imported_at=now,
+            trust_level="high",
+        )
+        session.add(source)
+        await session.flush()
+        created_source = True
+
+    if not snapshot:
+        return []
+    exists_legacy_facts = (
+        await session.execute(
+            select(EventSourceFact.id)
+            .join(EventSource, EventSourceFact.source_id == EventSource.id)
+            .where(
+                EventSourceFact.event_id == int(event.id),
+                EventSourceFact.status.in_(("added", "duplicate")),
+                EventSource.source_type == "legacy",
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if exists_legacy_facts is not None:
+        return []
+
+    # Preserve legacy narrative as part of source_texts so merge can keep facts,
+    # but do NOT treat it as an "added fact" (facts are for atomic source contributions).
+    try:
+        texts = list(getattr(event, "source_texts", None) or [])
+        if snapshot not in texts:
+            texts = [snapshot] + texts
+            # Keep it bounded: legacy snapshot is only needed as a one-time baseline.
+            setattr(event, "source_texts", texts[:6])
+    except Exception:
+        pass
+
+    legacy_candidate = EventCandidate(
+        source_type="legacy",
+        source_url=legacy_url,
+        source_text=snapshot,
+        title=(getattr(event, "title", None) or "").strip() or None,
+        date=(getattr(event, "date", None) or "").strip() or None,
+        time=(getattr(event, "time", None) or "").strip() or None,
+        end_date=(getattr(event, "end_date", None) or "").strip() or None,
+        location_name=(getattr(event, "location_name", None) or "").strip() or None,
+        location_address=(getattr(event, "location_address", None) or "").strip() or None,
+        city=(getattr(event, "city", None) or "").strip() or None,
+        ticket_link=(getattr(event, "ticket_link", None) or "").strip() or None,
+        ticket_status=(getattr(event, "ticket_status", None) or "").strip() or None,
+        event_type=(getattr(event, "event_type", None) or "").strip() or None,
+        trust_level="high",
+    )
+
+    fact_records: list[tuple[str, str]] = [("Снапшот описания до Smart Update сохранён", "note")]
+
+    extracted: list[str] = []
+    if SMART_UPDATE_FACT_FIRST and not SMART_UPDATE_LLM_DISABLED:
+        try:
+            raw_for_facts = snapshot
+            if created_source:
+                raw_for_facts = _drop_legacy_leak_from_description(legacy_description) or legacy_description or snapshot
+            cleaned_full = raw_for_facts
+            cleaned_full = str(cleaned_full or "").strip()
+            if cleaned_full:
+                cleaned_full = cleaned_full.replace("\r\n", "\n").replace("\r", "\n")
+                cleaned_full = re.sub(r"(?m)^\s*#+\s+", "", cleaned_full)  # markdown headings
+                cleaned_full = re.sub(r"(?m)^\s*>\s*", "", cleaned_full)  # markdown quotes
+                cleaned_full = re.sub(r"\n{3,}", "\n\n", cleaned_full).strip()
+                if len(cleaned_full) < SMART_UPDATE_LEGACY_DESC_FACT_EXTRACT_MIN_CHARS:
+                    fact_records.append(
+                        (
+                            "Legacy описание слишком короткое: факты не извлекались",
+                            "note",
+                        )
+                    )
+                    cleaned_full = ""
+            if cleaned_full:
+                extracted = await _llm_extract_candidate_facts(
+                    legacy_candidate,
+                    text_for_facts=cleaned_full,
+                )
+                if extracted:
+                    for f in extracted[:18]:
+                        fact_records.append((f, "added"))
+                    fact_records.append(("Факты извлечены из legacy описания", "note"))
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("smart_update: legacy fact backfill failed", exc_info=True)
+            extracted = []
+
+    try:
+        if fact_records:
+            await _record_source_facts(session, int(event.id), legacy_candidate, fact_records)
+    except Exception:  # pragma: no cover - defensive
+        logger.warning("smart_update: failed to persist legacy facts", exc_info=True)
+
+    return extracted
+
+
 def _normalize_event_type_value(
     title: str | None, description: str | None, event_type: str | None
 ) -> str | None:
@@ -3295,6 +5494,91 @@ def _clean_search_digest(value: str | None) -> str | None:
     except Exception:  # pragma: no cover - defensive
         return value.strip()
     return clean_search_digest(value) or None
+
+
+def _clean_short_description(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        from digest_helper import clean_short_description
+    except Exception:  # pragma: no cover - defensive
+        return value.strip()
+    return clean_short_description(value) or None
+
+
+def _is_short_description_acceptable(
+    value: str | None,
+    *,
+    min_words: int = 12,
+    max_words: int = 16,
+) -> bool:
+    try:
+        from digest_helper import is_short_description_acceptable
+    except Exception:  # pragma: no cover - defensive
+        cleaned = _clean_short_description(value)
+        if not cleaned:
+            return False
+        words = re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", cleaned)
+        return bool(cleaned.endswith((".", "!", "?")) and min_words <= len(words) <= max_words)
+    return bool(
+        is_short_description_acceptable(
+            value,
+            min_words=min_words,
+            max_words=max_words,
+        )
+    )
+
+
+def _fallback_short_description_from_text(text: str | None) -> str | None:
+    try:
+        from digest_helper import fallback_one_sentence
+    except Exception:
+        return None
+    raw = fallback_one_sentence(text, max_words=16)
+    cleaned = _clean_short_description(raw)
+    if not cleaned:
+        return None
+    if cleaned and cleaned[-1].isalnum():
+        cleaned += "."
+    return cleaned
+
+
+async def _llm_build_short_description(
+    *,
+    title: str | None,
+    description: str | None,
+    event_type: str | None,
+) -> str | None:
+    """Build 1-sentence short description for public lists (festival/daily)."""
+    if SMART_UPDATE_LLM_DISABLED:
+        return None
+    desc = (description or "").strip()
+    if len(desc) < 80:
+        return None
+    payload = {
+        "title": (title or "").strip(),
+        "event_type": (event_type or "").strip(),
+        "description": _clip(desc, 1200),
+    }
+    prompt = (
+        "Сделай короткое описание события для публичных списков.\n"
+        "Формат: ровно 1 законченное предложение на 12–16 слов.\n"
+        "Запрещено: многоточия, обрывы фраз, дата/время/адрес/город/ссылки/эмодзи/хэштеги.\n"
+        "Текст должен объяснять суть события простым и ясным языком, без выдумок.\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    text = await _ask_gemma_text(
+        prompt,
+        max_tokens=90,
+        label="short_description",
+        temperature=0.0,
+    )
+    cleaned = _clean_short_description(text)
+    if not cleaned:
+        return None
+    if not _is_short_description_acceptable(cleaned, min_words=12, max_words=16):
+        return None
+    return cleaned
 
 
 async def _llm_build_search_digest(
@@ -3392,24 +5676,58 @@ async def _llm_create_description_facts_and_digest(
         "poster_texts": [_clip(p.ocr_text, 700) for p in candidate.posters if (p.ocr_text or "").strip()][
             :3
         ],
+        "poster_titles": [
+            _clip(p.ocr_title, 140) for p in candidate.posters if (p.ocr_title or "").strip()
+        ][:3],
     }
+    # Budget for public description length: keep close to total source volume to avoid
+    # hallucination-prone over-expansion on short posts.
+    try:
+        payload["description_budget_chars"] = _estimate_description_budget_chars(
+            source_type=candidate.source_type,
+            source_text=clean_source_text,
+            raw_excerpt=clean_raw_excerpt,
+            poster_texts=[p.ocr_text for p in candidate.posters if (p.ocr_text or "").strip()],
+        )
+    except Exception:  # pragma: no cover - defensive
+        payload["description_budget_chars"] = 820
     prompt = (
         "Ты готовишь данные для создания события.\n"
         "Верни JSON строго по схеме.\n\n"
+        "0) title:\n"
+        "- Верни короткое и осмысленное название события (обычно 3–12 слов).\n"
+        "- НЕ включай дату/время/адрес/город/цены/ссылки.\n"
+        "- Если `poster_titles` содержит крупный заголовок афиши и он относится к событию, используй его как основу title.\n"
+        "- Если в source_text/raw_excerpt/poster_texts есть явное собственное название (проект/тур/постановка/шоу), используй его как основу title.\n"
+        "- НЕ делай title в формате «<event_type> — <площадка>», если в данных есть имя/бренд события (пример: «ЕвроДэнс'90», а не «Концерт — Янтарь холл»).\n"
+        "- Не теряй ключевые смысловые маркеры (например «Масленица», «концерт», «кинопоказ», «лекция»), если они есть в данных, но НЕ подменяй ими собственное название.\n\n"
         "1) description:\n"
         "- Напиши ПОЛНОЕ развернутое описание события как культурный журналист.\n"
-        "- Сохрани ВСЕ значимые факты из source_text/raw_excerpt (кроме логистики).\n"
+        "- Сохрани ВСЕ значимые факты из source_text/raw_excerpt/poster_texts (кроме логистики).\n"
+        "- Если source_text короткий или пустой, опирайся на poster_texts (OCR афиш) как на основной источник фактов.\n"
+        "- Объём: описание должно быть близко по объёму к источникам и НЕ превышать `description_budget_chars` символов.\n"
+        "  Если источники короткие, описание тоже должно быть коротким (без воды/«атмосферных» вступлений).\n"
         "- Не копируй дословно длинными кусками; перефразируй, но не сокращай смысл.\n"
+        "- Анти-дословность: избегай фрагментов, где подряд совпадает больше ~8–10 слов с источником.\n"
         "- Структура: абзацы, разделяй пустой строкой; 1–2 предложения в абзаце (для списков правило не применимо).\n"
         "- Запрещено: хэштеги, рекламные клише/прогнозы, механика розыгрыша.\n"
+        "- НЕ добавляй секции/заголовки про факты (например «Факты…», «Факты о событии», `Facts/Added Facts`):\n"
+        "  факты вернутся отдельным полем `facts`.\n"
+        "- НЕ экранируй кавычки обратным слэшем (не пиши `\\\"...\\\"`).\n"
         "- ВАЖНО: НЕ включай в текст логистику (дата/время/площадка/точный адрес/город/ссылки/телефон/контакты/точные цены)\n"
         "  и не дублируй строки `Дата:`, `Время:`, `Локация:`, `Билеты:`.\n"
         f"{SMART_UPDATE_YO_RULE}\n"
         f"{SMART_UPDATE_PRESERVE_LISTS_RULE}\n\n"
+        f"{SMART_UPDATE_OPTIONAL_HEADINGS_RULE}\n\n"
+        f"{_description_emoji_prompt_rule()}\n\n"
+        "Если в описании есть список:\n"
+        "- Каждый пункт списка должен быть на отдельной строке.\n"
+        "- Маркер списка пиши с пробелом: `- пункт` или `1. пункт`.\n\n"
         f"{SMART_UPDATE_VISITOR_CONDITIONS_RULE}\n\n"
         "2) facts:\n"
         "- Верни 6–18 атомарных фактов (1 факт = 1 строка), только про ЭТО событие.\n"
         "- НЕ включай дату/время/адрес/город как отдельные факты.\n"
+        f"- {SMART_UPDATE_FACTS_PRESERVE_COMPACT_PROGRAM_LISTS_RULE}\n"
         "- НЕ включай скидки/промокоды/призывы подписаться/ссылки на каналы.\n"
         "- Включай условия участия/посещения (длительность, возраст, размер группы, формат/что взять/как одеться, "
         "что входит/не входит в оплату), без ссылок/телефонов; сумму указывай только если это важно, чтобы пояснить "
@@ -3419,6 +5737,10 @@ async def _llm_create_description_facts_and_digest(
         "- 1 предложение, 120–220 символов (макс 260), без эмодзи/хэштегов/списков.\n"
         "- Не указывай дату/время/адрес/город/цены/ссылки.\n"
         "- Не повторяй название дословно в начале.\n\n"
+        "4) short_description:\n"
+        "- Ровно 1 законченное предложение на 12–16 слов.\n"
+        "- Без многоточий и обрывов фраз.\n"
+        "- Не указывай дату/время/адрес/город/цены/ссылки.\n\n"
         f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     max_tokens = SMART_UPDATE_REWRITE_MAX_TOKENS
@@ -3525,6 +5847,105 @@ def _clip_title(text: str | None, limit: int = 80) -> str:
     return raw if len(raw) <= limit else raw[: limit - 1].rstrip() + "…"
 
 
+def _estimate_description_budget_chars(
+    *,
+    source_type: str | None,
+    source_text: str | None,
+    raw_excerpt: str | None,
+    poster_texts: Sequence[str] | None,
+) -> int:
+    """Estimate a safe max length for public event descriptions.
+
+    Goal: avoid LLM "over-expanding" short sources (hallucination-prone water/cliches).
+    This is a *budget* for LLM prompts / LLM rewrite passes, not a deterministic cutter.
+    """
+    src = (source_text or "").strip()
+    excerpt = (raw_excerpt or "").strip()
+    # Avoid double-counting the excerpt if it is already inside the source.
+    extra_excerpt = ""
+    if excerpt and excerpt not in src:
+        extra_excerpt = excerpt
+
+    # OCR can be huge; include it but cap the contribution to keep budgets sane.
+    ocr_chunks: list[str] = []
+    for t in (poster_texts or [])[:5]:
+        s = (t or "").strip()
+        if s:
+            ocr_chunks.append(s)
+    ocr_total = sum(min(len(s), 900) for s in ocr_chunks)
+    ocr_total = min(ocr_total, 2400)
+
+    base = len(src) + len(extra_excerpt) + ocr_total
+    if base <= 0:
+        return 520  # fallback for empty sources (still keep it modest)
+
+    st = (source_type or "").strip().lower()
+    # Be stricter for Telegram: many posts are short, and "water" is very visible.
+    factor = 1.05 if st.startswith("telegram") else 1.12
+
+    budget = int(base * factor)
+    # Clamp to a practical range for Telegraph pages.
+    budget = max(220, min(1800, budget))
+    # For extremely short sources, allow a small fixed slack for readability.
+    if base < 260:
+        budget = max(260, min(budget, base + 120))
+    return int(budget)
+
+
+async def _llm_shrink_description_to_budget(
+    *,
+    source_type: str | None,
+    source_url: str | None,
+    description: str,
+    source_text: str | None,
+    facts: Sequence[str] | None,
+    max_chars: int,
+) -> str | None:
+    """LLM-only shrinking pass to keep description close to source volume (no new facts)."""
+    if SMART_UPDATE_LLM_DISABLED:
+        return None
+    text = (description or "").strip()
+    if not text:
+        return None
+    try:
+        max_chars_i = int(max_chars)
+    except Exception:
+        max_chars_i = 520
+    max_chars_i = max(180, min(2200, max_chars_i))
+
+    payload = {
+        "max_chars": max_chars_i,
+        "source_type": (source_type or "").strip(),
+        "source_url": (source_url or "").strip(),
+        "facts": [str(x).strip() for x in (facts or []) if str(x).strip()][:18],
+        "source_text": _clip((source_text or "").strip(), 1800),
+        "description": _clip(text, 3200),
+    }
+    prompt = (
+        "Сократи описание события до указанного лимита символов.\n"
+        "Правила:\n"
+        "- НЕ добавляй новых фактов и деталей.\n"
+        "- Убирай воду и нейросетевые клише.\n"
+        "- Не указывай дату/время/адрес/город/ссылки/телефоны.\n"
+        "- Сохрани смысловые маркеры (жанр/формат/что будет происходить).\n"
+        "- Пиши по-русски, естественно, без канцелярита.\n"
+        "- Верни только готовый текст описания, без заголовков типа Facts/Факты.\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    # Rough token budget: ~1 token per 4 chars + some slack.
+    max_tokens = max(140, min(520, int(max_chars_i / 4) + 80))
+    out = await _ask_gemma_text(prompt, max_tokens=max_tokens, label="shrink_desc", temperature=0.0)
+    out = (out or "").strip()
+    out = _sanitize_description_output(out, source_text=source_text) or out
+    out = _normalize_plaintext_paragraphs(out) or out
+    out = _normalize_blockquote_markers(out) or out
+    if not out.strip():
+        return None
+    if len(out) > max_chars_i * 1.15:
+        return None
+    return out.strip()
+
+
 async def _fetch_event_posters_map(
     db: Database, event_ids: Sequence[int]
 ) -> dict[int, list[EventPoster]]:
@@ -3565,12 +5986,14 @@ async def _llm_match_event(
     for ev in events:
         posters = posters_map.get(ev.id or 0, [])
         poster_texts = [p.ocr_text for p in posters if p.ocr_text][:2]
+        poster_titles = [p.ocr_title for p in posters if (p.ocr_title or "").strip()][:2]
         candidates_payload.append(
             {
                 "id": ev.id,
                 "title": ev.title,
                 "date": ev.date,
                 "time": ev.time,
+                "time_is_default": bool(getattr(ev, "time_is_default", False)),
                 "end_date": ev.end_date,
                 "location_name": ev.location_name,
                 "location_address": ev.location_address,
@@ -3579,6 +6002,7 @@ async def _llm_match_event(
                 "description": _clip(ev.description, 600),
                 "source_text": _clip(ev.source_text, 600),
                 "poster_texts": poster_texts,
+                "poster_titles": poster_titles,
             }
         )
 
@@ -3587,6 +6011,7 @@ async def _llm_match_event(
             "title": candidate.title,
             "date": candidate.date,
             "time": candidate.time,
+            "time_is_default": bool(getattr(candidate, "time_is_default", False)),
             "end_date": candidate.end_date,
             "location_name": candidate.location_name,
             "location_address": candidate.location_address,
@@ -3597,15 +6022,27 @@ async def _llm_match_event(
             "poster_texts": [
                 _clip(p.ocr_text, 400) for p in candidate.posters if p.ocr_text
             ][:3],
+            "poster_titles": [
+                _clip(p.ocr_title, 140) for p in candidate.posters if (p.ocr_title or "").strip()
+            ][:3],
         },
         "events": candidates_payload[:10],
     }
     prompt = (
-        "Ты сопоставляешь анонс события с уже существующими событиями. "
-        "Найди наиболее вероятное совпадение или верни null. "
-        "Учитывай дату, время, площадку, участников, ссылки, афиши и OCR. "
-        "Ответь строго JSON."
-        "\n\n"
+        "Ты сопоставляешь анонс события с уже существующими событиями.\n"
+        "Найди наиболее вероятное совпадение или верни null.\n"
+        "Учитывай дату, время, площадку, участников, ссылки, афиши и OCR.\n"
+        "Важно про дубли:\n"
+        "- `time=00:00` и/или `time_is_default=true` считай неизвестным временем (слабый якорь, не конфликт).\n"
+        "- Если совпадают дата + площадка + контекст (участник/афиша/OCR), а название сформулировано по-разному "
+        "(общее vs конкретное), это всё равно один и тот же ивент: выбирай match.\n"
+        "- Для длинных событий (выставка/ярмарка/экспозиция с `end_date`) пересечение периодов + площадка НЕ означает дубль:\n"
+        "  в одном музее может идти несколько разных выставок одновременно. Матчь только если совпадает конкретное событие "
+        "(название/автор/тематика/афиша/OCR/ссылка).\n"
+        "- Если среди `events` есть событие с той же датой, тем же началом времени (или время пустое/placeholder), "
+        "той же площадкой и тем же названием (или очевидно тем же) — это дубль: выбери его и поставь высокую confidence.\n"
+        "- Не возвращай null, если есть правдоподобный матч: лучше выбрать наиболее вероятное и снизить confidence.\n"
+        "Ответь строго JSON.\n\n"
         f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     data = await _ask_gemma_json(
@@ -3630,6 +6067,170 @@ async def _llm_match_event(
     except Exception:
         return None, conf_val, reason
     return match_id, conf_val, reason
+
+
+async def _llm_match_or_create_bundle(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+    *,
+    posters_map: dict[int, list[EventPoster]] | None = None,
+    threshold: float,
+    clean_title: str,
+    clean_source_text: str,
+    clean_raw_excerpt: str | None,
+    normalized_event_type: str | None,
+) -> dict[str, Any] | None:
+    """Single-call LLM step: match existing event OR return create bundle.
+
+    Intended for VK/TG imports to reduce roundtrips on the "no match -> create" path.
+    """
+    if not events:
+        return None
+    if SMART_UPDATE_LLM_DISABLED:
+        return None
+
+    posters_map = posters_map or {}
+    candidates_payload: list[dict[str, Any]] = []
+    for ev in events:
+        posters = posters_map.get(ev.id or 0, [])
+        poster_texts = [p.ocr_text for p in posters if p.ocr_text][:2]
+        poster_titles = [p.ocr_title for p in posters if (p.ocr_title or "").strip()][:2]
+        candidates_payload.append(
+            {
+                "id": ev.id,
+                "title": ev.title,
+                "date": ev.date,
+                "time": ev.time,
+                "time_is_default": bool(getattr(ev, "time_is_default", False)),
+                "end_date": ev.end_date,
+                "location_name": ev.location_name,
+                "location_address": ev.location_address,
+                "city": ev.city,
+                "ticket_link": ev.ticket_link,
+                "description": _clip(ev.description, 600),
+                "source_text": _clip(ev.source_text, 600),
+                "poster_texts": poster_texts,
+                "poster_titles": poster_titles,
+            }
+        )
+
+    payload = {
+        "threshold": float(threshold),
+        "candidate": {
+            "title": clean_title,
+            "date": candidate.date,
+            "time": candidate.time,
+            "time_is_default": bool(getattr(candidate, "time_is_default", False)),
+            "end_date": candidate.end_date,
+            "location_name": candidate.location_name,
+            "location_address": candidate.location_address,
+            "city": candidate.city,
+            "ticket_link": candidate.ticket_link,
+            "ticket_status": candidate.ticket_status,
+            "is_free": bool(candidate.is_free),
+            "event_type": normalized_event_type or candidate.event_type,
+            "festival": candidate.festival,
+            "source_type": candidate.source_type,
+            "source_url": candidate.source_url,
+            "source_text": _clip(clean_source_text, SMART_UPDATE_REWRITE_SOURCE_MAX_CHARS),
+            "raw_excerpt": _clip(clean_raw_excerpt or "", 1200),
+            "poster_texts": [_clip(p.ocr_text, 400) for p in candidate.posters if p.ocr_text][:3],
+            "poster_titles": [
+                _clip(p.ocr_title, 140) for p in candidate.posters if (p.ocr_title or "").strip()
+            ][:3],
+        },
+        "events": candidates_payload[:10],
+    }
+    prompt = (
+        "Ты сопоставляешь новый анонс события с уже существующими событиями.\n"
+        "Верни JSON строго по схеме.\n\n"
+        "Шаг 1) MATCH:\n"
+        "- Найди наиболее вероятное совпадение среди `events` или реши, что совпадения нет.\n"
+        "- `confidence` от 0 до 1.\n"
+        "- Если `confidence >= threshold`, верни `action=match` и `match_event_id`.\n"
+        "- Если `confidence < threshold`, верни `action=create` и `match_event_id=null`.\n\n"
+        "Анти-дубли (важно):\n"
+        "- `time=00:00` и/или `time_is_default=true` считай неизвестным временем (слабый якорь, не конфликт).\n"
+        "- Если совпадают дата + площадка + контекст (участник/афиша/OCR), но формулировка названия отличается "
+        "(общее vs конкретное), это один и тот же ивент: выбирай `action=match`.\n"
+        "- Для длинных событий (выставка/ярмарка/экспозиция с `end_date`) пересечение периодов + площадка НЕ означает дубль:\n"
+        "  в одном музее может идти несколько разных выставок одновременно. Выбирай `action=match` только если совпадает "
+        "конкретное событие (название/автор/тематика/афиша/OCR/ссылка).\n"
+        "- Если хотя бы одно событие в `events` совпадает по якорям (дата + начало времени/пустое время + площадка) "
+        "и названию/участникам, это дубль — выбирай `action=match` и ставь `confidence` заметно выше `threshold`.\n\n"
+        "Шаг 2) CREATE (только если action=create):\n"
+        "- Верни `bundle` с полями title/description/facts/search_digest/short_description как для создания нового события.\n"
+        "- Если action=match, верни bundle=null.\n\n"
+        "Правила для bundle.title:\n"
+        "- Короткое осмысленное название (обычно 3–12 слов), без даты/времени/адреса/города/цен/ссылок.\n"
+        "- Без эмодзи.\n"
+        "- Если `candidate.poster_titles` содержит крупный заголовок афиши и он относится к событию, используй его как основу.\n"
+        "- Если в candidate.source_text/raw_excerpt/poster_texts есть явное собственное название (проект/тур/постановка/шоу), используй его как основу.\n"
+        "- НЕ делай title в формате «<event_type> — <площадка>», если в данных есть имя/бренд события (пример: «ЕвроДэнс'90», а не «Концерт — Янтарь холл»).\n"
+        "- Не экранируй кавычки обратным слэшем (не пиши `\\\"...\\\"`).\n\n"
+        "Правила для bundle.description:\n"
+        "- Напиши ПОЛНОЕ развернутое описание как культурный журналист.\n"
+        "- Сохрани ВСЕ значимые факты из source_text/raw_excerpt/poster_texts (кроме логистики).\n"
+        "- Если source_text короткий или пустой, опирайся на poster_texts (OCR афиш) как на основной источник фактов.\n"
+        "- Не копируй дословно длинными кусками; перефразируй, но не сокращай смысл.\n"
+        "- Структура: абзацы, разделяй пустой строкой; 1–2 предложения в абзаце.\n"
+        "- Запрещено: хэштеги, рекламные клише/прогнозы, механика розыгрыша.\n"
+        f"- {_description_emoji_prompt_rule().strip()}\n"
+        "- НЕ добавляй секции/заголовки про факты (например «Факты…», «Факты о событии», `Facts/Added Facts`):\n"
+        "  факты вернутся отдельным полем bundle.facts.\n"
+        "- НЕ экранируй кавычки обратным слэшем (не пиши `\\\"...\\\"`).\n"
+        "- ВАЖНО: НЕ включай логистику (дата/время/площадка/точный адрес/город/ссылки/телефон/контакты/точные цены)\n"
+        "  и не дублируй строки `Дата:`, `Время:`, `Локация:`, `Билеты:`.\n"
+        f"{SMART_UPDATE_YO_RULE}\n"
+        f"{SMART_UPDATE_PRESERVE_LISTS_RULE}\n\n"
+        f"{SMART_UPDATE_VISITOR_CONDITIONS_RULE}\n\n"
+        "Правила для bundle.facts:\n"
+        "- 6–18 атомарных фактов (1 факт = 1 строка), только про ЭТО событие.\n"
+        "- НЕ включай дату/время/адрес/город как отдельные факты.\n"
+        "- НЕ включай скидки/промокоды/призывы подписаться/ссылки на каналы.\n"
+        "- Включай условия участия/посещения (длительность, возраст, размер группы, формат/что взять/как одеться, "
+        "что входит/не входит в оплату), без ссылок/телефонов; сумму указывай только если это важно, чтобы пояснить "
+        "что оплачивается отдельно (не более 1 факта).\n\n"
+        "Правила для bundle.search_digest:\n"
+        "- 1 предложение, 120–220 символов (макс 260), без эмодзи/хэштегов/списков.\n"
+        "- Не указывай дату/время/адрес/город/цены/ссылки.\n"
+        "- Не повторяй название дословно в начале.\n\n"
+        "Правила для bundle.short_description:\n"
+        "- Ровно 1 законченное предложение на 12–16 слов.\n"
+        "- Без многоточий и обрывов фраз.\n"
+        "- Не указывай дату/время/адрес/город/цены/ссылки.\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+    data = await _ask_gemma_json(
+        prompt,
+        MATCH_CREATE_BUNDLE_SCHEMA,
+        max_tokens=SMART_UPDATE_REWRITE_MAX_TOKENS,
+        label="match_create_bundle",
+    )
+    if not isinstance(data, dict):
+        return None
+    action = (data.get("action") or "").strip().lower()
+    if action not in {"match", "create"}:
+        return None
+    if action == "match":
+        return {
+            "action": "match",
+            "match_event_id": data.get("match_event_id"),
+            "confidence": data.get("confidence"),
+            "reason_short": data.get("reason_short") or "",
+            "bundle": None,
+        }
+    bundle = data.get("bundle")
+    if not isinstance(bundle, dict):
+        return None
+    return {
+        "action": "create",
+        "match_event_id": None,
+        "confidence": data.get("confidence"),
+        "reason_short": data.get("reason_short") or "",
+        "bundle": bundle,
+    }
 
 
 async def _llm_merge_event(
@@ -3685,6 +6286,9 @@ async def _llm_merge_event(
             "poster_texts": [
                 _clip(p.ocr_text, 400) for p in candidate.posters if p.ocr_text
             ][:3],
+            "poster_titles": [
+                _clip(p.ocr_title, 140) for p in candidate.posters if (p.ocr_title or "").strip()
+            ][:3],
         },
         "constraints": {
             "anchor_fields_do_not_change": [
@@ -3718,13 +6322,18 @@ async def _llm_merge_event(
         "(например `Старый факт -> Новый факт (выбран: candidate)` или `(выбран: event_before)`). "
         "Обязательно старайся добавлять конкретные новые детали из кандидата, которых нет в текущем описании (имена/участники/уникальные детали/программа). "
         "Не повторяй уже имеющиеся факты (убирай дубли). "
+        "Если `candidate.poster_titles` содержит короткий крупный заголовок афиши и он относится к событию, "
+        "то при необходимости улучши `title` так, чтобы он был близок по смыслу к этому заголовку "
+        "(но не включай дату/время/адрес/город/цены/ссылки и не используй эмодзи). "
         f"{SMART_UPDATE_YO_RULE} "
         f"{SMART_UPDATE_PRESERVE_LISTS_RULE} "
         f"{SMART_UPDATE_VISITOR_CONDITIONS_RULE} "
         "Описание должно читаться как единый связный текст-повествование (не рваное). "
         "Разбиение на абзацы делай осмысленно. НЕ разрывай предложения пустой строкой на середине, "
         "и особенно не ставь пустую строку между инициалом и фамилией (например `Н. Любимова`). "
-        "Описание должно быть журналистским рерайтом (не дословно), без эмодзи и хэштегов, без выдуманных деталей. "
+        f"{_description_emoji_prompt_rule()}"
+        "Без хэштегов. "
+        "Описание должно быть журналистским рерайтом (не дословно), без выдуманных деталей. "
         "Запрещено придумывать факты, которых нет в данных (в т.ч. нельзя писать 'премьера', 'впервые', 'аншлаг' и т.п., "
         "если это явно не сказано в источниках). "
         "Избегай нейросетевых клише и пустых оценок/прогнозов: "
@@ -3741,6 +6350,7 @@ async def _llm_merge_event(
         "НЕ используй Markdown-ссылки вида `[текст](url)` и не вставляй таблицы. "
         "Не включай малозначимые и повторяющиеся строки (например `DD.MM | Название`, повтор заголовка, повтор даты/времени/площадки отдельной строкой). "
         "Если в источнике есть обрыв фразы/текста (в т.ч. обрезано на середине слова), не вставляй это дословно: либо перефразируй, либо опусти. "
+        "Не экранируй кавычки обратным слэшем (не пиши `\\\"...\\\"`). "
         "Если в материалах есть прямая речь/цитата (1-е лицо: 'я/мне/кажется/думаю' и т.п.), "
         "НЕ переписывай её в косвенную речь: включи её ДОСЛОВНО как цитату блоком `>` и не дублируй ту же мысль пересказом рядом. "
         "Если `candidate.quote_candidates` не пуст, обязательно включи хотя бы одну из этих цитат ДОСЛОВНО как blockquote. "
@@ -3874,6 +6484,7 @@ def _dedupe_description(description: str | None) -> str | None:
     out_paras: list[str] = []
 
     def _dedupe_lines_keep_newlines(block: str) -> str:
+        heading_re = re.compile(r"^\s*#{1,6}\s+\S")
         kept: list[str] = []
         for ln in block.splitlines():
             s = ln.strip()
@@ -3881,7 +6492,9 @@ def _dedupe_description(description: str | None) -> str | None:
                 continue
             key = re.sub(r"\s+", " ", s).strip().lower()
             # Even short lines can be duplicated facts (e.g. awards). Dedupe more aggressively.
-            if len(key) >= 15 and key in seen_line_keys:
+            # Headings are short by nature, but duplicate headings create empty sections and
+            # ugly Telegraph pages, so we always dedupe them regardless of key length.
+            if (heading_re.match(s) or len(key) >= 15) and key in seen_line_keys:
                 continue
             seen_line_keys.add(key)
             kept.append(s)
@@ -4060,11 +6673,20 @@ def _pick_richest_source_text_for_description(event: Event, candidate: EventCand
     Priority is the longest cleaned text among event/source aggregates and the candidate.
     """
     texts: list[str] = []
+    poster_texts: list[str] = []
+    try:
+        for p in (getattr(candidate, "posters", None) or [])[:5]:
+            t = getattr(p, "ocr_text", None)
+            if isinstance(t, str) and t.strip():
+                poster_texts.append(t)
+    except Exception:
+        poster_texts = []
     for t in [
         getattr(event, "source_text", None),
         *(getattr(event, "source_texts", None) or []),
         getattr(candidate, "source_text", None),
         getattr(candidate, "raw_excerpt", None),
+        *poster_texts,
     ]:
         if not isinstance(t, str):
             continue
@@ -4181,7 +6803,10 @@ async def _rewrite_description_full_from_sources(event: Event, candidate: EventC
         f"{SMART_UPDATE_YO_RULE} "
         f"{SMART_UPDATE_PRESERVE_LISTS_RULE} "
         f"{SMART_UPDATE_VISITOR_CONDITIONS_RULE} "
-        "Без эмодзи и без хэштегов. Убери промо/акции и механику розыгрыша (если не часть сути). "
+        f"{_description_emoji_prompt_rule()}"
+        "Без хэштегов. Убери промо/акции и механику розыгрыша (если не часть сути). "
+        "Не добавляй секции/заголовки про факты (например «Факты…», «Факты о событии», `Facts/Added Facts`): "
+        "факты формируются отдельно. "
         "Важно: НЕ повторяй в описании логистику (дата/время/площадка/точный адрес/город/ссылки/телефон/контакты/точные цены) — "
         "она показывается отдельным инфоблоком сверху.\n\n"
         "Убери промо чужих/вспомогательных каналов с анонсами и призывы подписаться "
@@ -4239,9 +6864,17 @@ async def _rewrite_description_full_from_sources(event: Event, candidate: EventC
         cleaned = _strip_channel_promo_from_description(cleaned) or cleaned
     cleaned = _append_missing_fact_sentences(base=base, rewritten=cleaned, max_sentences=2)
     if _description_needs_infoblock_logistics_strip(cleaned, candidate=candidate):
-        stripped = _strip_infoblock_logistics_from_description(cleaned, candidate=candidate)
-        if stripped:
-            cleaned = stripped
+        try:
+            edited = await _llm_remove_infoblock_logistics(
+                description=cleaned,
+                candidate=candidate,
+                label="rewrite_full_remove_logistics",
+            )
+        except Exception:  # pragma: no cover - network failures
+            edited = None
+        if edited:
+            edited = _normalize_plaintext_paragraphs(edited) or edited
+            cleaned = edited
     return _clip(cleaned, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
 
 
@@ -4358,7 +6991,7 @@ def _looks_like_schedule_digest(text: str | None, *, event_date: str | None, end
         return False
     allowed = _allowed_schedule_ddmm(event_date, end_date)
     ddmm: set[str] = set()
-    for dd_s, mm_s in re.findall(r"\\b(\\d{1,2})[./](\\d{1,2})\\b", raw):
+    for dd_s, mm_s in re.findall(r"\b(\d{1,2})[./](\d{1,2})\b", raw):
         try:
             dd = int(dd_s)
             mm = int(mm_s)
@@ -4407,16 +7040,159 @@ _TITLE_MATCH_STOPWORDS = {
 }
 
 
-def _title_has_meaningful_tokens(title: str | None) -> bool:
-    norm = _normalize_title_for_match(title)
+def _normalize_text_for_grounding(text: str | None) -> str:
+    if not text:
+        return ""
+    cleaned = _strip_private_use(text) or str(text)
+    cleaned = _ZERO_WIDTH_RE.sub("", cleaned)
+    cleaned = cleaned.casefold().replace("ё", "е")
+    cleaned = cleaned.replace("…", " ")
+    cleaned = re.sub(r"[\"«»]", " ", cleaned)
+    cleaned = re.sub(r"[^\w\s]+", " ", cleaned, flags=re.UNICODE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _meaningful_title_tokens(title: str | None) -> set[str]:
+    norm = _normalize_text_for_grounding(title)
     if not norm:
+        return set()
+    toks: set[str] = set()
+    for tok in norm.split():
+        if len(tok) < 3:
+            continue
+        if tok in _TITLE_MATCH_STOPWORDS:
+            continue
+        if tok.isdigit():
+            continue
+        toks.add(tok)
+    return toks
+
+
+def _candidate_title_grounding_corpus_norm(candidate: "EventCandidate") -> str:
+    parts: list[str] = []
+    if (candidate.source_text or "").strip():
+        parts.append(_clip(candidate.source_text, 9000))
+    if (candidate.raw_excerpt or "").strip():
+        parts.append(_clip(candidate.raw_excerpt, 2200))
+    for poster in list(getattr(candidate, "posters", None) or [])[:4]:
+        if (getattr(poster, "ocr_title", None) or "").strip():
+            parts.append(_clip(str(poster.ocr_title), 320))
+        if (getattr(poster, "ocr_text", None) or "").strip():
+            parts.append(_clip(str(poster.ocr_text), 1200))
+    return _normalize_text_for_grounding("\n".join(parts))
+
+
+def _token_is_grounded(token: str, source_tokens: set[str]) -> bool:
+    if not token:
         return False
-    toks = {
-        t
-        for t in re.findall(r"[a-zа-яё0-9]+", norm)
-        if len(t) >= 3 and t not in _TITLE_MATCH_STOPWORDS and not t.isdigit()
-    }
-    return bool(toks)
+    if token in source_tokens:
+        return True
+    # Best-effort stemming: allow a 1-char suffix difference (e.g. "масленица" vs "масленицу").
+    stems = [token]
+    if len(token) >= 6:
+        stems.append(token[:-1])
+    for stem in stems:
+        if stem in source_tokens:
+            return True
+        if len(stem) < 5:
+            continue
+        for src in source_tokens:
+            if src.startswith(stem) or stem.startswith(src):
+                return True
+    return False
+
+
+def _is_title_grounded_in_candidate_sources(
+    proposed_title: str | None,
+    candidate: "EventCandidate",
+) -> bool:
+    title_norm = _normalize_text_for_grounding(proposed_title)
+    if not title_norm:
+        return False
+    corpus_norm = _candidate_title_grounding_corpus_norm(candidate)
+    if not corpus_norm:
+        return False
+    if len(title_norm) >= 6 and title_norm in corpus_norm:
+        return True
+    source_tokens = set(corpus_norm.split())
+    tokens = _meaningful_title_tokens(proposed_title)
+    if not tokens:
+        # Titles like "концерт" still must exist in the source corpus.
+        return title_norm in corpus_norm
+    for token in tokens:
+        if _token_is_grounded(token, source_tokens):
+            return True
+    return False
+
+
+def _is_generic_title_event_type_venue(
+    title: str | None,
+    *,
+    event_type: str | None,
+    location_name: str | None,
+    city: str | None,
+) -> bool:
+    """Return True for fallback titles like "Концерт — <venue>"."""
+
+    title_norm = _normalize_text_for_grounding(title)
+    if not title_norm:
+        return False
+    et_norm = _normalize_text_for_grounding(event_type)
+    if not et_norm:
+        return False
+    loc_raw = str(location_name or "").strip()
+    if not loc_raw:
+        return False
+    venue_short = loc_raw.split(",", 1)[0].strip()
+    venue_norm = _normalize_text_for_grounding(venue_short)
+    if not venue_norm:
+        return False
+
+    title_toks = {t for t in title_norm.split() if len(t) >= 3}
+    if not title_toks:
+        return False
+    et_toks = {t for t in et_norm.split() if len(t) >= 3}
+    venue_toks = {t for t in venue_norm.split() if len(t) >= 3}
+    if not (title_toks & et_toks):
+        return False
+    if not (title_toks & venue_toks):
+        return False
+
+    allowed = set(et_toks | venue_toks)
+    if city:
+        allowed |= {t for t in _normalize_text_for_grounding(city).split() if len(t) >= 3}
+    return title_toks.issubset(allowed)
+
+
+def _is_candidate_title_weak_for_llm_override(
+    title: str | None,
+    *,
+    candidate: "EventCandidate",
+    normalized_event_type: str | None,
+) -> bool:
+    if _is_generic_title_event_type_venue(
+        title,
+        event_type=normalized_event_type or candidate.event_type,
+        location_name=candidate.location_name,
+        city=candidate.city,
+    ):
+        return True
+    tokens = _meaningful_title_tokens(title)
+    if not tokens:
+        return True
+    corpus_norm = _candidate_title_grounding_corpus_norm(candidate)
+    if not corpus_norm:
+        return False
+    source_tokens = set(corpus_norm.split())
+    for token in tokens:
+        if _token_is_grounded(token, source_tokens):
+            return False
+    return True
+
+
+def _title_has_meaningful_tokens(title: str | None) -> bool:
+    return bool(_meaningful_title_tokens(title))
 
 
 def _is_merge_title_update_allowed(
@@ -4498,10 +7274,229 @@ def _normalize_time_for_match(value: str | None) -> str:
     return f"{hh:02d}:{mm:02d}"
 
 
+def _candidate_anchor_time(candidate: "EventCandidate", *, is_canonical_site: bool) -> str:
+    """Return time usable as a matching anchor, or empty when time is weak.
+
+    Low-priority default times (e.g. VK source default_time) must not act as anchors:
+    they should be overridden when explicit time comes from other sources.
+    """
+    t = _normalize_time_for_match(candidate.time)
+    if not t:
+        return ""
+    if is_canonical_site:
+        return t
+    if bool(getattr(candidate, "time_is_default", False)):
+        return ""
+    return t
+
+
+def _event_anchor_time(event: "Event") -> str:
+    """Return time usable as a matching anchor, or empty when time is weak."""
+    if bool(getattr(event, "time_is_default", False)):
+        return ""
+    return _normalize_time_for_match(getattr(event, "time", None))
+
+
 def _has_explicit_time_conflict(candidate_time: str | None, event_time: str | None) -> bool:
     ct = _normalize_time_for_match(candidate_time)
     et = _normalize_time_for_match(event_time)
     return bool(ct and et and ct != et)
+
+
+def _anchor_signature_for_duplicate_event(ev: Event) -> tuple[str, str, str, str]:
+    """Return a compact signature to detect truly duplicated rows.
+
+    Used by source_url-based idempotency matchers: when the same source is reprocessed,
+    we want to converge on *one* event, but we must not accidentally merge distinct events
+    from schedule posts. If multiple anchored candidates exist and they share the same
+    signature, we treat them as duplicates and pick the best one.
+    """
+
+    return (
+        str(getattr(ev, "date", "") or "").strip(),
+        _event_anchor_time(ev) or "",
+        _normalize_location(getattr(ev, "location_name", None)),
+        _normalize_title_for_match(getattr(ev, "title", None)),
+    )
+
+
+def _pick_best_duplicate_event(candidates: Sequence[Event]) -> Event | None:
+    if not candidates:
+        return None
+
+    def _score(ev: Event) -> tuple[int, int]:
+        score = 0
+        if (getattr(ev, "telegraph_url", None) or "").strip():
+            score += 4
+        if (getattr(ev, "description", None) or "").strip():
+            score += 2
+        if (getattr(ev, "search_digest", None) or "").strip():
+            score += 1
+        topics = getattr(ev, "topics", None) or []
+        if isinstance(topics, list) and topics:
+            score += 1
+        if (getattr(ev, "ticket_link", None) or "").strip():
+            score += 1
+        if (getattr(ev, "location_address", None) or "").strip():
+            score += 1
+        # Prefer older IDs on ties to reduce churn in external references.
+        eid = int(getattr(ev, "id", 0) or 0)
+        return score, -eid
+
+    return max(candidates, key=_score)
+
+
+async def _match_existing_event_by_source_anchor(
+    db: Database,
+    candidate: EventCandidate,
+) -> Event | None:
+    """Best-effort idempotency for duplicated candidates from the same source post.
+
+    Telegram Monitoring can emit two nearly-identical event cards for one Telegram post
+    (e.g. message text + linked post enrichment). Smart Update must prefer merging into
+    the already-created event instead of creating a duplicate.
+
+    Safety: for schedule posts (multiple real events per one message) we only force-match
+    when the anchor resolves to a single unambiguous event.
+    """
+    source_url = str(candidate.source_url or "").strip()
+    if not source_url or not candidate.source_message_id:
+        return None
+    if str(candidate.source_type or "").strip().lower().startswith("parser:"):
+        return None
+
+    try:
+        message_id = int(candidate.source_message_id)
+    except Exception:
+        return None
+
+    async with db.get_session() as session:
+        stmt = select(Event).where(Event.source_message_id == message_id)
+        if _is_vk_wall_url(source_url):
+            stmt = stmt.where(
+                or_(
+                    Event.source_vk_post_url == source_url,
+                    Event.source_post_url == source_url,
+                )
+            )
+        else:
+            stmt = stmt.where(Event.source_post_url == source_url)
+        stmt = _apply_soft_city_filter(stmt, candidate.city)
+        res = await session.execute(stmt)
+        anchored = list(res.scalars().all())
+
+    if not anchored:
+        return None
+
+    date_raw = str(candidate.date or "").strip()
+    title_raw = str(candidate.title or "").strip()
+    is_canonical_site = str(candidate.source_type or "").startswith("parser:")
+    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
+    allow_parallel = _allow_parallel_events(candidate.location_name)
+    anchor_filtered: list[Event] = []
+    filtered: list[Event] = []
+    for ev in anchored:
+        if date_raw and str(getattr(ev, "date", "") or "").strip() != date_raw:
+            continue
+        if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
+            continue
+        if candidate.location_name and getattr(ev, "location_name", None):
+            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+                continue
+        anchor_filtered.append(ev)
+        ev_title = str(getattr(ev, "title", "") or "").strip()
+        if title_raw and ev_title and _title_has_meaningful_tokens(title_raw) and _title_has_meaningful_tokens(ev_title):
+            if not _titles_look_related(title_raw, ev_title):
+                continue
+        filtered.append(ev)
+
+    if not filtered and len(anchor_filtered) == 1 and cand_time_anchor and (not allow_parallel):
+        # Same source+message+anchors but title extraction may differ between retries (e.g. one post -> multiple
+        # program items). If we have an explicit time anchor and the venue does not allow parallel events,
+        # converge on the single anchored event to avoid duplicates.
+        return anchor_filtered[0]
+    if not filtered:
+        return None
+    if len(filtered) == 1:
+        return filtered[0]
+
+    # Only force-match when it's clearly the same event duplicated.
+    sigs = {_anchor_signature_for_duplicate_event(ev) for ev in filtered}
+    if len(sigs) == 1:
+        return _pick_best_duplicate_event(filtered)
+    return None
+
+
+async def _match_existing_event_by_event_source_url(
+    db: Database,
+    candidate: EventCandidate,
+) -> Event | None:
+    """Best-effort idempotency when check_source_url=False.
+
+    Some flows intentionally re-run Smart Update for the same source_url (e.g. monitoring retries,
+    deferred processing). We still want to converge on the same event instead of creating duplicates.
+
+    Safety: if one source_url maps to multiple real events (schedule posts), only force-match when
+    the match is unambiguous after basic anchor checks.
+    """
+    source_url = str(candidate.source_url or "").strip()
+    if not source_url:
+        return None
+    if str(candidate.source_type or "").strip().lower().startswith("parser:"):
+        return None
+
+    async with db.get_session() as session:
+        stmt = (
+            select(Event)
+            .join(EventSource, EventSource.event_id == Event.id)
+            .where(EventSource.source_url == source_url)
+        )
+        if candidate.source_type:
+            stmt = stmt.where(EventSource.source_type == candidate.source_type)
+        stmt = _apply_soft_city_filter(stmt, candidate.city)
+        res = await session.execute(stmt)
+        anchored = list(res.scalars().all())
+
+    if not anchored:
+        return None
+
+    date_raw = str(candidate.date or "").strip()
+    title_raw = str(candidate.title or "").strip()
+    is_canonical_site = str(candidate.source_type or "").startswith("parser:")
+    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
+    allow_parallel = _allow_parallel_events(candidate.location_name)
+    anchor_filtered: list[Event] = []
+    filtered: list[Event] = []
+    for ev in anchored:
+        if date_raw and str(getattr(ev, "date", "") or "").strip() != date_raw:
+            continue
+        if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
+            continue
+        ev_title = str(getattr(ev, "title", "") or "").strip()
+        if candidate.location_name and getattr(ev, "location_name", None):
+            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+                continue
+        anchor_filtered.append(ev)
+        if title_raw and ev_title and _title_has_meaningful_tokens(title_raw) and _title_has_meaningful_tokens(ev_title):
+            if not _titles_look_related(title_raw, ev_title):
+                continue
+        filtered.append(ev)
+
+    if not filtered and len(anchor_filtered) == 1 and cand_time_anchor and (not allow_parallel):
+        # Same source_url+anchors but title extraction may differ between retries (e.g. one post -> multiple
+        # program items). If we have an explicit time anchor and the venue does not allow parallel events,
+        # converge on the single anchored event to avoid duplicates.
+        return anchor_filtered[0]
+    if not filtered:
+        return None
+    if len(filtered) == 1:
+        return filtered[0]
+
+    # Only force-match when it's clearly the same event duplicated.
+    sigs = {_anchor_signature_for_duplicate_event(ev) for ev in filtered}
+    if len(sigs) == 1:
+        return _pick_best_duplicate_event(filtered)
+    return None
 
 
 def _single_candidate_auto_match_ok(
@@ -4513,6 +7508,8 @@ def _single_candidate_auto_match_ok(
     # Guard against catastrophic merges when shortlist shrinks to 1 by broad anchors
     # (e.g. generic city location + long-running exhibition date range overlap).
     if is_canonical_site:
+        cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=True)
+        event_time_anchor = _event_anchor_time(event_db)
         # Canonical parser sources are allowed to repair a polluted title when
         # anchors are strongly aligned.
         if candidate.date and getattr(event_db, "date", None) and candidate.date != event_db.date:
@@ -4520,25 +7517,138 @@ def _single_candidate_auto_match_ok(
         if candidate.location_name and getattr(event_db, "location_name", None):
             if not _location_matches(candidate.location_name, event_db.location_name):
                 return False
-        if _has_explicit_time_conflict(candidate.time, event_db.time):
+        if _has_explicit_time_conflict(cand_time_anchor, event_time_anchor):
             return False
-        ct = _normalize_time_for_match(candidate.time)
-        et = _normalize_time_for_match(event_db.time)
+        ct = cand_time_anchor
+        et = event_time_anchor
         if ct and et and ct == et:
             return True
         if _titles_look_related(candidate.title, getattr(event_db, "title", None)):
             return True
         # Allow parser correction when candidate has explicit time but existing event
-        # has empty/placeholder time.
+        # has empty/placeholder/weak time.
         if ct and not et:
             return True
         return False
 
     if not _titles_look_related(candidate.title, getattr(event_db, "title", None)):
+        # Do NOT auto-merge unrelated titles, including long-running exhibitions/fairs.
+        #
+        # Rationale: venues can host multiple exhibitions simultaneously, so date-range overlap
+        # + location is not a safe enough signal for an automatic single-candidate match.
+        # When in doubt, fall back to LLM matching / create (or create when LLM is disabled).
         return False
-    if _has_explicit_time_conflict(candidate.time, event_db.time):
+    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=False)
+    event_time_anchor = _event_anchor_time(event_db)
+    if _has_explicit_time_conflict(cand_time_anchor, event_time_anchor):
         return False
     return True
+
+
+def _deterministic_exact_title_match(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+    *,
+    is_canonical_site: bool,
+) -> Event | None:
+    """Try to match by strict anchors without LLM.
+
+    Goal: prevent obvious duplicates when the same event comes from multiple sources
+    (TG/VK reposts), especially when LLM matching is conservative.
+    """
+
+    if not events:
+        return None
+    cand_date = str(candidate.date or "").strip()
+    if not cand_date:
+        return None
+    if not _title_has_meaningful_tokens(candidate.title):
+        return None
+
+    cand_title_norm = _normalize_title_for_match(candidate.title)
+    if not cand_title_norm:
+        return None
+
+    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
+    cand_loc = str(candidate.location_name or "").strip() or None
+
+    matches: list[Event] = []
+    for ev in events:
+        if not getattr(ev, "id", None):
+            continue
+        if str(getattr(ev, "date", "") or "").strip() != cand_date:
+            continue
+        if cand_loc and getattr(ev, "location_name", None):
+            if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+                continue
+        if _normalize_title_for_match(getattr(ev, "title", None)) != cand_title_norm:
+            continue
+        if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
+            continue
+        # Double-check semantic relation (guards against accidental collisions on short titles).
+        if not _titles_look_related(candidate.title, getattr(ev, "title", None)):
+            continue
+        matches.append(ev)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    # If there are multiple candidates but they all share the same anchor signature,
+    # it's a duplicate row situation: pick the best one.
+    if matches:
+        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in matches}
+        if len(sigs) == 1:
+            return _pick_best_duplicate_event(matches)
+    return None
+
+
+def _deterministic_related_title_anchor_match(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+    *,
+    is_canonical_site: bool,
+) -> Event | None:
+    """Try to match by strong anchors plus semantically related titles.
+
+    This is intentionally stricter than `_titles_look_related()` alone:
+    we require a unique candidate on the same date, explicit start time and
+    location. The helper is primarily meant to keep parser/VK/TG re-imports
+    from creating duplicates when titles differ only by a descriptive suffix
+    like "Гегель" vs "Гегель: философия истории".
+    """
+
+    if not events:
+        return None
+    cand_date = str(candidate.date or "").strip()
+    cand_loc = str(candidate.location_name or "").strip()
+    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
+    if not cand_date or not cand_loc or not cand_time_anchor:
+        return None
+    if not _title_has_meaningful_tokens(candidate.title):
+        return None
+
+    matches: list[Event] = []
+    for ev in events:
+        if not getattr(ev, "id", None):
+            continue
+        if str(getattr(ev, "date", "") or "").strip() != cand_date:
+            continue
+        if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+            continue
+        if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
+            continue
+        if not _titles_look_related(candidate.title, getattr(ev, "title", None)):
+            continue
+        matches.append(ev)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if matches:
+        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in matches}
+        if len(sigs) == 1:
+            return _pick_best_duplicate_event(matches)
+    return None
 
 
 def _strip_foreign_schedule_sentences(text: str | None, *, event_title: str | None) -> str:
@@ -4595,10 +7705,8 @@ def _strip_foreign_schedule_noise(
     end_date: str | None,
     event_title: str | None,
 ) -> str:
-    cleaned = _strip_foreign_schedule_headings(text, event_date=event_date, end_date=end_date)
-    cleaned = _strip_schedule_headings_all(cleaned)
-    cleaned = _strip_foreign_schedule_sentences(cleaned, event_title=event_title)
-    return cleaned
+    # Deterministic schedule stripping is not allowed (LLM handles this).
+    return (text or "").strip()
 
 
 def _description_has_foreign_schedule_headings(
@@ -4841,6 +7949,214 @@ async def smart_event_update(
         )
 
 
+async def _apply_holiday_festival_mapping(db: Database, event_id: int) -> bool:
+    """Ensure pseudo-festivals from docs/reference/holidays.md are applied universally.
+
+    This runs as part of Smart Update so that holiday grouping does not depend on
+    the caller (VK auto import / Telegram Monitoring / manual add flows).
+    """
+    try:
+        from main import ensure_festival, get_holiday_record
+    except Exception:
+        return False
+
+    try:
+        import vk_intake as vk_mod
+    except Exception:
+        return False
+
+    async with db.get_session() as session:
+        ev = await session.get(Event, int(event_id))
+        if not ev:
+            return False
+        fest_value = (getattr(ev, "festival", None) or "").strip()
+        if not fest_value:
+            return False
+        record = get_holiday_record(fest_value)
+        if record is None:
+            return False
+        event_date = (getattr(ev, "date", None) or "").strip()
+        event_end_date = (getattr(ev, "end_date", None) or "").strip() or None
+        tolerance = getattr(record, "tolerance_days", None)
+        if not vk_mod._event_date_matches_holiday(record, event_date, event_end_date, tolerance):
+            return False
+
+        photo_urls = list(getattr(ev, "photo_urls", None) or [])
+        current_festival = getattr(ev, "festival", None)
+
+    canonical_name = str(getattr(record, "canonical_name", "") or "").strip()
+    if not canonical_name:
+        return False
+
+    target_year = date.today().year
+    date_token = (event_date or "").split("..", 1)[0].strip()
+    try:
+        target_year = date.fromisoformat(date_token).year
+    except Exception:
+        target_year = date.today().year
+
+    start_iso, end_iso = vk_mod._holiday_date_range(record, target_year)
+    ensure_kwargs: dict[str, Any] = {}
+    desc = str(getattr(record, "description", "") or "").strip()
+    if desc:
+        ensure_kwargs["description"] = desc
+        ensure_kwargs["source_text"] = desc
+    if start_iso:
+        ensure_kwargs["start_date"] = start_iso
+    if end_iso:
+        ensure_kwargs["end_date"] = end_iso
+    if photo_urls:
+        ensure_kwargs["photo_url"] = photo_urls[0]
+        ensure_kwargs["photo_urls"] = photo_urls
+    aliases_payload = [a for a in getattr(record, "normalized_aliases", ()) if a]
+    if aliases_payload:
+        ensure_kwargs["aliases"] = aliases_payload
+
+    fest_obj, fest_created, fest_updated = await ensure_festival(
+        db,
+        canonical_name,
+        **ensure_kwargs,
+    )
+    _ = fest_obj
+
+    changed = bool(fest_created or fest_updated)
+
+    if (current_festival or "") != canonical_name:
+        async with db.get_session() as session:
+            ev2 = await session.get(Event, int(event_id))
+            if ev2 and (getattr(ev2, "festival", None) or "") != canonical_name:
+                ev2.festival = canonical_name
+                session.add(ev2)
+                await session.commit()
+                changed = True
+
+    return changed
+
+
+_TG_DEFAULT_LOCATION_CITY_DISAMBIGUATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["default", "extracted"]},
+        "confidence": {"type": "number"},
+        "reason_short": {"type": "string"},
+    },
+    "required": ["decision", "confidence", "reason_short"],
+    "additionalProperties": False,
+}
+
+
+async def _maybe_disambiguate_telegram_default_location_city(candidate: EventCandidate) -> None:
+    """Best-effort: decide whether to keep TelegramSource.default_location city.
+
+    Telegram sources can have `default_location` (a strong prior), but sometimes posts
+    genuinely describe an event in another city. At the same time, "context cities"
+    like "(г. Москва)" can appear in biographies and must not flip the event city.
+
+    This helper runs a small Gemma JSON check only when:
+    - source_type is Telegram
+    - default city exists
+    - extracted city exists and conflicts with default
+    - the current candidate city equals the default city (i.e. we overrode it earlier)
+    """
+    try:
+        st = str(candidate.source_type or "").strip().lower()
+    except Exception:
+        st = ""
+    if st not in {"telegram", "tg"}:
+        return
+    metrics = candidate.metrics if isinstance(candidate.metrics, dict) else None
+    if not metrics:
+        return
+
+    default_location = str(metrics.get("tg_default_location") or "").strip()
+    default_city = str(metrics.get("tg_default_city") or "").strip()
+    extracted_city = str(metrics.get("tg_extracted_city") or "").strip()
+    if not default_location or not default_city or not extracted_city:
+        return
+    if default_city.casefold() == extracted_city.casefold():
+        return
+    current_city = str(candidate.city or "").strip()
+    if not current_city or current_city.casefold() != default_city.casefold():
+        return
+    if SMART_UPDATE_LLM_DISABLED:
+        return
+
+    extracted_location_name = str(metrics.get("tg_extracted_location_name") or "").strip()
+    extracted_location_address = str(metrics.get("tg_extracted_location_address") or "").strip()
+    source_text = _clip_to_readable_boundary(candidate.source_text, 2200)
+
+    prompt = (
+        "Ты помощник по импорту городских событий из Telegram.\n"
+        "У источника есть `default_location` — это сильный prior (обычно события проходят там), "
+        "но иногда пост может описывать событие в другом городе.\n"
+        "Extractor мог ошибочно извлечь город из контекста (например «(г. Москва)» про участников), "
+        "а не про место проведения.\n\n"
+        "Задача: определить, где проходит событие — в default_location (город default_city) "
+        "или в extracted_city.\n"
+        "Верни строго JSON:\n"
+        '{"decision":"default|extracted","confidence":0.0,"reason_short":"..."}\n\n'
+        "Правила:\n"
+        "- НЕ выдумывай третий город.\n"
+        "- Если место проведения явно в extracted_city (адрес/площадка/метро + город) — выбери `extracted`.\n"
+        "- Если extracted_city упоминается как контекст (происхождение артистов/организаторов и т.п.), "
+        "а место проведения соответствует default_location — выбери `default`.\n"
+        "- Если не уверен — выбери `default` и поставь confidence <= 0.6.\n\n"
+        f"default_location: {default_location!r}\n"
+        f"default_city: {default_city!r}\n"
+        f"extracted_city: {extracted_city!r}\n"
+        f"extracted_location_name: {extracted_location_name!r}\n"
+        f"extracted_location_address: {extracted_location_address!r}\n"
+        f"event_title: {_clip_title(candidate.title, 120)!r}\n"
+        f"event_date: {str(candidate.date or '').strip()!r}\n"
+        f"event_time: {str(candidate.time or '').strip()!r}\n"
+        f"post_text:\n{source_text}\n"
+    )
+
+    data = await _ask_gemma_json(
+        prompt,
+        _TG_DEFAULT_LOCATION_CITY_DISAMBIGUATION_SCHEMA,
+        max_tokens=140,
+        label="tg_city_disambiguation",
+    )
+    if not isinstance(data, dict):
+        return
+    decision = str(data.get("decision") or "").strip().lower()
+    try:
+        confidence = float(data.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    reason_short = str(data.get("reason_short") or "").strip()
+
+    metrics["tg_city_disambiguation_decision"] = decision or None
+    metrics["tg_city_disambiguation_confidence"] = confidence
+    metrics["tg_city_disambiguation_reason"] = reason_short[:160] if reason_short else None
+
+    if decision != "extracted" or confidence < 0.7:
+        logger.info(
+            "smart_update.tg_city_disambiguation keep_default decision=%s conf=%.2f default=%s extracted=%s source_url=%s",
+            decision,
+            confidence,
+            default_city,
+            extracted_city,
+            candidate.source_url,
+        )
+        return
+
+    # Apply the override: let the region filter reject truly out-of-scope events.
+    candidate.city = extracted_city
+    if extracted_location_name:
+        candidate.location_name = extracted_location_name
+    if extracted_location_address:
+        candidate.location_address = extracted_location_address
+    logger.info(
+        "smart_update.tg_city_disambiguation override_city default=%s extracted=%s conf=%.2f source_url=%s",
+        default_city,
+        extracted_city,
+        confidence,
+        candidate.source_url,
+    )
+
+
 async def _smart_event_update_impl(
     db: Database,
     candidate: EventCandidate,
@@ -4850,7 +8166,7 @@ async def _smart_event_update_impl(
     schedule_kwargs: dict[str, Any] | None = None,
 ) -> SmartUpdateResult:
     logger.info(
-        "smart_update.start source_type=%s source_url=%s title=%s date=%s time=%s location=%s city=%s posters=%d trust=%s",
+        "smart_update.start source_type=%s source_url=%s title=%s date=%s time=%s location=%s city=%s posters=%d trust=%s festival_context=%s festival=%s festival_full=%s festival_source=%s festival_series=%s",
         candidate.source_type,
         candidate.source_url,
         _clip_title(candidate.title),
@@ -4860,6 +8176,11 @@ async def _smart_event_update_impl(
         candidate.city,
         len(candidate.posters),
         candidate.trust_level,
+        (candidate.festival_context or "none"),
+        _clip_title(candidate.festival, 80),
+        _clip_title(candidate.festival_full, 120),
+        int(bool(candidate.festival_source)) if candidate.festival_source is not None else None,
+        _clip_title(candidate.festival_series, 80),
     )
     (
         candidate.location_name,
@@ -4896,6 +8217,47 @@ async def _smart_event_update_impl(
         )
         return SmartUpdateResult(status="invalid", reason="missing_location")
 
+    await _maybe_disambiguate_telegram_default_location_city(candidate)
+
+    # Deterministic region filter (project scope: Kaliningrad Oblast).
+    # If extracted city/settlement is outside the region (or cannot be reliably resolved),
+    # reject early so out-of-scope events do not get created/merged.
+    try:
+        if (os.getenv("REGION_FILTER_ENABLED", "1") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            # Manual operator actions (bot commands) must not be blocked by a missing city.
+            # The region filter is meant primarily for automated ingestion (VK/TG/parsers).
+            if (candidate.source_type or "").strip().lower() not in {"bot"}:
+                from geo_region import decide_kaliningrad_oblast
+
+                region_decision = await decide_kaliningrad_oblast(
+                    db,
+                    city=candidate.city,
+                    location_address=candidate.location_address,
+                    gemma_client=_get_gemma_client(),
+                )
+                strict = (os.getenv("REGION_FILTER_STRICT", "1") or "").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }
+                if region_decision.allowed is False or (strict and region_decision.allowed is None):
+                    logger.info(
+                        "smart_update.rejected reason=%s source_type=%s source_url=%s city=%s region=%s source=%s",
+                        region_decision.reason,
+                        candidate.source_type,
+                        candidate.source_url,
+                        candidate.city,
+                        region_decision.region_name or region_decision.region_code,
+                        region_decision.source,
+                    )
+                    return SmartUpdateResult(
+                        status="rejected_out_of_region",
+                        reason=region_decision.reason,
+                    )
+    except Exception as e:  # pragma: no cover - must not crash ingestion
+        logger.warning("smart_update.region_filter_failed err=%s", e)
+
     clean_title = _strip_private_use(candidate.title) or (candidate.title or "")
     if not clean_title:
         logger.warning(
@@ -4904,12 +8266,107 @@ async def _smart_event_update_impl(
             candidate.source_url,
         )
         return SmartUpdateResult(status="invalid", reason="empty_title_after_clean")
+    context_value = (candidate.festival_context or "").strip().lower()
+    if context_value == "festival_post":
+        logger.info(
+            "smart_update.skip reason=festival_post source_type=%s source_url=%s festival=%s",
+            candidate.source_type,
+            candidate.source_url,
+            _clip_title(candidate.festival or candidate.festival_series, 80),
+        )
+        return SmartUpdateResult(status="skipped_festival_post", reason="festival_post")
     raw_source_text = _strip_private_use(candidate.source_text) or (
         candidate.source_text or ""
     )
     raw_excerpt = _strip_private_use(candidate.raw_excerpt) or (candidate.raw_excerpt or "")
 
+    # Avoid confusing self-references for non-parser sources (e.g. taking the post URL as "ticket_link").
+    # We still allow t.me links for registration/DM, but they must not be identical to the source URL.
+    if not str(candidate.source_type or "").strip().lower().startswith("parser:"):
+        try:
+            if _normalize_url(candidate.ticket_link) and _normalize_url(candidate.ticket_link) == _normalize_url(candidate.source_url):
+                candidate.ticket_link = None
+        except Exception:
+            pass
+
     text_filter_facts: list[str] = []
+    queue_notes: list[str] = []
+
+    def _push_queue_note(note: str) -> None:
+        value = str(note or "").strip()
+        if not value:
+            return
+        if value not in queue_notes:
+            queue_notes.append(value)
+
+    async def _enqueue_ticket_sites_queue(session: Any, *, event_id: int) -> None:
+        if not event_id:
+            return
+        try:
+            from ticket_sites_queue import (
+                enqueue_ticket_site_urls_in_session,
+                extract_ticket_site_urls,
+            )
+        except Exception:
+            return
+
+        links_payload: list[Any] = []
+        if candidate.links_payload is not None:
+            links_payload.append(candidate.links_payload)
+        if candidate.source_url:
+            links_payload.append(candidate.source_url)
+        if candidate.ticket_link:
+            links_payload.append(candidate.ticket_link)
+
+        urls = extract_ticket_site_urls(
+            text=candidate.source_text,
+            links_payload=links_payload,
+            events_payload=[
+                {
+                    "ticket_link": candidate.ticket_link,
+                    "links": candidate.links_payload,
+                }
+            ],
+        )
+        if not urls:
+            return
+
+        now = datetime.now(timezone.utc)
+        enqueued = 0
+        try:
+            enqueued = await enqueue_ticket_site_urls_in_session(
+                session,
+                urls=urls,
+                event_id=int(event_id),
+                source_post_url=candidate.source_url,
+                source_chat_username=candidate.source_chat_username,
+                source_chat_id=candidate.source_chat_id,
+                source_message_id=candidate.source_message_id,
+                now=now,
+            )
+        except Exception:
+            logger.warning(
+                "smart_update: ticket_sites_queue enqueue failed source_type=%s source_url=%s event_id=%s",
+                candidate.source_type,
+                candidate.source_url,
+                event_id,
+                exc_info=True,
+            )
+            return
+
+        total = int(enqueued or 0)
+        if total <= 0:
+            return
+
+        if len(urls) == 1:
+            _push_queue_note(f"🎟 {urls[0]} добавлена в очередь мониторинга билетных сайтов")
+            return
+        _push_queue_note(f"🎟 В очередь мониторинга билетных сайтов добавлено ссылок: {total}/{len(urls)}")
+        for u in urls[:2]:
+            _push_queue_note(f"🎟 {u}")
+        if len(urls) > 2:
+            _push_queue_note(f"🎟 … ещё {len(urls) - 2}")
+
     default_end_date = _maybe_apply_default_end_date_for_long_event(candidate)
     if default_end_date:
         text_filter_facts.append(f"Дата окончания по умолчанию: {default_end_date}")
@@ -4950,11 +8407,285 @@ async def _smart_event_update_impl(
     if is_giveaway:
         clean_source_text = _strip_giveaway_lines(clean_source_text) or clean_source_text
         clean_raw_excerpt = _strip_giveaway_lines(clean_raw_excerpt) or clean_raw_excerpt
+    clean_source_text = _normalize_bullet_markers(clean_source_text) or clean_source_text
+    clean_raw_excerpt = _normalize_bullet_markers(clean_raw_excerpt) or clean_raw_excerpt
     if (before_promo_src or "") != (clean_source_text or "") or (before_promo_excerpt or "") != (clean_raw_excerpt or ""):
         text_filter_facts.append("Убраны промо-фрагменты")
 
+    # Non-event notices / course ads (VK/TG): skip early to avoid creating pseudo-events.
+    source_type_clean = str(candidate.source_type or "").strip().lower()
+    if source_type_clean in {"vk", "telegram", "tg"}:
+        combined_text = "\n".join(
+            [
+                clean_source_text or "",
+                clean_raw_excerpt or "",
+            ]
+        ).strip()
+        if _looks_like_open_call_not_event(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=open_call source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="open_call")
+        if _looks_like_work_schedule_notice(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=work_schedule source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="work_schedule")
+        if _looks_like_non_event_notice(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=non_event_notice source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="non_event_notice")
+        if _looks_like_venue_status_update_not_event(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=venue_status_update source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="venue_status_update")
+        if _looks_like_congrats_notice_not_event(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=congrats_notice source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="congrats_notice")
+        if _looks_like_course_promo(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=course_promo source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="course_promo")
+        if _looks_like_service_promo_not_event(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=service_promo source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="service_promo")
+        outage_reason = _looks_like_utility_outage_or_road_closure(clean_title, combined_text)
+        if outage_reason:
+            logger.info(
+                "smart_update.skip reason=%s source_type=%s source_url=%s title=%s",
+                outage_reason,
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason=outage_reason)
+        if _looks_like_too_soon_notice(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=too_soon source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="too_soon")
+        # Project policy: auto-ingestion should not create online-only events.
+        if _looks_like_online_event(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=online_event source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="online_event")
+        if _looks_like_book_review_not_event(clean_title, combined_text):
+            logger.info(
+                "smart_update.skip reason=book_review source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="book_review")
+        if _looks_like_photo_day_not_event(clean_title, combined_text, candidate=candidate):
+            logger.info(
+                "smart_update.skip reason=photo_day source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="photo_day")
+
+    # Ticket price grounding: prevent hallucinated min/max prices for VK/TG sources.
+    # Only accept price values when the source text/OCR contains explicit price signals.
+    if source_type_clean in {"vk", "telegram", "tg"} and (
+        candidate.ticket_price_min is not None or candidate.ticket_price_max is not None
+    ):
+        poster_texts_for_price: list[str] = []
+        for p in candidate.posters or []:
+            for k in ("ocr_text", "ocr_title"):
+                v = getattr(p, k, None)
+                if isinstance(v, str) and v.strip():
+                    poster_texts_for_price.append(v.strip())
+        price_probe = "\n".join(
+            [
+                clean_title,
+                clean_source_text or "",
+                clean_raw_excerpt or "",
+                *poster_texts_for_price[:3],
+            ]
+        ).strip()
+        if not _has_price_evidence(price_probe, candidate.ticket_price_min, candidate.ticket_price_max):
+            before_min = candidate.ticket_price_min
+            before_max = candidate.ticket_price_max
+            candidate.ticket_price_min = None
+            candidate.ticket_price_max = None
+            note = "Цена отброшена: не найдена в источнике"
+            if note not in text_filter_facts:
+                text_filter_facts.append(note)
+            logger.info(
+                "smart_update.price_dropped source_type=%s source_url=%s title=%s before=%s..%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+                before_min,
+                before_max,
+            )
+
+    # Best-effort: if the source contains festival context (festival post OR event within a festival),
+    # enqueue it into the festival queue so operators can later run `/fest_queue` and build/update
+    # festival pages. This is intentionally deterministic (regex/signal-based), not another LLM call.
+    try:
+        from festival_queue import detect_festival_context, enqueue_festival_source
+        from models import FestivalQueueItem
+
+        def _map_source_kind(source_type: str) -> str:
+            st = (source_type or "").strip().lower()
+            if st in {"tg", "telegram"}:
+                return "tg"
+            if st in {"vk"}:
+                return "vk"
+            return "url"
+
+        def _parse_vk_ids(url: str | None) -> tuple[int | None, int | None]:
+            if not url:
+                return None, None
+            m = re.search(r"wall-?(\d+)_([0-9]+)", url)
+            if not m:
+                return None, None
+            return int(m.group(1)), int(m.group(2))
+
+        queue_url = (candidate.source_url or "").strip()
+        if queue_url:
+            poster_texts = [
+                p.ocr_text
+                for p in (candidate.posters or [])
+                if (p.ocr_text or "").strip()
+            ]
+            ev_payload = {
+                "title": candidate.title,
+                "date": candidate.date,
+                "end_date": candidate.end_date,
+                "time": candidate.time,
+                "location_name": candidate.location_name,
+                "event_type": candidate.event_type,
+                "ticket_link": candidate.ticket_link,
+                "festival": candidate.festival,
+                "festival_full": candidate.festival_full,
+                "festival_context": candidate.festival_context,
+            }
+            decision = detect_festival_context(
+                parsed_events=[ev_payload],
+                festival_payload={
+                    "festival": candidate.festival,
+                    "festival_full": candidate.festival_full,
+                    "festival_context": candidate.festival_context,
+                },
+                source_text=clean_source_text or clean_raw_excerpt,
+                poster_texts=poster_texts,
+                source_is_festival=bool(candidate.festival_source),
+                source_series=candidate.festival_series,
+            )
+            if decision and decision.context != "none" and (decision.festival or decision.festival_full):
+                # Backfill candidate fields for better operator logs and future merges.
+                if (candidate.festival_context or "").strip().lower() in {"", "none"} and decision.context:
+                    candidate.festival_context = decision.context
+                if not (candidate.festival or "").strip() and decision.festival:
+                    candidate.festival = decision.festival
+                if not (candidate.festival_full or "").strip() and decision.festival_full:
+                    candidate.festival_full = decision.festival_full
+                if decision.dedup_links and not list(candidate.festival_dedup_links or []):
+                    candidate.festival_dedup_links = list(decision.dedup_links)
+
+                source_kind = _map_source_kind(candidate.source_type)
+                async with db.get_session() as _fest_session:
+                    done_id = (
+                        await _fest_session.execute(
+                            select(FestivalQueueItem.id)
+                            .where(
+                                FestivalQueueItem.source_kind == source_kind,
+                                FestivalQueueItem.source_url == queue_url,
+                                FestivalQueueItem.status == "done",
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+
+                if done_id is None:
+                    gid, pid = _parse_vk_ids(queue_url)
+                    item = await enqueue_festival_source(
+                        db,
+                        source_kind=source_kind,
+                        source_url=queue_url,
+                        source_text=clean_source_text or clean_raw_excerpt,
+                        festival_context=decision.context,
+                        festival_name=decision.festival,
+                        festival_full=decision.festival_full,
+                        festival_series=candidate.festival_series,
+                        dedup_links=decision.dedup_links,
+                        signals=decision.signals,
+                        source_chat_username=candidate.source_chat_username,
+                        source_chat_id=candidate.source_chat_id,
+                        source_message_id=candidate.source_message_id,
+                        source_group_id=gid,
+                        source_post_id=pid,
+                    )
+                    msg = (
+                        f"🎪 Добавлено в фестивальную очередь: {decision.context} "
+                        f"{decision.festival or decision.festival_full} (id={getattr(item, 'id', None)})"
+                    )
+                    text_filter_facts.append(msg)
+                    _push_queue_note(msg)
+                else:
+                    msg = f"🎪 Фестивальная очередь: уже done (id={done_id})"
+                    text_filter_facts.append(msg)
+                    _push_queue_note(msg)
+    except Exception:
+        logger.warning("smart_update: festival_queue enqueue failed", exc_info=True)
+
+    # If the source is detected as a festival/program post, it must not create/update events.
+    # Some upstream extractors (notably Telegram Monitoring) may not populate `festival_context`,
+    # so we backfill it via deterministic detection above and enforce the policy here.
+    if (candidate.festival_context or "").strip().lower() == "festival_post":
+        logger.info(
+            "smart_update.skip reason=festival_post_detected source_type=%s source_url=%s festival=%s",
+            candidate.source_type,
+            candidate.source_url,
+            _clip_title(candidate.festival or candidate.festival_series, 80),
+        )
+        return SmartUpdateResult(
+            status="skipped_festival_post",
+            reason="festival_post",
+            queue_notes=list(queue_notes or []),
+        )
+
     # Multi-event digests should not be imported as a single event.
-    if (candidate.source_type in {"vk", "tg"}) and _looks_like_schedule_digest(
+    if (candidate.source_type in {"vk", "tg", "telegram"}) and _looks_like_schedule_digest(
         clean_source_text or clean_raw_excerpt,
         event_date=candidate.date,
         end_date=candidate.end_date,
@@ -4982,7 +8713,9 @@ async def _smart_event_update_impl(
         )
         return SmartUpdateResult(status="skipped_promo", reason="promo_only")
 
-    # Filter out irrelevant posters (e.g. generic discount banners) using OCR.
+    # Posters policy:
+    # Keep all posters (dedupe/order happens later). OCR is used for prioritization only.
+    # This avoids events ending up without images due to overly strict filtering.
     poster_filter_facts: list[str] = []
     if candidate.posters:
         # Best-effort: backfill missing OCR from local cache (cheap, no network).
@@ -5013,21 +8746,6 @@ async def _smart_event_update_impl(
                             p.ocr_title = cached.title
             except Exception:
                 logger.warning("smart_update: poster OCR cache backfill failed", exc_info=True)
-
-        kept: list[PosterCandidate] = []
-        for p in list(candidate.posters):
-            try:
-                ok, reason = await _poster_is_relevant(candidate, p)
-            except Exception:  # pragma: no cover - defensive
-                ok, reason = True, None
-            if ok:
-                kept.append(p)
-                continue
-            url = (p.catbox_url or p.supabase_url or "").strip()
-            if url:
-                suffix = f" ({reason})" if reason else ""
-                poster_filter_facts.append(f"Афиша пропущена: {url}{suffix}")
-        candidate.posters = kept
 
     if check_source_url and candidate.source_url:
         timing = (os.getenv("SMART_UPDATE_DEBUG_TIMING") or "").strip().lower() in {"1", "true", "yes"}
@@ -5072,37 +8790,65 @@ async def _smart_event_update_impl(
     if not cand_start or not cand_end:
         return SmartUpdateResult(status="invalid", reason="invalid_date")
 
-    async with db.get_session() as session:
-        stmt = select(Event).where(
-            and_(
-                Event.date <= cand_end.isoformat(),
-                or_(
-                    and_(
-                        Event.end_date.is_(None),
-                        Event.date >= cand_start.isoformat(),
+    anchor_match = await _match_existing_event_by_source_anchor(db, candidate)
+    if anchor_match is None and (not check_source_url):
+        # When explicit idempotency is disabled (reprocessing allowed), still try to converge
+        # on an existing event that already has this source_url attached.
+        try:
+            anchor_match = await _match_existing_event_by_event_source_url(db, candidate)
+        except Exception:
+            logger.warning("smart_update: event_source_url anchor match failed", exc_info=True)
+    if anchor_match is not None:
+        shortlist = [anchor_match]
+        anchor_forced = True
+    else:
+        anchor_forced = False
+        async with db.get_session() as session:
+            stmt = select(Event).where(
+                and_(
+                    Event.date <= cand_end.isoformat(),
+                    or_(
+                        and_(
+                            Event.end_date.is_(None),
+                            Event.date >= cand_start.isoformat(),
+                        ),
+                        Event.end_date >= cand_start.isoformat(),
                     ),
-                    Event.end_date >= cand_start.isoformat(),
-                ),
+                )
             )
-        )
-        if candidate.city:
-            stmt = stmt.where(Event.city == candidate.city)
-        res = await session.execute(stmt)
-        shortlist = list(res.scalars().all())
+            stmt = _apply_soft_city_filter(stmt, candidate.city)
+            res = await session.execute(stmt)
+            shortlist = list(res.scalars().all())
 
-    if candidate.location_name:
+    if (not anchor_forced) and candidate.location_name:
         shortlist = [
             ev for ev in shortlist if _location_matches(ev.location_name, candidate.location_name)
         ]
 
     # Time is an anchor field, but for canonical site/parser imports we allow time corrections:
     # matching must work even if a Telegram-first event had a wrong/empty time.
-    cand_time = (candidate.time or "").strip()
     is_canonical_site = str(candidate.source_type or "").startswith("parser:")
-    if cand_time and (not is_canonical_site):
-        time_filtered = [ev for ev in shortlist if (ev.time or "").strip() == cand_time]
+    cand_time_norm = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
+    if (not anchor_forced) and cand_time_norm and (not is_canonical_site):
+        time_filtered: list[Event] = []
+        for ev in shortlist:
+            ev_time_anchor = _event_anchor_time(ev)
+            if (not ev_time_anchor) or (ev_time_anchor == cand_time_norm):
+                time_filtered.append(ev)
         if time_filtered:
             shortlist = time_filtered
+
+    # If the candidate has no explicit time, try to shrink the shortlist to the only
+    # title-related event (helps prevent duplicates when time is missing but the match is obvious).
+    if (not anchor_forced) and (not cand_time_norm) and candidate.location_name and len(shortlist) > 1:
+        related = [
+            ev
+            for ev in shortlist
+            if (not _has_explicit_time_conflict(cand_time_norm, _event_anchor_time(ev)))
+            and _titles_look_related(candidate.title, getattr(ev, "title", None))
+        ]
+        if len(related) == 1:
+            shortlist = related
 
     posters_map: dict[int, list[EventPoster]] = {}
     if shortlist:
@@ -5131,6 +8877,8 @@ async def _smart_event_update_impl(
             filtered.append(ev)
         shortlist = filtered
 
+    llm_create_bundle: dict[str, Any] | None = None
+
     if not shortlist:
         match_event = None
         match_reason = "shortlist_empty"
@@ -5138,7 +8886,10 @@ async def _smart_event_update_impl(
 
         # Deterministic single-candidate match is allowed only when anchors look sane.
         # Otherwise fall back to LLM matching / create to avoid catastrophic cross-event merges.
-        if len(shortlist) == 1 and _single_candidate_auto_match_ok(
+        if anchor_forced:
+            match_event = shortlist[0]
+            match_reason = "anchor_forced"
+        elif len(shortlist) == 1 and _single_candidate_auto_match_ok(
             candidate,
             shortlist[0],
             is_canonical_site=is_canonical_site,
@@ -5171,7 +8922,7 @@ async def _smart_event_update_impl(
             candidate.source_type,
             candidate.source_url,
         )
-        if strong_matches:
+        if strong_matches and match_event is None:
             best = max(strong_matches.items(), key=lambda item: item[1])
             match_event = next((ev for ev in shortlist if ev.id == best[0]), None)
             match_reason = "strong_match"
@@ -5182,27 +8933,127 @@ async def _smart_event_update_impl(
             )
 
         if match_event is None:
-            match_id, confidence, reason = await _llm_match_event(
-                candidate, shortlist[:10], posters_map=posters_map
+            hard = _deterministic_exact_title_match(
+                candidate,
+                shortlist,
+                is_canonical_site=is_canonical_site,
             )
-            match_reason = reason
-            if match_id:
-                match_event = next((ev for ev in shortlist if ev.id == match_id), None)
-                if match_event is None:
-                    confidence = 0.0
-                threshold = 0.85 if allow_parallel and len(shortlist) > 1 else 0.6
-                if confidence < threshold:
-                    match_event = None
-                    match_reason = f"llm_conf_{confidence:.2f}<={threshold:.2f}"
-                elif len(shortlist) == 1 and not _single_candidate_auto_match_ok(
+            if hard is not None:
+                match_event = hard
+                match_reason = "deterministic_exact_title"
+                logger.info(
+                    "smart_update.match type=deterministic_exact_title event_id=%s",
+                    getattr(match_event, "id", None),
+                )
+
+        if match_event is None:
+            related = _deterministic_related_title_anchor_match(
+                candidate,
+                shortlist,
+                is_canonical_site=is_canonical_site,
+            )
+            if related is not None:
+                match_event = related
+                match_reason = "deterministic_related_title_anchor"
+                logger.info(
+                    "smart_update.match type=deterministic_related_title_anchor event_id=%s",
+                    getattr(match_event, "id", None),
+                )
+
+        if match_event is None:
+            threshold = 0.85 if allow_parallel and len(shortlist) > 1 else 0.6
+            use_match_create_bundle = (
+                (os.getenv("SMART_UPDATE_MATCH_CREATE_BUNDLE", "1") or "").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
+            source_type_clean = str(candidate.source_type or "").strip().lower()
+            use_match_create_bundle = use_match_create_bundle and source_type_clean in {"vk", "tg", "telegram"}
+            if use_match_create_bundle:
+                normalized_event_type_hint = _normalize_event_type_value(
+                    candidate.title,
+                    clean_raw_excerpt or clean_source_text or candidate.source_text,
+                    candidate.event_type,
+                )
+                combo = await _llm_match_or_create_bundle(
                     candidate,
-                    match_event,
-                    is_canonical_site=is_canonical_site,
-                ):
+                    shortlist[:10],
+                    posters_map=posters_map,
+                    threshold=threshold,
+                    clean_title=clean_title,
+                    clean_source_text=clean_source_text,
+                    clean_raw_excerpt=clean_raw_excerpt,
+                    normalized_event_type=normalized_event_type_hint,
+                )
+                if combo and (combo.get("action") == "create"):
+                    llm_create_bundle = combo.get("bundle") if isinstance(combo.get("bundle"), dict) else None
+                    match_id = None
+                    confidence = float(combo.get("confidence") or 0.0)
+                    match_reason = str(combo.get("reason_short") or "llm_create_bundle")
                     match_event = None
-                    match_reason = "llm_single_candidate_sanity_reject"
+                elif combo and (combo.get("action") == "match"):
+                    match_id = combo.get("match_event_id")
+                    confidence = float(combo.get("confidence") or 0.0)
+                    match_reason = str(combo.get("reason_short") or "")
+                    try:
+                        match_id_int = int(match_id) if match_id is not None else None
+                    except Exception:
+                        match_id_int = None
+                    if match_id_int:
+                        match_event = next((ev for ev in shortlist if ev.id == match_id_int), None)
+                    else:
+                        match_event = None
+                    if match_event is None:
+                        confidence = 0.0
+                        match_reason = "llm_bad_match_id"
+                    elif len(shortlist) == 1 and not _single_candidate_auto_match_ok(
+                        candidate,
+                        match_event,
+                        is_canonical_site=is_canonical_site,
+                    ):
+                        match_event = None
+                        match_reason = "llm_single_candidate_sanity_reject"
+                else:
+                    match_id, confidence, reason = await _llm_match_event(
+                        candidate, shortlist[:10], posters_map=posters_map
+                    )
+                    match_reason = reason
+                    if match_id:
+                        match_event = next((ev for ev in shortlist if ev.id == match_id), None)
+                        if match_event is None:
+                            confidence = 0.0
+                        if confidence < threshold:
+                            match_event = None
+                            match_reason = f"llm_conf_{confidence:.2f}<={threshold:.2f}"
+                        elif len(shortlist) == 1 and not _single_candidate_auto_match_ok(
+                            candidate,
+                            match_event,
+                            is_canonical_site=is_canonical_site,
+                        ):
+                            match_event = None
+                            match_reason = "llm_single_candidate_sanity_reject"
+                    else:
+                        match_event = None
             else:
-                match_event = None
+                match_id, confidence, reason = await _llm_match_event(
+                    candidate, shortlist[:10], posters_map=posters_map
+                )
+                match_reason = reason
+                if match_id:
+                    match_event = next((ev for ev in shortlist if ev.id == match_id), None)
+                    if match_event is None:
+                        confidence = 0.0
+                    if confidence < threshold:
+                        match_event = None
+                        match_reason = f"llm_conf_{confidence:.2f}<={threshold:.2f}"
+                    elif len(shortlist) == 1 and not _single_candidate_auto_match_ok(
+                        candidate,
+                        match_event,
+                        is_canonical_site=is_canonical_site,
+                    ):
+                        match_event = None
+                        match_reason = "llm_single_candidate_sanity_reject"
+                else:
+                    match_event = None
             logger.info(
                 "smart_update.match type=llm match_id=%s confidence=%.2f reason=%s",
                 match_id,
@@ -5212,19 +9063,92 @@ async def _smart_event_update_impl(
 
     # Guard: if the matched existing event is semantically unrelated by title, treat it as "no match"
     # and create a new event instead of performing a catastrophic merge.
+    #
+    # Keep the match only when a deterministic single-candidate match would also be allowed.
+    # This is intentionally conservative: long-running events (e.g. exhibitions) can overlap at the same
+    # venue, so date-range overlap alone must not override an unrelated title.
     if match_event is not None and not str(candidate.source_type or "").startswith("parser:"):
-        if _title_has_meaningful_tokens(candidate.title) and _title_has_meaningful_tokens(getattr(match_event, "title", None)):
+        if _title_has_meaningful_tokens(candidate.title) and _title_has_meaningful_tokens(
+            getattr(match_event, "title", None)
+        ):
             if not _titles_look_related(candidate.title, getattr(match_event, "title", None)):
-                logger.warning(
-                    "smart_update.match_overruled reason=unrelated_titles source_type=%s source_url=%s candidate_title=%s existing_id=%s existing_title=%s",
-                    candidate.source_type,
-                    candidate.source_url,
-                    _clip_title(candidate.title),
-                    getattr(match_event, "id", None),
-                    _clip_title(getattr(match_event, "title", None)),
-                )
-                match_event = None
-                match_reason = "unrelated_titles"
+                safe_single = False
+                try:
+                    if len(shortlist) == 1:
+                        safe_single = _single_candidate_auto_match_ok(
+                            candidate,
+                            match_event,
+                            is_canonical_site=False,
+                        )
+                except Exception:
+                    safe_single = False
+                if not safe_single:
+                    logger.warning(
+                        "smart_update.match_overruled reason=unrelated_titles source_type=%s source_url=%s candidate_title=%s existing_id=%s existing_title=%s",
+                        candidate.source_type,
+                        candidate.source_url,
+                        _clip_title(candidate.title),
+                        getattr(match_event, "id", None),
+                        _clip_title(getattr(match_event, "title", None)),
+                    )
+                    match_event = None
+                    match_reason = "unrelated_titles"
+
+    # Rescue-match: match/create bundle can decide "create" when candidate title is weak,
+    # even though the produced bundle title clearly matches an existing event in the shortlist.
+    # Try a deterministic title-based match to prevent duplicates.
+    if match_event is None and llm_create_bundle is not None and shortlist:
+        bundle_title_raw = llm_create_bundle.get("title") if isinstance(llm_create_bundle, dict) else None
+        bundle_title = ""
+        if isinstance(bundle_title_raw, str) and bundle_title_raw.strip():
+            # Non-semantic cleanup: some models return JSON-ish `\"...\"` fragments.
+            bundle_title = (
+                (bundle_title_raw or "")
+                .strip()
+                .replace("\\\\\"", "\"")
+                .replace("\\\"", "\"")
+                .strip()
+            )
+            bundle_title = _strip_private_use(bundle_title) or bundle_title
+        if bundle_title and _title_has_meaningful_tokens(bundle_title):
+            grounded = False
+            try:
+                grounded = _is_title_grounded_in_candidate_sources(bundle_title, candidate)
+            except Exception:
+                grounded = False
+
+            if grounded:
+                prev_reason = match_reason
+                cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
+                rescued_matches: list[Event] = []
+                for ev in shortlist:
+                    if not getattr(ev, "id", None):
+                        continue
+                    if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
+                        continue
+                    if not _titles_look_related(bundle_title, getattr(ev, "title", None)):
+                        continue
+                    rescued_matches.append(ev)
+
+                chosen: Event | None = None
+                if len(rescued_matches) == 1:
+                    chosen = rescued_matches[0]
+                elif rescued_matches:
+                    sigs = {_anchor_signature_for_duplicate_event(ev) for ev in rescued_matches}
+                    if len(sigs) == 1:
+                        chosen = _pick_best_duplicate_event(rescued_matches)
+
+                if chosen is not None:
+                    match_event = chosen
+                    match_reason = "rescue_bundle_title"
+                    note = "Матчинг: предотвращён дубль (rescue по bundle.title)"
+                    if note not in text_filter_facts:
+                        text_filter_facts.append(note)
+                    logger.info(
+                        "smart_update.match type=rescue_bundle_title event_id=%s prev_reason=%s",
+                        getattr(match_event, "id", None),
+                        prev_reason,
+                    )
 
     if match_event is None:
         normalized_event_type = _normalize_event_type_value(
@@ -5241,35 +9165,45 @@ async def _smart_event_update_impl(
                 candidate.ticket_price_min == 0
                 and (candidate.ticket_price_max in (0, None))
             )
-        description_value = (clean_raw_excerpt or clean_source_text or clean_title or "").strip()
-        if _should_prefer_source_text_for_description(clean_source_text, clean_raw_excerpt):
-            description_value = (clean_source_text or "").strip()
-            logger.info(
-                "smart_update.create_description_seed_source_text source_type=%s source_url=%s excerpt_len=%d source_len=%d",
-                candidate.source_type,
-                candidate.source_url,
-                len((clean_raw_excerpt or "").strip()),
-                len((clean_source_text or "").strip()),
-            )
+        # Seed with excerpt/title only; never publish full source_text verbatim as a fallback.
+        # Full source is preserved separately in `event.source_text`/`event_source`.
+        description_value = (clean_raw_excerpt or clean_title or "").strip()
 
         bundled_facts: list[str] | None = None
         bundled_digest: str | None = None
         bundled_desc: str | None = None
+        bundled_title: str | None = None
+        bundled_short: str | None = None
         try:
-            bundled = await _llm_create_description_facts_and_digest(
-                candidate,
-                clean_title=clean_title,
-                clean_source_text=clean_source_text,
-                clean_raw_excerpt=clean_raw_excerpt,
-                normalized_event_type=normalized_event_type,
-            )
+            if llm_create_bundle is not None:
+                bundled = llm_create_bundle
+            else:
+                bundled = await _llm_create_description_facts_and_digest(
+                    candidate,
+                    clean_title=clean_title,
+                    clean_source_text=clean_source_text,
+                    clean_raw_excerpt=clean_raw_excerpt,
+                    normalized_event_type=normalized_event_type,
+                )
         except Exception:  # pragma: no cover - provider failures
             bundled = None
         if isinstance(bundled, dict):
+            bundled_title_raw = bundled.get("title")
+            if isinstance(bundled_title_raw, str) and bundled_title_raw.strip():
+                # Non-semantic cleanup: some models return JSON-ish `\"...\"` fragments.
+                t = (bundled_title_raw or "").strip().replace("\\\\\"", "\"").replace("\\\"", "\"").strip()
+                t = _strip_private_use(t) or t
+                if t:
+                    bundled_title = t
             bundled_desc_raw = bundled.get("description")
             if isinstance(bundled_desc_raw, str) and bundled_desc_raw.strip():
                 bundled_desc = bundled_desc_raw.strip()
             bundled_digest = _clean_search_digest(bundled.get("search_digest"))
+            bundled_short = _clean_short_description(bundled.get("short_description"))
+            if bundled_short and not _is_short_description_acceptable(
+                bundled_short, min_words=12, max_words=16
+            ):
+                bundled_short = None
             raw_facts_any = bundled.get("facts")
             raw_facts: list[str] = []
             if isinstance(raw_facts_any, list):
@@ -5290,44 +9224,180 @@ async def _smart_event_update_impl(
                     break
             bundled_facts = bundled_facts_out
 
-        if bundled_desc:
-            description_value = bundled_desc
-        else:
-            try:
-                rewritten = await _rewrite_description_journalistic(candidate)
-            except Exception:  # pragma: no cover - defensive
-                logger.warning("smart_update: description rewrite failed", exc_info=True)
-                rewritten = None
-            if rewritten:
-                description_value = rewritten
-        if _description_has_foreign_schedule_noise(
-            description_value,
-            event_date=candidate.date,
-            end_date=candidate.end_date,
-            event_title=candidate.title,
-        ):
-            description_value = _strip_foreign_schedule_noise(
+        # Bot/manual sources should keep operator-provided titles as-is.
+        if (candidate.source_type or "").strip().lower() in {"bot"}:
+            bundled_title = None
+
+        # Guard LLM title proposals on create: avoid creating an event with an unrelated title,
+        # which later breaks matching and can lead to false duplicates or cross-event merges.
+        if bundled_title:
+            candidate_title_weak = _is_candidate_title_weak_for_llm_override(
+                clean_title,
+                candidate=candidate,
+                normalized_event_type=normalized_event_type,
+            )
+            proposed_title_grounded = _is_title_grounded_in_candidate_sources(
+                bundled_title,
+                candidate,
+            )
+            if not proposed_title_grounded:
+                logger.warning(
+                    "smart_update.create_title_rejected reason=ungrounded_title source_type=%s source_url=%s candidate_title=%s proposed_title=%s",
+                    candidate.source_type,
+                    candidate.source_url,
+                    _clip_title(clean_title),
+                    _clip_title(bundled_title),
+                )
+                text_filter_facts.append(
+                    f"Заголовок отклонён: {clean_title} -> {bundled_title} (причина: ungrounded_title)"
+                )
+                bundled_title = None
+            elif (
+                _title_has_meaningful_tokens(clean_title)
+                and (not _titles_look_related(bundled_title, clean_title))
+                and (not candidate_title_weak)
+            ):
+                logger.warning(
+                    "smart_update.create_title_rejected source_type=%s source_url=%s candidate_title=%s proposed_title=%s",
+                    candidate.source_type,
+                    candidate.source_url,
+                    _clip_title(clean_title),
+                    _clip_title(bundled_title),
+                )
+                text_filter_facts.append(
+                    f"Заголовок отклонён: {clean_title} -> {bundled_title} (причина: semantic_title_mismatch)"
+                )
+                bundled_title = None
+
+        final_title = bundled_title or clean_title
+        final_title = _strip_private_use(final_title) or final_title
+        final_title = re.sub(r"\s+", " ", (final_title or "").strip())
+        # Safety-net: Telegraph + Telegram UI behave poorly with extremely long titles.
+        final_title = _clip_title(final_title, 160) or clean_title
+
+        fact_first_used = False
+        if SMART_UPDATE_FACT_FIRST and not SMART_UPDATE_LLM_DISABLED:
+            fact_first_facts = list(bundled_facts or [])
+            if not fact_first_facts:
+                try:
+                    fact_first_facts = await _llm_extract_candidate_facts(candidate)
+                except Exception:  # pragma: no cover - provider failures
+                    fact_first_facts = []
+                if fact_first_facts:
+                    bundled_facts = fact_first_facts
+            facts_text_clean = _facts_text_clean_from_facts(
+                fact_first_facts,
+                anchors=[
+                    candidate.date or "",
+                    candidate.time or "",
+                    candidate.city or "",
+                    candidate.location_name or "",
+                    candidate.location_address or "",
+                ],
+            )
+            if facts_text_clean:
+                try:
+                    ff_desc = await _llm_fact_first_description_md(
+                        title=final_title,
+                        event_type=normalized_event_type or candidate.event_type,
+                        facts_text_clean=facts_text_clean,
+                        anchors=[
+                            candidate.date or "",
+                            candidate.time or "",
+                            candidate.city or "",
+                            candidate.location_name or "",
+                            candidate.location_address or "",
+                        ],
+                        label="create",
+                    )
+                except Exception:  # pragma: no cover - provider failures
+                    ff_desc = None
+                if ff_desc:
+                    description_value = ff_desc
+                    fact_first_used = True
+                    # Keep canonical facts clean: narrative facts only (anchors are logged separately).
+                    bundled_facts = facts_text_clean
+
+        if not fact_first_used:
+            if bundled_desc:
+                description_value = bundled_desc
+            else:
+                try:
+                    rewritten = await _rewrite_description_journalistic(candidate)
+                except Exception:  # pragma: no cover - defensive
+                    logger.warning("smart_update: description rewrite failed", exc_info=True)
+                    rewritten = None
+                if rewritten:
+                    description_value = rewritten
+            # If the model returned near-verbatim source text, force a second-pass strict rewrite.
+            if _description_too_verbatim(description_value, source_text=clean_source_text):
+                logger.warning(
+                    "smart_update: description too verbatim; forcing strict rewrite source_type=%s source_url=%s",
+                    candidate.source_type,
+                    candidate.source_url,
+                )
+                try:
+                    rewritten_strict = await _rewrite_description_journalistic(
+                        candidate,
+                        strict_nonverbatim=True,
+                    )
+                except Exception:  # pragma: no cover - provider failures
+                    rewritten_strict = None
+                if rewritten_strict and not _description_too_verbatim(
+                    rewritten_strict, source_text=clean_source_text
+                ):
+                    description_value = rewritten_strict
+            if _description_has_foreign_schedule_noise(
                 description_value,
                 event_date=candidate.date,
                 end_date=candidate.end_date,
                 event_title=candidate.title,
+            ):
+                description_value = _strip_foreign_schedule_noise(
+                    description_value,
+                    event_date=candidate.date,
+                    end_date=candidate.end_date,
+                    event_title=candidate.title,
+                ) or description_value
+            description_value = _dedupe_description(description_value) or description_value
+            description_value = _normalize_plaintext_paragraphs(description_value) or description_value
+            description_value = _promote_first_person_quotes_to_blockquotes(description_value) or description_value
+            description_value = _promote_inline_quoted_direct_speech_to_blockquotes(description_value) or description_value
+            description_value = _drop_reported_speech_duplicates(description_value) or description_value
+            description_value = _normalize_blockquote_markers(description_value) or description_value
+            description_value = _append_missing_scene_hint(
+                description=description_value, source_text=clean_source_text
             ) or description_value
-        description_value = _dedupe_description(description_value) or description_value
-        description_value = _normalize_plaintext_paragraphs(description_value) or description_value
-        description_value = _promote_first_person_quotes_to_blockquotes(description_value) or description_value
-        description_value = _promote_inline_quoted_direct_speech_to_blockquotes(description_value) or description_value
-        description_value = _drop_reported_speech_duplicates(description_value) or description_value
-        description_value = _normalize_blockquote_markers(description_value) or description_value
-        description_value = _append_missing_scene_hint(
-            description=description_value, source_text=clean_source_text
-        ) or description_value
-        description_value = (
-            _sanitize_description_output(
-                description_value,
-                source_text=clean_source_text or clean_raw_excerpt or candidate.source_text,
+            description_value = (
+                _sanitize_description_output(
+                    description_value,
+                    source_text=clean_source_text or clean_raw_excerpt or candidate.source_text,
+                )
+                or description_value
             )
-            or description_value
-        )
+            description_value = (
+                _append_missing_small_list(
+                    description=description_value,
+                    source_text=clean_source_text,
+                    source_type=candidate.source_type,
+                )
+                or description_value
+            )
+            description_value = _normalize_plaintext_paragraphs(description_value) or description_value
+            description_value = _ensure_minimal_description_headings(description_value) or description_value
+        else:
+            # Fact-first output should not be "topped up" with source snippets; keep it strictly fact-driven.
+            description_value = _dedupe_description(description_value) or description_value
+            description_value = _normalize_plaintext_paragraphs(description_value) or description_value
+            description_value = _normalize_blockquote_markers(description_value) or description_value
+            description_value = (
+                _sanitize_description_output(
+                    description_value,
+                    source_text=clean_source_text or clean_raw_excerpt or candidate.source_text,
+                )
+                or description_value
+            )
+            description_value = _ensure_minimal_description_headings(description_value) or description_value
         if _has_overlong_paragraph(description_value, limit=850):
             try:
                 reflown = await _llm_reflow_description_paragraphs(description_value)
@@ -5345,6 +9415,159 @@ async def _smart_event_update_impl(
                     or reflown
                 )
                 description_value = reflown
+
+        # Guard: sometimes create-time LLM output becomes an over-compressed digest even when
+        # the source text (or poster OCR) is rich. This makes Telegraph pages look like they
+        # have "no main text". Do a second-pass full rewrite when we can.
+        try:
+            event_stub = Event(
+                title=clean_title,
+                description=description_value or "",
+                date=candidate.date or "",
+                time=candidate.time or "",
+                end_date=candidate.end_date,
+                location_name=candidate.location_name or "",
+                location_address=candidate.location_address,
+                city=candidate.city,
+                ticket_link=candidate.ticket_link,
+                ticket_status=candidate.ticket_status,
+                is_free=bool(is_free_value),
+                event_type=normalized_event_type or candidate.event_type,
+                festival=candidate.festival,
+                source_text=clean_source_text or "",
+                source_texts=[
+                    t
+                    for t in [clean_source_text, (clean_raw_excerpt or "")]
+                    if (t or "").strip()
+                ],
+                photo_urls=[],
+            )
+            rich_base = _pick_richest_source_text_for_description(event_stub, candidate)
+            base_len = len(rich_base)
+            try:
+                max_expected = _estimate_description_budget_chars(
+                    source_type=candidate.source_type,
+                    source_text=clean_source_text,
+                    raw_excerpt=clean_raw_excerpt,
+                    poster_texts=[p.ocr_text for p in candidate.posters if (p.ocr_text or "").strip()],
+                )
+            except Exception:
+                max_expected = 0
+            # Create-time threshold is intentionally softer than merge-time: we only need
+            # to avoid "empty-looking" Telegraph pages, not match the full source length.
+            # Still, avoid publishing "title-only" or ultra-short bodies when the source is meaningful.
+            if base_len < 260:
+                min_expected = 0
+            elif base_len < 700:
+                min_expected = max(220, int(base_len * 0.30))
+            else:
+                min_expected = max(350, int(base_len * 0.25))
+        except Exception:  # pragma: no cover - defensive
+            event_stub = None
+            min_expected = 0
+            max_expected = 0
+        too_verbatim = bool(
+            rich_base
+            and _description_too_verbatim(description_value, source_text=rich_base)
+        )
+        desc_len_now = len((description_value or "").strip())
+        need_full = bool(min_expected and desc_len_now < min_expected) or too_verbatim
+        if need_full and not fact_first_used:
+            try:
+                rewritten_full = await _rewrite_description_full_from_sources(
+                    event_stub, candidate  # type: ignore[arg-type]
+                )
+            except Exception:  # pragma: no cover - provider failures
+                rewritten_full = None
+            if rewritten_full and (not too_verbatim) and len(rewritten_full) >= int(min_expected * 0.85):
+                description_value = rewritten_full
+                text_filter_facts.append("Описание расширено: заменён слишком короткий дайджест")
+                logger.info(
+                    "smart_update.create_description_rewrite_full source_type=%s source_url=%s desc_len=%d min_expected=%d",
+                    candidate.source_type,
+                    candidate.source_url,
+                    len((rewritten_full or "").strip()),
+                    int(min_expected),
+                )
+            elif rewritten_full and too_verbatim and not _description_too_verbatim(rewritten_full, source_text=rich_base):
+                description_value = rewritten_full
+                text_filter_facts.append("Описание перезаписано: убрано дословное копирование источника")
+                logger.info(
+                    "smart_update.create_description_rewrite_full_nonverbatim source_type=%s source_url=%s desc_len=%d",
+                    candidate.source_type,
+                    candidate.source_url,
+                    len((rewritten_full or "").strip()),
+                )
+            elif too_verbatim and _description_too_verbatim(description_value, source_text=rich_base):
+                # Last resort: do not publish the raw source verbatim when the LLM is unavailable.
+                # Keep a short neutral snippet; full source remains in `event.source_text`.
+                fallback = (clean_raw_excerpt or "").strip()
+                if not fallback:
+                    try:
+                        fallback = _fallback_digest_from_description(rich_base) or ""
+                    except Exception:
+                        fallback = ""
+                fallback = (fallback or "").strip()
+                if fallback:
+                    description_value = _clip(fallback, 520)
+                    text_filter_facts.append("Описание сокращено: LLM недоступна, убран дословный текст источника")
+                else:
+                    description_value = ""
+            elif min_expected and not rewritten_full and len((description_value or "").strip()) < max(120, int(min_expected * 0.6)):
+                # Another last resort: if we couldn't expand the description (LLM down),
+                # avoid a "nearly empty" Telegraph body by using a short excerpt/digest.
+                fallback = (clean_raw_excerpt or "").strip()
+                if not fallback:
+                    try:
+                        fallback = _fallback_digest_from_description(rich_base) or ""
+                    except Exception:
+                        fallback = ""
+                fallback = (fallback or "").strip()
+                if fallback:
+                    description_value = _clip(fallback, 520)
+                    text_filter_facts.append("Описание заменено: LLM недоступна, использован краткий фрагмент")
+
+        # Guard: avoid over-expanding short sources. If the description is much longer than
+        # the total available source volume, force an LLM-only shrinking pass.
+        try:
+            max_expected_i = int(max_expected or 0)
+        except Exception:
+            max_expected_i = 0
+        desc_len = len((description_value or "").strip())
+        if (not fact_first_used) and max_expected_i and desc_len and desc_len > max_expected_i:
+            shrunk = None
+            try:
+                shrunk = await _llm_shrink_description_to_budget(
+                    source_type=candidate.source_type,
+                    source_url=candidate.source_url,
+                    description=str(description_value or ""),
+                    source_text=rich_base or clean_source_text,
+                    facts=bundled_facts or None,
+                    max_chars=max_expected_i,
+                )
+            except Exception:  # pragma: no cover - provider failures
+                shrunk = None
+            if shrunk:
+                description_value = shrunk
+                text_filter_facts.append("Описание сокращено: приведено к объёму источников")
+                logger.info(
+                    "smart_update.create_description_shrunk source_type=%s source_url=%s desc_len=%d budget=%d",
+                    candidate.source_type,
+                    candidate.source_url,
+                    len((description_value or "").strip()),
+                    int(max_expected_i),
+                )
+            else:
+                # If LLM isn't available, prefer a short deterministic digest from the source
+                # rather than publishing a long hallucination-prone narrative.
+                try:
+                    fallback = _fallback_digest_from_description(rich_base) or ""
+                except Exception:
+                    fallback = ""
+                fallback = fallback.strip()
+                if fallback and len(fallback) <= int(max_expected_i * 1.15):
+                    description_value = fallback
+                    text_filter_facts.append("Описание сокращено: использован краткий дайджест источника")
         description_value = _clip(description_value, SMART_UPDATE_DESCRIPTION_MAX_CHARS) if description_value else ""
 
         # Extract atomic facts for global de-duplication + operator log.
@@ -5362,7 +9585,7 @@ async def _smart_event_update_impl(
         else:
             try:
                 llm_digest = await _llm_build_search_digest(
-                    title=clean_title,
+                    title=final_title,
                     description=description_value,
                     event_type=normalized_event_type or candidate.event_type,
                 )
@@ -5372,15 +9595,35 @@ async def _smart_event_update_impl(
                 normalized_digest = llm_digest
         if not normalized_digest:
             normalized_digest = _fallback_digest_from_description(description_value)
+        if not normalized_digest and rich_base:
+            normalized_digest = _fallback_digest_from_description(rich_base)
+        final_short = bundled_short
+        if not final_short:
+            try:
+                final_short = await _llm_build_short_description(
+                    title=final_title,
+                    description=description_value or clean_source_text,
+                    event_type=normalized_event_type or candidate.event_type,
+                )
+            except Exception:
+                final_short = None
+        if not final_short:
+            candidate_short = _clean_short_description(candidate.raw_excerpt)
+            if _is_short_description_acceptable(candidate_short, min_words=12, max_words=16):
+                final_short = candidate_short
+        if not final_short:
+            final_short = _fallback_short_description_from_text(description_value or clean_source_text)
         new_event = Event(
-            title=clean_title,
+            title=final_title,
             description=description_value,
+            short_description=final_short,
             festival=candidate.festival,
             date=candidate.date or "",
             time=candidate.time or "",
+            time_is_default=bool(candidate.time_is_default and (candidate.time or "").strip()),
             location_name=candidate.location_name or "",
             location_address=candidate.location_address,
-            city=candidate.city or "Калининград",
+            city=candidate.city or None,
             ticket_price_min=candidate.ticket_price_min,
             ticket_price_max=candidate.ticket_price_max,
             ticket_link=candidate.ticket_link,
@@ -5389,6 +9632,7 @@ async def _smart_event_update_impl(
             event_type=normalized_event_type or candidate.event_type,
             emoji=candidate.emoji,
             end_date=candidate.end_date,
+            end_date_is_inferred=bool(candidate.end_date_is_inferred),
             is_free=is_free_value,
             pushkin_card=bool(candidate.pushkin_card),
             source_text=clean_source_text or "",
@@ -5415,16 +9659,17 @@ async def _smart_event_update_impl(
             await session.commit()
             await session.refresh(new_event)
 
-            added_posters, added_poster_urls, preview_invalidated, pruned_posters = await _apply_posters(
+            added_posters, added_poster_urls, preview_invalidated, pruned_posters, _photo_urls_changed = await _apply_posters(
                 session,
                 new_event.id,
                 candidate.posters,
                 poster_scope_hashes=candidate.poster_scope_hashes,
-                event_title=candidate.title,
+                event_title=final_title,
             )
             added_sources, _same_source = await _ensure_event_source(
                 session, new_event.id, candidate
             )
+            await _enqueue_ticket_sites_queue(session, event_id=int(new_event.id or 0))
             if candidate.source_text:
                 await _sync_source_texts(session, new_event)
             await session.flush()
@@ -5433,9 +9678,11 @@ async def _smart_event_update_impl(
                 initial_records.append((fact, "added"))
             for fact in (extracted_facts or [])[:18]:
                 initial_records.append((fact, "added"))
-            for fact in (text_filter_facts or [])[:2]:
-                initial_records.append((fact, "note"))
-            for fact in (poster_filter_facts or [])[:3]:
+            note_lines: list[str] = []
+            note_lines.extend((queue_notes or [])[:6])
+            note_lines.extend((text_filter_facts or [])[:2])
+            note_lines.extend((poster_filter_facts or [])[:3])
+            for fact in _dedupe_source_facts(note_lines):
                 initial_records.append((fact, "note"))
             for url in (added_poster_urls or [])[:3]:
                 initial_records.append((f"Добавлена афиша: {url}", "added"))
@@ -5447,7 +9694,49 @@ async def _smart_event_update_impl(
                 await _record_source_facts(session, new_event.id, candidate, initial_records)
             await session.commit()
 
+        try:
+            await _apply_holiday_festival_mapping(db, new_event.id)
+        except Exception:
+            logger.warning(
+                "smart_update: holiday mapping failed for event %s",
+                new_event.id,
+                exc_info=True,
+            )
+
         await _classify_topics(db, new_event.id)
+
+        linked_refresh_ids: list[int] = []
+        try:
+            from linked_events import recompute_linked_event_ids
+
+            lr = await recompute_linked_event_ids(db, int(new_event.id or 0))
+            linked_refresh_ids = [
+                int(x)
+                for x in (lr.changed_event_ids or [])
+                if int(x) and int(x) != int(new_event.id or 0)
+            ]
+        except Exception:
+            logger.warning(
+                "smart_update: linked events recompute failed for event %s",
+                new_event.id,
+                exc_info=True,
+            )
+            linked_refresh_ids = []
+
+        if schedule_tasks and linked_refresh_ids:
+            # Only refresh Telegraph pages for linked occurrences: this is user-facing ("Другие даты"),
+            # but does not require VK sync / month-page rebuilds.
+            try:
+                from main import JobTask, enqueue_job
+
+                for rid in linked_refresh_ids[:80]:
+                    await enqueue_job(db, int(rid), JobTask.telegraph_build, depends_on=None)
+            except Exception:
+                logger.warning(
+                    "smart_update: failed to enqueue linked telegraph refresh for event %s",
+                    new_event.id,
+                    exc_info=True,
+                )
 
         if schedule_tasks:
             try:
@@ -5474,6 +9763,7 @@ async def _smart_event_update_impl(
             added_posters=added_posters,
             added_sources=added_sources,
             reason=match_reason if "match_reason" in locals() else None,
+            queue_notes=list(queue_notes or []),
         )
 
     # Merge path
@@ -5486,7 +9776,9 @@ async def _smart_event_update_impl(
     if not is_canonical_site:
         if existing_start and cand_start and existing_start != cand_start:
             conflicting["date"] = candidate.date
-        if existing.time and candidate.time and existing.time != candidate.time:
+        cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=False)
+        existing_time_anchor = _event_anchor_time(existing)
+        if _has_explicit_time_conflict(existing_time_anchor, cand_time_anchor):
             conflicting["time"] = candidate.time
         if existing.location_name and candidate.location_name and not _location_matches(existing.location_name, candidate.location_name):
             conflicting["location_name"] = candidate.location_name
@@ -5536,12 +9828,25 @@ async def _smart_event_update_impl(
     updated_keys: list[str] = []
     skip_topic_reclassify = False
     merge_digest_from_llm: str | None = None
+    merge_fact_first_used = False
 
     async with db.get_session() as session:
         event_db = await session.get(Event, existing.id)
         if not event_db:
             return SmartUpdateResult(status="error", reason="event_missing")
         before_description = event_db.description or ""
+        # Self-heal legacy snapshot leaks (e.g. "Текст до Smart Update ...") that were
+        # accidentally merged into the public description in older versions.
+        cleaned_leak = _drop_legacy_leak_from_description(before_description)
+        if cleaned_leak and cleaned_leak != before_description:
+            event_db.description = cleaned_leak
+            before_description = cleaned_leak
+            updated_fields = True
+            if "description" not in updated_keys:
+                updated_keys.append("description")
+            note = "Текст очищен: удалена служебная вставка legacy snapshot"
+            if note not in text_filter_facts:
+                text_filter_facts.append(note)
         existing_trusts = [
             str(r[0]).strip()
             for r in (
@@ -5556,6 +9861,28 @@ async def _smart_event_update_impl(
         event_trust_level, event_trust_pr = _max_trust_level(existing_trusts)
         candidate_trust_pr = _trust_priority(candidate.trust_level)
 
+        # Fill placeholder/missing time from any matched source (TG/VK/etc.), not only parser sources.
+        # This prevents duplicate creation like: existing time=00:00 (legacy placeholder) + new source brings 19:00.
+        if not is_canonical_site:
+            ct_anchor = _candidate_anchor_time(candidate, is_canonical_site=False)
+            et_anchor = _event_anchor_time(event_db)
+            if (
+                ct_anchor
+                and bool(getattr(event_db, "time_is_default", False))
+                and ct_anchor == (getattr(event_db, "time", "") or "").strip()
+            ):
+                event_db.time_is_default = False
+                updated_fields = True
+                if "time_is_default" not in updated_keys:
+                    updated_keys.append("time_is_default")
+            if ct_anchor and (not et_anchor) and ct_anchor != (getattr(event_db, "time", "") or "").strip():
+                event_db.time = ct_anchor
+                event_db.time_is_default = False
+                updated_fields = True
+                if "time" not in updated_keys:
+                    updated_keys.append("time")
+                conflicting.pop("time", None)
+
         if is_canonical_site:
             # Canonical site/parser source: allow correcting anchors on an existing event.
             # This makes Telegram-first -> /parse merge converge to the site truth.
@@ -5563,14 +9890,28 @@ async def _smart_event_update_impl(
                 event_db.date = candidate.date
                 updated_fields = True
                 updated_keys.append("date")
-            if candidate.end_date and candidate.end_date != getattr(event_db, "end_date", None):
-                event_db.end_date = candidate.end_date
+            if _apply_event_end_date(
+                event_db,
+                end_date=candidate.end_date,
+                inferred=bool(candidate.end_date_is_inferred),
+                updated_keys=updated_keys,
+            ):
                 updated_fields = True
-                updated_keys.append("end_date")
             if candidate.time and candidate.time.strip() and candidate.time.strip() != (event_db.time or "").strip():
                 event_db.time = candidate.time.strip()
+                event_db.time_is_default = False
                 updated_fields = True
                 updated_keys.append("time")
+            elif (
+                candidate.time
+                and candidate.time.strip()
+                and bool(getattr(event_db, "time_is_default", False))
+                and candidate.time.strip() == (event_db.time or "").strip()
+            ):
+                event_db.time_is_default = False
+                updated_fields = True
+                if "time_is_default" not in updated_keys:
+                    updated_keys.append("time_is_default")
             if candidate.location_name and not _location_matches(event_db.location_name, candidate.location_name):
                 event_db.location_name = candidate.location_name
                 updated_fields = True
@@ -5605,10 +9946,13 @@ async def _smart_event_update_impl(
             cur_end_iso = _parse_iso_date(getattr(event_db, "end_date", None))
             if cand_end_iso and (not cur_end_iso or cand_end_iso > cur_end_iso):
                 if candidate_trust_pr >= event_trust_pr:
-                    event_db.end_date = cand_end_iso.isoformat()
-                    updated_fields = True
-                    if "end_date" not in updated_keys:
-                        updated_keys.append("end_date")
+                    if _apply_event_end_date(
+                        event_db,
+                        end_date=cand_end_iso.isoformat(),
+                        inferred=bool(candidate.end_date_is_inferred),
+                        updated_keys=updated_keys,
+                    ):
+                        updated_fields = True
                     if "end_date" in conflicting:
                         conflicting.pop("end_date", None)
                 else:
@@ -5616,6 +9960,18 @@ async def _smart_event_update_impl(
                         f"Дата окончания: {getattr(event_db, 'end_date', None)} -> {candidate.end_date} "
                         f"(выбран: event_before по trust {event_trust_level or 'medium'}>{candidate.trust_level or 'medium'})"
                     )
+
+        if (
+            candidate.end_date
+            and candidate.end_date == getattr(event_db, "end_date", None)
+            and _apply_event_end_date(
+                event_db,
+                end_date=candidate.end_date,
+                inferred=bool(candidate.end_date_is_inferred),
+                updated_keys=updated_keys,
+            )
+        ):
+            updated_fields = True
 
         if should_merge:
             before_description = event_db.description or ""
@@ -5649,6 +10005,7 @@ async def _smart_event_update_impl(
                         )
                         or cleaned
                     )
+                    cleaned = _ensure_minimal_description_headings(cleaned) or cleaned
                     event_db.description = _clip(cleaned, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
                     updated_fields = True
                     updated_keys.append("description")
@@ -5661,18 +10018,46 @@ async def _smart_event_update_impl(
                     _strip_promo_lines(candidate.source_text) or candidate.source_text,
                     max_items=2,
                 )
-                facts_before_list = [
-                    str(r[0]).strip()
-                    for r in (
-                        await session.execute(
-                            select(EventSourceFact.fact).where(
-                                EventSourceFact.event_id == int(event_db.id or 0),
-                                EventSourceFact.status == "added",
-                            )
+                rows = (
+                    await session.execute(
+                        select(EventSourceFact.fact)
+                        .join(EventSource, EventSourceFact.source_id == EventSource.id)
+                        .where(
+                            EventSourceFact.event_id == int(event_db.id or 0),
+                            # `duplicate` is still a true, already-known fact. Include it to keep
+                            # canonical facts stable across re-processing the same source URL.
+                            EventSourceFact.status.in_(("added", "duplicate")),
+                            # Never feed legacy snapshots into the merge facts:
+                            # they are not per-source "added facts" and can pollute Telegraph text.
+                            EventSource.source_type != "legacy",
                         )
-                    ).all()
-                    if (r and str(r[0] or "").strip())
-                ]
+                    )
+                ).all()
+                facts_before_list = _dedupe_source_facts(
+                    [str(r[0]).strip() for r in (rows or []) if (r and str(r[0] or "").strip())]
+                )[:80]
+                legacy_facts_seed: list[str] = []
+                # Keep a compact snapshot for operator audit/debug, but do not use it as facts_before.
+                # Also: if an older run created only a legacy note (without extracted facts), we still
+                # backfill baseline legacy facts later from the stored legacy snapshot.
+                try:
+                    before_texts = list(getattr(event_db, "source_texts", None) or [])
+                    legacy_facts_seed = await _ensure_legacy_description_fact(
+                        session,
+                        event=event_db,
+                        legacy_description=before_description,
+                    )
+                    after_texts = list(getattr(event_db, "source_texts", None) or [])
+                    if after_texts != before_texts:
+                        updated_fields = True
+                        if "source_texts" not in updated_keys:
+                            updated_keys.append("source_texts")
+                except Exception:
+                    logger.warning(
+                        "smart_update: legacy description snapshot store failed",
+                        exc_info=True,
+                    )
+                    legacy_facts_seed = []
                 director_name_hint = _extract_director_name_hint(
                     candidate_text=_strip_promo_lines(candidate.source_text) or candidate.source_text,
                     facts_before=facts_before_list,
@@ -5703,6 +10088,10 @@ async def _smart_event_update_impl(
                     title = merge_data.get("title")
                     description = merge_data.get("description")
                     clean_title = _strip_private_use(title) if isinstance(title, str) else None
+                    if clean_title:
+                        clean_title = clean_title.replace("\\\\\"", "\"").replace("\\\"", "\"").strip()
+                        clean_title = re.sub(r"\s+", " ", clean_title).strip()
+                        clean_title = _clip_title(clean_title, 160) or clean_title
                     clean_description = (
                         (
                             _strip_private_use(description) or description
@@ -5724,45 +10113,166 @@ async def _smart_event_update_impl(
                             updated_fields = True
                             updated_keys.append("title")
                         else:
-                            # Catastrophic merge guard: if the model proposes an unrelated title,
-                            # abort this merge (do not record facts/sources) to avoid polluting
-                            # an existing event with content from a different one.
+                            relaxed_allowed = False
+                            old_title = str(getattr(event_db, "title", "") or "").strip()
                             if (
-                                _title_has_meaningful_tokens(clean_title)
-                                and _title_has_meaningful_tokens(candidate.title)
-                                and (not _titles_look_related(candidate.title, event_db.title))
-                                and (not _titles_look_related(clean_title, candidate.title))
-                                and (not _titles_look_related(clean_title, event_db.title))
-                                and (not is_canonical_site)
+                                (not is_canonical_site)
+                                and _is_generic_title_event_type_venue(
+                                    old_title,
+                                    event_type=getattr(event_db, "event_type", None) or candidate.event_type,
+                                    location_name=getattr(event_db, "location_name", None)
+                                    or candidate.location_name,
+                                    city=getattr(event_db, "city", None) or candidate.city,
+                                )
+                                and _is_title_grounded_in_candidate_sources(clean_title, candidate)
                             ):
-                                event_id = getattr(event_db, "id", None)
-                                await session.rollback()
-                                logger.warning(
-                                    "smart_update.reject reason=incoherent_merge_title event_id=%s source_type=%s source_url=%s candidate_title=%s proposed_title=%s",
-                                    event_id,
+                                relaxed_allowed = True
+
+                            if relaxed_allowed:
+                                event_db.title = clean_title
+                                updated_fields = True
+                                updated_keys.append("title")
+                                logger.info(
+                                    "smart_update.title_updated_from_generic event_id=%s source_type=%s source_url=%s old_title=%s new_title=%s",
+                                    getattr(event_db, "id", None),
                                     candidate.source_type,
                                     candidate.source_url,
-                                    _clip_title(candidate.title),
+                                    _clip_title(old_title),
                                     _clip_title(clean_title),
                                 )
-                                return SmartUpdateResult(
-                                    status="rejected_incoherent_merge",
-                                    reason="incoherent_merge_title",
+                            else:
+                                # Catastrophic merge guard: if the model proposes an unrelated title,
+                                # abort this merge (do not record facts/sources) to avoid polluting
+                                # an existing event with content from a different one.
+                                if (
+                                    _title_has_meaningful_tokens(clean_title)
+                                    and _title_has_meaningful_tokens(candidate.title)
+                                    and (not _titles_look_related(candidate.title, event_db.title))
+                                    and (not _titles_look_related(clean_title, candidate.title))
+                                    and (not _titles_look_related(clean_title, event_db.title))
+                                    and (not is_canonical_site)
+                                ):
+                                    event_id = getattr(event_db, "id", None)
+                                    await session.rollback()
+                                    logger.warning(
+                                        "smart_update.reject reason=incoherent_merge_title event_id=%s source_type=%s source_url=%s candidate_title=%s proposed_title=%s",
+                                        event_id,
+                                        candidate.source_type,
+                                        candidate.source_url,
+                                        _clip_title(candidate.title),
+                                        _clip_title(clean_title),
+                                    )
+                                    return SmartUpdateResult(
+                                        status="rejected_incoherent_merge",
+                                        reason="incoherent_merge_title",
+                                    )
+                                skipped_conflicts.append(
+                                    f"Заголовок отклонён: {event_db.title} -> {clean_title} "
+                                    "(причина: semantic_title_mismatch)"
                                 )
-                            skipped_conflicts.append(
-                                f"Заголовок отклонён: {event_db.title} -> {clean_title} "
-                                "(причина: semantic_title_mismatch)"
-                            )
-                            logger.warning(
-                                "smart_update.title_rejected event_id=%s candidate_title=%s "
-                                "existing_title=%s proposed_title=%s source_type=%s source_url=%s",
-                                getattr(event_db, "id", None),
-                                _clip_title(candidate.title),
-                                _clip_title(getattr(event_db, "title", None)),
-                                _clip_title(clean_title),
-                                candidate.source_type,
-                                candidate.source_url,
-                            )
+                                logger.warning(
+                                    "smart_update.title_rejected event_id=%s candidate_title=%s "
+                                    "existing_title=%s proposed_title=%s source_type=%s source_url=%s",
+                                    getattr(event_db, "id", None),
+                                    _clip_title(candidate.title),
+                                    _clip_title(getattr(event_db, "title", None)),
+                                    _clip_title(clean_title),
+                                    candidate.source_type,
+                                    candidate.source_url,
+                                )
+
+                    # Fact-first: override public narrative with a fresh build from canonical facts,
+                    # ignoring the merged description text (which is derived from raw sources).
+                    if SMART_UPDATE_FACT_FIRST and not SMART_UPDATE_LLM_DISABLED:
+                        legacy_facts_for_fact_first: list[str] = list(legacy_facts_seed or [])
+                        if not legacy_facts_for_fact_first:
+                            try:
+                                legacy_rows = (
+                                    await session.execute(
+                                        select(EventSourceFact.fact)
+                                        .join(EventSource, EventSourceFact.source_id == EventSource.id)
+                                        .where(
+                                            EventSourceFact.event_id == int(event_db.id or 0),
+                                            EventSourceFact.status.in_(("added", "duplicate")),
+                                            EventSource.source_type == "legacy",
+                                        )
+                                    )
+                                ).all()
+                                legacy_facts_for_fact_first = _dedupe_source_facts(
+                                    [
+                                        str(r[0]).strip()
+                                        for r in (legacy_rows or [])
+                                        if (r and str(r[0] or "").strip())
+                                    ]
+                                )[:40]
+                            except Exception:
+                                legacy_facts_for_fact_first = []
+
+                        canonical_facts = [
+                            *(facts_before_list or []),
+                            *[
+                                str(f).strip()
+                                for f in (added_facts or [])
+                                if isinstance(f, str) and f.strip()
+                            ],
+                            *(legacy_facts_for_fact_first or []),
+                        ]
+                        facts_text_clean = _facts_text_clean_from_facts(
+                            canonical_facts,
+                            max_items=36,
+                            anchors=[
+                                getattr(event_db, "date", None) or candidate.date or "",
+                                getattr(event_db, "time", None) or candidate.time or "",
+                                getattr(event_db, "city", None) or candidate.city or "",
+                                getattr(event_db, "location_name", None) or candidate.location_name or "",
+                                getattr(event_db, "location_address", None) or candidate.location_address or "",
+                            ],
+                        )
+                        if facts_text_clean:
+                            try:
+                                ff_desc = await _llm_fact_first_description_md(
+                                    title=event_db.title,
+                                    event_type=getattr(event_db, "event_type", None) or candidate.event_type,
+                                    facts_text_clean=facts_text_clean,
+                                    anchors=[
+                                        getattr(event_db, "date", None) or candidate.date or "",
+                                        getattr(event_db, "time", None) or candidate.time or "",
+                                        getattr(event_db, "city", None) or candidate.city or "",
+                                        getattr(event_db, "location_name", None) or candidate.location_name or "",
+                                        getattr(event_db, "location_address", None)
+                                        or candidate.location_address
+                                        or "",
+                                    ],
+                                    label=f"merge:{int(getattr(event_db, 'id', 0) or 0)}",
+                                )
+                            except Exception:  # pragma: no cover - provider failures
+                                ff_desc = None
+                            if ff_desc:
+                                # Minimal deterministic cleanup only (no "top-up" from sources).
+                                cleaned_ff = _dedupe_description(ff_desc) or ff_desc
+                                cleaned_ff = _normalize_plaintext_paragraphs(cleaned_ff) or cleaned_ff
+                                cleaned_ff = _normalize_blockquote_markers(cleaned_ff) or cleaned_ff
+                                cleaned_ff = (
+                                    _sanitize_description_output(
+                                        cleaned_ff,
+                                        source_text=_pick_richest_source_text_for_description(event_db, candidate),
+                                    )
+                                    or cleaned_ff
+                                )
+                                cleaned_ff = _ensure_minimal_description_headings(cleaned_ff) or cleaned_ff
+                                cleaned_ff = _clip(cleaned_ff, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
+                                current = (event_db.description or "").strip()
+                                if cleaned_ff.strip() and cleaned_ff.strip() != current:
+                                    event_db.description = cleaned_ff
+                                    updated_fields = True
+                                    if "description" not in updated_keys:
+                                        updated_keys.append("description")
+                                note = "Описание перегенерировано: fact-first"
+                                if note not in text_filter_facts:
+                                    text_filter_facts.append(note)
+                                merge_fact_first_used = True
+                                # Skip merge-description-driven cleanup below.
+                                clean_description = None
 
                     if clean_description:
                         clean_description = _dedupe_description(clean_description) or clean_description
@@ -5838,6 +10348,22 @@ async def _smart_event_update_impl(
                             )
                             or clean_description
                         )
+                        rich_source_text = _pick_richest_source_text_for_description(event_db, candidate)
+                        if _description_too_verbatim(clean_description, source_text=rich_source_text):
+                            logger.warning(
+                                "smart_update: merged description too verbatim; forcing full rewrite event_id=%s source_type=%s source_url=%s",
+                                getattr(event_db, "id", None),
+                                candidate.source_type,
+                                candidate.source_url,
+                            )
+                            try:
+                                rewritten_full = await _rewrite_description_full_from_sources(event_db, candidate)
+                            except Exception:  # pragma: no cover
+                                rewritten_full = None
+                            if rewritten_full and not _description_too_verbatim(
+                                rewritten_full, source_text=rich_source_text
+                            ):
+                                clean_description = rewritten_full
                         # If we have a director name and quotes in the text, make sure at least
                         # one quote contains the attribution inside the blockquote.
                         clean_description = _ensure_blockquote_has_attribution(
@@ -5862,7 +10388,7 @@ async def _smart_event_update_impl(
                                 )
                                 clean_description = reflown
                         # Ensure we keep at least one detected direct quote as a blockquote.
-                        if quote_candidates and not re.search(r"(?m)^>\\s+", clean_description):
+                        if quote_candidates and not re.search(r"(?m)^>\s+", clean_description):
                             clean_description = await _ensure_direct_quote_blockquote(
                                 description=clean_description,
                                 quote_candidates=quote_candidates,
@@ -5930,19 +10456,28 @@ async def _smart_event_update_impl(
                                 )
                                 clean_description = enriched
                         if _description_needs_infoblock_logistics_strip(clean_description, candidate=candidate):
-                            stripped = _strip_infoblock_logistics_from_description(
-                                clean_description, candidate=candidate
-                            )
-                            if stripped:
-                                clean_description = stripped
+                            try:
+                                edited = await _llm_remove_infoblock_logistics(
+                                    description=clean_description,
+                                    candidate=candidate,
+                                    label="merge_remove_logistics",
+                                )
+                            except Exception:  # pragma: no cover
+                                edited = None
+                            if edited:
+                                edited = _normalize_plaintext_paragraphs(edited) or edited
+                                clean_description = edited
                         if _description_needs_channel_promo_strip(clean_description):
                             clean_description = (
                                 _strip_channel_promo_from_description(clean_description) or clean_description
                             )
+                        clean_description = (
+                            _ensure_minimal_description_headings(clean_description) or clean_description
+                        )
                         event_db.description = _clip(clean_description, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
                         updated_fields = True
                         updated_keys.append("description")
-                    if quote_candidates:
+                    if quote_candidates and (not merge_fact_first_used):
                         current_description = (event_db.description or "").strip()
                         if current_description and not re.search(r"(?m)^>\s+", current_description):
                             enforced_description = await _ensure_direct_quote_blockquote(
@@ -5971,6 +10506,10 @@ async def _smart_event_update_impl(
                                 attribution_name=director_name_hint,
                             )
                             if enforced_description and enforced_description != current_description:
+                                enforced_description = (
+                                    _ensure_minimal_description_headings(enforced_description)
+                                    or enforced_description
+                                )
                                 event_db.description = _clip(
                                     enforced_description, SMART_UPDATE_DESCRIPTION_MAX_CHARS
                                 )
@@ -5978,11 +10517,44 @@ async def _smart_event_update_impl(
                                 if "description" not in updated_keys:
                                     updated_keys.append("description")
 
+                    merge_price_min = merge_data.get("ticket_price_min")
+                    merge_price_max = merge_data.get("ticket_price_max")
+                    if source_type_clean in {"vk", "telegram", "tg"} and (
+                        merge_price_min is not None or merge_price_max is not None
+                    ):
+                        introducing_new_price = (
+                            getattr(event_db, "ticket_price_min", None) is None
+                            and getattr(event_db, "ticket_price_max", None) is None
+                            and candidate.ticket_price_min is None
+                            and candidate.ticket_price_max is None
+                        )
+                        if introducing_new_price:
+                            poster_texts_for_price: list[str] = []
+                            for p in candidate.posters or []:
+                                for k in ("ocr_text", "ocr_title"):
+                                    v = getattr(p, k, None)
+                                    if isinstance(v, str) and v.strip():
+                                        poster_texts_for_price.append(v.strip())
+                            price_probe = "\n".join(
+                                [
+                                    clean_title,
+                                    clean_source_text or "",
+                                    clean_raw_excerpt or "",
+                                    *poster_texts_for_price[:3],
+                                ]
+                            ).strip()
+                            if not _has_price_evidence(price_probe, merge_price_min, merge_price_max):
+                                merge_price_min = None
+                                merge_price_max = None
+                                note = "Цена отброшена: не найдена в источнике"
+                                if note not in text_filter_facts:
+                                    text_filter_facts.append(note)
+
                     ticket_updates = _apply_ticket_fields(
                         event_db,
                         ticket_link=merge_data.get("ticket_link"),
-                        ticket_price_min=merge_data.get("ticket_price_min"),
-                        ticket_price_max=merge_data.get("ticket_price_max"),
+                        ticket_price_min=merge_price_min,
+                        ticket_price_max=merge_price_max,
                         ticket_status=merge_data.get("ticket_status"),
                         candidate_trust=candidate.trust_level,
                     )
@@ -6029,6 +10601,7 @@ async def _smart_event_update_impl(
                         current = (event_db.description or "").strip()
                         merged = (merged or "").strip()
                         if merged and merged != current:
+                            merged = _ensure_minimal_description_headings(merged) or merged
                             event_db.description = _clip(merged, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
                             updated_fields = True
                             if "description" not in updated_keys:
@@ -6065,6 +10638,7 @@ async def _smart_event_update_impl(
                                     )
                                     or cleaned
                                 )
+                                cleaned = _ensure_minimal_description_headings(cleaned) or cleaned
                                 event_db.description = _clip(cleaned, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
                                 updated_fields = True
                                 updated_keys.append("description")
@@ -6095,10 +10669,16 @@ async def _smart_event_update_impl(
             event_db.city = candidate.city
             updated_fields = True
             updated_keys.append("city")
-        if not event_db.end_date and candidate.end_date:
-            event_db.end_date = candidate.end_date
+        if (
+            not event_db.end_date
+            and _apply_event_end_date(
+                event_db,
+                end_date=candidate.end_date,
+                inferred=bool(candidate.end_date_is_inferred),
+                updated_keys=updated_keys,
+            )
+        ):
             updated_fields = True
-            updated_keys.append("end_date")
         if not event_db.festival and candidate.festival:
             event_db.festival = candidate.festival
             updated_fields = True
@@ -6122,13 +10702,43 @@ async def _smart_event_update_impl(
             event_db.emoji = candidate.emoji
             updated_fields = True
             updated_keys.append("emoji")
+        existing_short = _clean_short_description(getattr(event_db, "short_description", None))
+        short_needs_refresh = not _is_short_description_acceptable(
+            existing_short, min_words=12, max_words=16
+        )
+        if ("description" in updated_keys) or has_new_text:
+            short_needs_refresh = True
+        if short_needs_refresh:
+            normalized_short: str | None = None
+            try:
+                normalized_short = await _llm_build_short_description(
+                    title=event_db.title,
+                    description=event_db.description or candidate.source_text,
+                    event_type=event_db.event_type or candidate.event_type,
+                )
+            except Exception:
+                normalized_short = None
+            if not normalized_short:
+                candidate_short = _clean_short_description(candidate.raw_excerpt)
+                if _is_short_description_acceptable(
+                    candidate_short, min_words=12, max_words=16
+                ):
+                    normalized_short = candidate_short
+            if not normalized_short:
+                normalized_short = _fallback_short_description_from_text(
+                    event_db.description or candidate.source_text
+                )
+            if normalized_short and normalized_short != (event_db.short_description or "").strip():
+                event_db.short_description = normalized_short
+                updated_fields = True
+                updated_keys.append("short_description")
         # search_digest is a short snippet used for search/cards and also shown on Telegraph
         # before long descriptions. It should be refreshed when description meaningfully changes.
         normalized_candidate_digest = _clean_search_digest(candidate.search_digest)
         digest_should_refresh = ("description" in updated_keys) or has_new_text
         new_digest = None
         if digest_should_refresh:
-            if merge_digest_from_llm:
+            if merge_digest_from_llm and (not merge_fact_first_used):
                 new_digest = merge_digest_from_llm
             else:
                 try:
@@ -6178,14 +10788,14 @@ async def _smart_event_update_impl(
             updated_fields = True
             updated_keys.append("creator_id")
 
-        added_posters, added_poster_urls, preview_invalidated, pruned_posters = await _apply_posters(
+        added_posters, added_poster_urls, preview_invalidated, pruned_posters, photo_urls_changed = await _apply_posters(
             session,
             event_db.id,
             candidate.posters,
             poster_scope_hashes=candidate.poster_scope_hashes,
             event_title=candidate.title,
         )
-        if added_posters or pruned_posters:
+        if added_posters or pruned_posters or photo_urls_changed:
             updated_fields = True
             updated_keys.append("posters")
 
@@ -6204,6 +10814,7 @@ async def _smart_event_update_impl(
                 updated_fields = True
                 updated_keys.append("source_texts")
 
+        await _enqueue_ticket_sites_queue(session, event_id=int(event_db.id or 0))
         # If we didn't touch description in this merge, but it's clearly too short
         # compared to rich available source text (usually site import), generate a
         # full rewritten description best-effort. This is important for Telegraph
@@ -6218,6 +10829,7 @@ async def _smart_event_update_impl(
                 except Exception:  # pragma: no cover - defensive
                     rewritten_full = None
                 if rewritten_full and len(rewritten_full) >= int(min_expected * 0.85):
+                    rewritten_full = _ensure_minimal_description_headings(rewritten_full) or rewritten_full
                     event_db.description = _clip(rewritten_full, SMART_UPDATE_DESCRIPTION_MAX_CHARS)
                     updated_fields = True
                     updated_keys.append("description")
@@ -6242,6 +10854,13 @@ async def _smart_event_update_impl(
             added_log.append(f"Дата: {event_db.date}")
         if "end_date" in updated_keys and getattr(event_db, "end_date", None):
             added_log.append(f"Дата окончания: {event_db.end_date}")
+        if (
+            "end_date_is_inferred" in updated_keys
+            and "end_date" not in updated_keys
+            and getattr(event_db, "end_date", None)
+            and not bool(getattr(event_db, "end_date_is_inferred", False))
+        ):
+            note_log.append(f"Дата окончания подтверждена: {event_db.end_date}")
         if "time" in updated_keys and getattr(event_db, "time", None):
             added_log.append(f"Время: {event_db.time}")
         if "location_name" in updated_keys and getattr(event_db, "location_name", None):
@@ -6258,10 +10877,13 @@ async def _smart_event_update_impl(
             added_log.append(f"Добавлена афиша: {url}")
         if pruned_posters:
             note_log.append(f"Удалены лишние афиши: {pruned_posters}")
+        if photo_urls_changed and not added_posters and not pruned_posters:
+            note_log.append("Афиши переупорядочены по OCR")
         if preview_invalidated:
             note_log.append("3D-превью сброшено: изменились иллюстрации")
 
         # 4) Filters and text snippet are service notes
+        note_log.extend((queue_notes or [])[:6])
         note_log.extend((text_filter_facts or [])[:2])
         note_log.extend((poster_filter_facts or [])[:3])
         # NOTE: We intentionally do NOT include "Текст дополнен: ..." snippets anymore.
@@ -6336,7 +10958,11 @@ async def _smart_event_update_impl(
             if added_sources:
                 note_log.append("Добавлен источник")
             if updated_keys:
-                keys = [k for k in updated_keys if k not in {"source_text", "source_texts"}]
+                keys = [
+                    k
+                    for k in updated_keys
+                    if k not in {"source_text", "source_texts", "end_date_is_inferred"}
+                ]
                 if keys:
                     note_log.append(f"Обновлено: {', '.join(keys[:6])}")
 
@@ -6389,19 +11015,68 @@ async def _smart_event_update_impl(
 
     if (updated_fields or added_posters or (added_sources and not same_source)) and not skip_topic_reclassify:
         await _classify_topics(db, existing.id)
-        if schedule_tasks:
-            try:
-                from main import schedule_event_update_tasks
-                async with db.get_session() as session:
-                    refreshed = await session.get(Event, existing.id)
-                if refreshed:
-                    await schedule_event_update_tasks(db, refreshed, **(schedule_kwargs or {}))
-            except Exception:
-                logger.warning("smart_update: schedule/update failed for event %s", existing.id, exc_info=True)
+
+    holiday_changed = False
+    try:
+        holiday_changed = await _apply_holiday_festival_mapping(db, existing.id)
+    except Exception:
+        logger.warning(
+            "smart_update: holiday mapping failed for event %s",
+            existing.id,
+            exc_info=True,
+        )
+
+    # Keep linked occurrences consistent when anchor-ish or grouping fields change.
+    linked_refresh_ids: list[int] = []
+    if any(k in {"title", "location_name", "date", "time"} for k in (updated_keys or [])):
+        try:
+            from linked_events import recompute_linked_event_ids
+
+            lr = await recompute_linked_event_ids(db, int(existing.id or 0))
+            linked_refresh_ids = [
+                int(x)
+                for x in (lr.changed_event_ids or [])
+                if int(x) and int(x) != int(existing.id or 0)
+            ]
+        except Exception:
+            logger.warning(
+                "smart_update: linked events recompute failed for event %s",
+                existing.id,
+                exc_info=True,
+            )
+            linked_refresh_ids = []
+
+    if schedule_tasks and linked_refresh_ids:
+        try:
+            from main import JobTask, enqueue_job
+
+            for rid in linked_refresh_ids[:80]:
+                await enqueue_job(db, int(rid), JobTask.telegraph_build, depends_on=None)
+        except Exception:
+            logger.warning(
+                "smart_update: failed to enqueue linked telegraph refresh for event %s",
+                existing.id,
+                exc_info=True,
+            )
+
+    if schedule_tasks and (
+        updated_fields
+        or added_posters
+        or (added_sources and not same_source)
+        or holiday_changed
+    ):
+        try:
+            from main import schedule_event_update_tasks
+            async with db.get_session() as session:
+                refreshed = await session.get(Event, existing.id)
+            if refreshed:
+                await schedule_event_update_tasks(db, refreshed, **(schedule_kwargs or {}))
+        except Exception:
+            logger.warning("smart_update: schedule/update failed for event %s", existing.id, exc_info=True)
 
     status = (
         "merged"
-        if (updated_fields or added_posters or (added_sources and not same_source))
+        if (updated_fields or added_posters or (added_sources and not same_source) or holiday_changed)
         else "skipped_nochange"
     )
     logger.info(
@@ -6420,12 +11095,13 @@ async def _smart_event_update_impl(
         status=status,
         event_id=existing.id,
         created=False,
-        merged=updated_fields,
+        merged=bool(updated_fields or holiday_changed),
         added_posters=added_posters,
         added_sources=added_sources,
         added_facts=added_facts,
         skipped_conflicts=skipped_conflicts,
         reason=match_reason if "match_reason" in locals() else None,
+        queue_notes=list(queue_notes or []),
     )
 
 
@@ -6435,9 +11111,9 @@ async def _apply_posters(
     posters: Sequence[PosterCandidate],
     poster_scope_hashes: Sequence[str] | None = None,
     event_title: str | None = None,
-) -> tuple[int, list[str], bool, int]:
+) -> tuple[int, list[str], bool, int, bool]:
     if not event_id:
-        return 0, [], False, 0
+        return 0, [], False, 0, False
     existing_rows = (
         await session.execute(select(EventPoster).where(EventPoster.event_id == event_id))
     ).scalars().all()
@@ -6448,6 +11124,7 @@ async def _apply_posters(
     added_urls: list[str] = []
     preview_invalidated = False
     pruned = 0
+    photo_urls_changed = False
 
     def _pick_display_url(p: PosterCandidate) -> str | None:
         return p.supabase_url or p.catbox_url
@@ -6465,9 +11142,13 @@ async def _apply_posters(
     pruned_urls: set[str] = set()
     to_delete_by_hash: dict[str, EventPoster] = {}
 
-    # 1) Exact prune: if the source provided the poster hash scope, drop any previously
-    # attached posters from that scope that are not selected for this event now.
-    if scope_hashes:
+    # 1) Exact prune: if the source provided the poster hash scope AND we have a non-empty
+    # selected set for this event, drop any previously attached posters from that scope that
+    # are not selected now.
+    #
+    # Important: if selection is empty, it usually means matching failed (OCR/title/time),
+    # and pruning would incorrectly delete posters (regression seen in TG monitoring re-imports).
+    if scope_hashes and selected_hashes:
         for h in scope_hashes:
             if h in selected_hashes:
                 continue
@@ -6558,35 +11239,102 @@ async def _apply_posters(
         for url in extra_urls:
             if url not in current:
                 current.append(url)
-        # Prefer posters with OCR text/title (proxy for "quality")
+        # Prefer posters that are *relevant* to this event (by OCR vs event title/date/time),
+        # then fall back to OCR "quality" as a tie-breaker.
         preferred_urls: list[str] = []
-        scored: list[tuple[int, str]] = []
-        for poster in posters:
+        scored: list[tuple[float, int, int, str]] = []  # (relevance, quality, idx, url)
+        title_for_score = (event.title or event_title or "").strip()
+        date_for_score = (event.date or "").strip()
+        time_for_score = (event.time or "").strip()
+
+        def _norm(text: str | None) -> str:
+            value = (text or "").strip().casefold().replace("ё", "е")
+            value = unicodedata.normalize("NFKC", value)
+            value = value.replace("\xa0", " ")
+            value = re.sub(r"\s+", " ", value).strip()
+            return value
+
+        def _tokens(text: str | None) -> set[str]:
+            raw = _norm(text)
+            if not raw:
+                return set()
+            found = re.findall(r"[a-zа-я0-9]{3,}", raw, flags=re.IGNORECASE)
+            return {t for t in found if t and not t.isdigit()}
+
+        def _score_relevance(*, ocr_title: str | None, ocr_text: str | None) -> float:
+            ocr_combined = " ".join(
+                x for x in [(ocr_title or "").strip(), (ocr_text or "").strip()] if x
+            ).strip()
+            if not ocr_combined:
+                return 0.0
+            ocr_norm = _norm(ocr_combined)
+
+            title_tokens = _tokens(title_for_score)
+            ocr_tokens = _tokens(ocr_combined)
+            overlap = len(title_tokens & ocr_tokens) if (title_tokens and ocr_tokens) else 0
+            score = float(min(10, overlap * 2))
+
+            title_norm = _norm(title_for_score)
+            if title_norm and len(title_norm) >= 10 and title_norm in ocr_norm:
+                score += 4.0
+
+            d_raw = date_for_score
+            if d_raw:
+                try:
+                    d_obj = date.fromisoformat(d_raw.split("..", 1)[0].strip())
+                except Exception:
+                    d_obj = None
+                if d_obj is not None:
+                    day = d_obj.day
+                    month = d_obj.month
+                    if re.search(rf"\b0?{day}[./-]0?{month}\b", ocr_norm):
+                        score += 3.0
+
+            t_raw = time_for_score
+            if t_raw and t_raw != "00:00":
+                hhmm = re.sub(r"\s+", "", t_raw)
+                if re.match(r"^\d{1,2}:\d{2}$", hhmm):
+                    hh, mm = hhmm.split(":", 1)
+                    hh = hh.zfill(2)
+                    if f"{hh}:{mm}" in ocr_norm or f"{hh}.{mm}" in ocr_norm:
+                        score += 1.5
+
+            return score
+
+        for idx, poster in enumerate(posters):
             url = _pick_display_url(poster)
             if not url:
                 continue
-            score = 0
+            quality = 0
             if poster.ocr_title:
-                score += len(poster.ocr_title)
+                quality += len(poster.ocr_title)
             if poster.ocr_text:
-                score += len(poster.ocr_text)
-            if score > 0:
-                scored.append((score, url))
+                quality += len(poster.ocr_text)
+            if quality <= 0:
+                continue
+            relevance = _score_relevance(ocr_title=poster.ocr_title, ocr_text=poster.ocr_text)
+            scored.append((relevance, quality, idx, url))
+
         if scored:
-            for _score, url in sorted(scored, key=lambda item: item[0], reverse=True):
+            has_relevance = any(rel > 0.0 for rel, _q, _i, _u in scored)
+            if has_relevance:
+                scored_sorted = sorted(scored, key=lambda t: (-t[0], -t[1], t[2]))
+            else:
+                scored_sorted = sorted(scored, key=lambda t: (-t[1], t[2]))
+            for _rel, _quality, _idx, url in scored_sorted:
                 if url not in preferred_urls:
                     preferred_urls.append(url)
-            reordered = preferred_urls + [url for url in current if url not in preferred_urls]
-            current = reordered
+            current = preferred_urls + [url for url in current if url not in preferred_urls]
+        photo_urls_changed = (current != before_urls) or (len(current) != before_count)
         event.photo_urls = current
         event.photo_count = len(current)
         # If the image set changed, any existing 3D preview becomes stale: force regeneration.
-        if (current != before_urls or len(current) != before_count) and getattr(event, "preview_3d_url", None):
+        if photo_urls_changed and getattr(event, "preview_3d_url", None):
             event.preview_3d_url = None
             preview_invalidated = True
         session.add(event)
 
-    return added, added_urls, preview_invalidated, pruned
+    return added, added_urls, preview_invalidated, pruned, photo_urls_changed
 
 
 async def _ensure_event_source(

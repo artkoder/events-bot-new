@@ -13,7 +13,7 @@ import main
 async def test_vk_intake_injects_location_hint_into_llm_text(tmp_path, monkeypatch):
     captured: dict[str, str] = {}
 
-    async def fake_parse_event_via_4o(text: str, *args, **kwargs):
+    async def fake_parse_event_via_llm(text: str, *args, **kwargs):
         captured["text"] = text
         return [
             {
@@ -38,7 +38,7 @@ async def test_vk_intake_injects_location_hint_into_llm_text(tmp_path, monkeypat
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse_event_via_4o)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse_event_via_llm)
 
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

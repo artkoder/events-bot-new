@@ -113,3 +113,24 @@ async def test_create_source_page_editor_html_autoclose(monkeypatch):
         "",
         1,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_editor_html_autoclose_inline_tags(monkeypatch):
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    async def fake_telegraph_create_page(*args, **kwargs):
+        return {"url": "https://telegra.ph/autoclose-inline", "path": "autoclose-inline"}
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_telegraph_create_page)
+
+    # Broken HTML: closes </p> while <i> is still open.
+    res = await main.create_source_page(
+        "Title",
+        "Body text",
+        "https://example.com",
+        html_text="<p><i>broken</p><p>ok</p>",
+        catbox_urls=[],
+    )
+
+    assert res[0] == "https://telegra.ph/autoclose-inline"

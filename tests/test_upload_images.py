@@ -31,6 +31,7 @@ class DummySession:
 
 @pytest.mark.asyncio
 async def test_upload_images_catbox_ok(monkeypatch):
+    monkeypatch.setenv("UPLOAD_IMAGES_SUPABASE_MODE", "off")
     main.CATBOX_ENABLED = True
     resp = DummyResp(200, "http://cat/1.png")
     monkeypatch.setattr(main, "get_http_session", lambda: DummySession([resp]))
@@ -42,6 +43,7 @@ async def test_upload_images_catbox_ok(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_upload_images_fail(monkeypatch):
+    monkeypatch.setenv("UPLOAD_IMAGES_SUPABASE_MODE", "off")
     main.CATBOX_ENABLED = True
     resp = DummyResp(500, "err")
     monkeypatch.setattr(main, "get_http_session", lambda: DummySession([resp, resp, resp]))
@@ -56,6 +58,7 @@ async def test_upload_images_fail(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_upload_images_catbox_disabled(monkeypatch, caplog):
+    monkeypatch.setenv("UPLOAD_IMAGES_SUPABASE_MODE", "off")
     main.CATBOX_ENABLED = False
     caplog.set_level(logging.INFO)
     urls, msg = await main.upload_images([(b"1", "a.png")], event_hint="test")
@@ -66,4 +69,3 @@ async def test_upload_images_catbox_disabled(monkeypatch, caplog):
         in record.message
         for record in caplog.records
     )
-

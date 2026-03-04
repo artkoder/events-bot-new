@@ -7,9 +7,10 @@ import time
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, Literal
 
 from db import Database
+from ops_run import finish_ops_run, start_ops_run
 
 import vk_intake
 import vk_review
@@ -27,7 +28,9 @@ _VK_CANCEL_RE = re.compile(
     r"отмен\w*|"
     r"не\s+состо\w*|"
     r"перенос\w*|"
-    r"перенес\w*|"
+    # Avoid false positives like "иллюстрации перенесут вас..." (transport you),
+    # while still catching reschedule notices: "перенесено/перенесён/перенесли/перенесём".
+    r"перенес(?:ен(?:а|о)?|ена|ено|ены|ён(?:а|о)?|ёна|ёно|ёны|ли|ем|ём)\b|"
     r"сдвинул\w*\s+срок\w*|"
     r"отложен\w*|"
     r"показ\s+не\s+состо\w*"
@@ -41,15 +44,19 @@ def _looks_like_cancellation_notice(text: str | None) -> bool:
         return False
     if not _VK_CANCEL_RE.search(raw):
         return False
-    # Require at least one datetime-ish anchor to avoid silencing on generic news posts.
+    # Require at least one anchor to avoid silencing on generic news posts.
+    # Prefer using the same extraction helpers as the cancellation flow.
+    try:
+        year_hint = datetime.now(timezone.utc).year
+    except Exception:
+        year_hint = None
+    if year_hint and _parse_ru_date_from_text(raw, year_hint=year_hint):
+        return True
+    if _extract_title_hint(raw):
+        return True
     if re.search(r"\b\d{1,2}[:.]\d{2}\b", raw):
         return True
     if re.search(r"\b\d{1,2}\.\d{1,2}\b", raw):
-        return True
-    if re.search(
-        r"(?i)\b(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\b",
-        raw,
-    ):
         return True
     return False
 
@@ -99,7 +106,7 @@ def _extract_title_hint(text: str | None) -> str | None:
         return None
     # Common pattern: "кинофестиваля <Title>"
     m = re.search(
-        r"(?i)\b(?:кинофестивал\w*|фестивал\w*|мероприят\w*|показ)\s+([A-Za-zА-Яа-яЁё0-9][^\\n\\r.,!?:;]{3,80})",
+        r"(?i)\b(?:кинофестивал\w*|фестивал\w*|мероприят\w*|показ)\s+([A-Za-zА-Яа-яЁё][^\\n\\r.,!?:;]{3,80})",
         raw,
     )
     if m:
@@ -164,7 +171,10 @@ async def _cancel_matching_event_from_notice(
             time_hint = None
     title_hint = _extract_title_hint(notice_text)
     is_postponed = bool(
-        re.search(r"(?i)\bперенос\w*|перенес\w*|сдвинул\w*\b", notice_text or "")
+        re.search(
+            r"(?i)\b(?:перенос\w*|перенес(?:ен(?:а|о)?|ена|ено|ены|ён(?:а|о)?|ёна|ёно|ёны|ли|ем|ём)|сдвинул\w*)\b",
+            notice_text or "",
+        )
     )
     kind = "перенос" if is_postponed else "отмена"
     next_status = "postponed" if is_postponed else "cancelled"
@@ -214,14 +224,34 @@ async def _cancel_matching_event_from_notice(
         session.add(best)
         await session.flush()
 
-        src = EventSource(
-            event_id=int(best.id),
-            source_type="vk_cancel",
-            source_url=str(source_url),
-            source_text=(notice_text or "")[:4000],
+        # Source URLs are unique per event (ux_event_source_event_url); cancellation notices can
+        # arrive as an edit of the original post. Reuse existing source row when present.
+        src = (
+            (
+                await session.execute(
+                    select(EventSource).where(
+                        EventSource.event_id == int(best.id),
+                        EventSource.source_url == str(source_url),
+                    )
+                )
+            )
+            .scalars()
+            .first()
         )
-        session.add(src)
-        await session.flush()
+        if src is None:
+            src = EventSource(
+                event_id=int(best.id),
+                source_type="vk_cancel",
+                source_url=str(source_url),
+                source_text=(notice_text or "")[:4000],
+            )
+            session.add(src)
+            await session.flush()
+        else:
+            src.source_type = "vk_cancel"
+            src.source_text = (notice_text or "")[:4000]
+            session.add(src)
+            await session.flush()
         note = f"❌ {kind}: событие помечено как {next_status} по источнику VK"
         if source_name:
             note += f" ({source_name})"
@@ -328,6 +358,21 @@ def _extract_media_urls(item: Mapping[str, Any], *, limit: int = 12) -> list[str
     return urls
 
 
+@dataclass(frozen=True)
+class VkFetchStatus:
+    ok: bool
+    kind: Literal["ok", "not_found", "access_denied", "vk_api_error", "network_error"]
+    error_code: int | None = None
+    error: str | None = None
+
+
+def _vk_auto_allow_stale_inbox_text() -> bool:
+    raw = (os.getenv("VK_AUTO_IMPORT_ALLOW_STALE_INBOX_TEXT_ON_FETCH_FAIL") or "").strip().lower()
+    if not raw:
+        return False
+    return raw in {"1", "true", "yes", "on"}
+
+
 async def fetch_vk_post_text_and_photos(
     group_id: int,
     post_id: int,
@@ -335,7 +380,7 @@ async def fetch_vk_post_text_and_photos(
     db: Database | None = None,
     bot: Any | None = None,
     limit: int = 12,
-) -> tuple[str, list[str], datetime | None]:
+) -> tuple[str, list[str], datetime | None, dict[str, Any] | None, VkFetchStatus]:
     """Fetch VK wall post (text + image URLs) via VK API.
 
     Uses `main.vk_api` so it can read via service token when configured.
@@ -345,8 +390,36 @@ async def fetch_vk_post_text_and_photos(
     try:
         resp = await main_mod.vk_api("wall.getById", posts=f"-{int(group_id)}_{int(post_id)}")
     except Exception as exc:
-        logger.warning("vk_auto: wall.getById failed -%s_%s: %s", group_id, post_id, exc)
-        return "", [], None
+        # NOTE: VKAPIError is defined in main.py. We inspect it dynamically to avoid
+        # a hard import cycle and still keep error codes for decision-making.
+        code = None
+        msg = str(exc or "").strip()
+        kind: VkFetchStatus["kind"] = "network_error"
+        try:
+            VKAPIError = getattr(main_mod, "VKAPIError", None)
+            if VKAPIError is not None and isinstance(exc, VKAPIError):
+                code = getattr(exc, "code", None)
+                low = (getattr(exc, "message", None) or msg or "").casefold()
+                # wall.getById may fail when a post is deleted/unavailable.
+                if any(tok in low for tok in ("post was deleted", "post deleted", "has been deleted", "пост удал")):
+                    kind = "not_found"
+                elif int(code or 0) in {100, 113}:
+                    kind = "not_found"
+                elif int(code or 0) in {15, 30} or "access denied" in low:
+                    kind = "access_denied"
+                else:
+                    kind = "vk_api_error"
+        except Exception:
+            kind = "network_error"
+        logger.warning(
+            "vk_auto: wall.getById failed -%s_%s kind=%s code=%s err=%s",
+            group_id,
+            post_id,
+            kind,
+            code,
+            msg,
+        )
+        return "", [], None, None, VkFetchStatus(False, kind, error_code=code, error=msg or None)
 
     # `main.vk_api()` already returns the unwrapped VK "response" payload.
     # Keep compatibility with legacy callers that may still pass {"response": ...}.
@@ -366,6 +439,7 @@ async def fetch_vk_post_text_and_photos(
     text = ""
     published_at: datetime | None = None
     photos: list[str] = []
+    metrics: dict[str, Any] | None = None
     for it in items:
         candidate_text = it.get("text") if isinstance(it.get("text"), str) else ""
         repost_text = ""
@@ -391,9 +465,27 @@ async def fetch_vk_post_text_and_photos(
                 published_at = datetime.fromtimestamp(float(ts), tz=timezone.utc)
             except Exception:
                 published_at = None
+        if metrics is None:
+            m: dict[str, Any] = {}
+            try:
+                v = (it.get("views") or {}).get("count")
+                if isinstance(v, int) and v >= 0:
+                    m["views"] = v
+            except Exception:
+                pass
+            try:
+                l = (it.get("likes") or {}).get("count")
+                if isinstance(l, int) and l >= 0:
+                    m["likes"] = l
+            except Exception:
+                pass
+            metrics = m or None
         photos.extend(_extract_media_urls(it, limit=limit))
         if text:
             break
+
+    if not items:
+        return "", [], None, None, VkFetchStatus(False, "not_found", error="empty_response")
 
     # Deduplicate photos while preserving order.
     out_photos: list[str] = []
@@ -405,7 +497,7 @@ async def fetch_vk_post_text_and_photos(
         if len(out_photos) >= limit:
             break
 
-    return text, out_photos, published_at
+    return text, out_photos, published_at, metrics, VkFetchStatus(True, "ok")
 
 
 async def _load_festival_hints(db: Database) -> tuple[list[str], list[tuple[str, int]]]:
@@ -463,11 +555,31 @@ class VkAutoImportReport:
     inbox_imported: int = 0
     inbox_rejected: int = 0
     inbox_failed: int = 0
+    inbox_deferred: int = 0
     skipped_requeued: int = 0
     cancelled: bool = False
     created_event_ids: list[int] = field(default_factory=list)
     updated_event_ids: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class VkInboxPrefetch:
+    source_url: str
+    source_name: str | None
+    location_hint: str | None
+    default_time: str | None
+    default_ticket_link: str | None
+    text: str
+    photos: list[str]
+    publish_ts: datetime | int | float | None
+    published_at: datetime | None
+    source_is_festival: bool = False
+    metrics: dict[str, Any] | None = None
+    vk_fetch: VkFetchStatus | None = None
+    drafts: Any | None = None
+    stage_sec: dict[str, float] = field(default_factory=dict)
+    error: str | None = None
 
 
 async def _resolve_bot_username(bot: Any | None) -> str | None:
@@ -554,6 +666,8 @@ async def _send_unified_event_report(
     updated: list[int],
     source_url: str,
     added_posters_by_event_id: Mapping[int, int] | None = None,
+    post_metrics: Mapping[str, Any] | None = None,
+    post_popularity: str | None = None,
 ) -> bool:
     from source_parsing.handlers import build_added_event_info, build_updated_event_info
     import html
@@ -571,6 +685,79 @@ async def _send_unified_event_report(
         # the updated bucket to keep the report consistent.
         created = [eid for eid in created if eid not in overlap]
 
+    ctx = None
+    try:
+        from source_parsing.smart_update_report import build_smart_update_report_context
+
+        ctx = await build_smart_update_report_context(
+            db,
+            event_ids=(created + updated),
+            source_urls=[source_url],
+        )
+    except Exception:
+        ctx = None
+
+    tz = getattr(ctx, "tz", None)
+    sources_by_eid = getattr(ctx, "sources_by_event_id", None) or {}
+    video_counts = getattr(ctx, "video_count_by_event_id", None) or {}
+    ticket_queue_by_eid = getattr(ctx, "ticket_queue_by_event_id", None) or {}
+    fest_queue_by_src = getattr(ctx, "festival_queue_by_source_url", None) or {}
+
+    def _ics_line(url: str | None, *, has_time: bool) -> str:
+        value = (url or "").strip()
+        if value:
+            safe = html.escape(value, quote=True)
+            return f'ICS: <a href="{safe}">ics</a>'
+        return "ICS: ⏳" if has_time else "ICS: —"
+
+    def _sources_lines(eid: int) -> list[str]:
+        rows = list(sources_by_eid.get(int(eid)) or [])
+        if not rows or not tz:
+            return []
+        from source_parsing.smart_update_report import format_dt_compact, short_url_label
+
+        out: list[str] = ["  Источники:"]
+        limit = 24
+        shown = rows[:limit]
+        for imported_at, url in shown:
+            stamp = format_dt_compact(imported_at, tz)
+            label = short_url_label(url) or url
+            if str(url).strip().startswith(("http://", "https://")):
+                safe_href = html.escape(str(url).strip(), quote=True)
+                safe_label = html.escape(label)
+                out.append(f"  {stamp} <a href=\"{safe_href}\">{safe_label}</a>")
+            else:
+                out.append(f"  {stamp} {html.escape(label)}")
+        if len(rows) > limit:
+            out.append(f"  … ещё {len(rows) - limit}")
+        return out
+
+    def _queue_lines(eid: int) -> list[str]:
+        out: list[str] = []
+        fest = fest_queue_by_src.get((source_url or "").strip())
+        if fest:
+            name = (getattr(fest, "festival_name", None) or getattr(fest, "festival_full", None) or "").strip()
+            ctx2 = (getattr(fest, "festival_context", None) or "").strip()
+            status = (getattr(fest, "status", None) or "").strip()
+            fid = getattr(fest, "id", None)
+            tail = name or ctx2
+            extra = f" {tail}" if tail else ""
+            id_part = f" (id={int(fid)})" if isinstance(fid, int) and fid > 0 else ""
+            st_part = f" {status}" if status else ""
+            out.append(f"  🎪 festival_queue:{st_part}{extra}{id_part}".strip())
+
+        tickets = list(ticket_queue_by_eid.get(int(eid)) or [])
+        if tickets:
+            first = tickets[0]
+            href = html.escape(str(getattr(first, 'url', '') or '').strip(), quote=True)
+            label = html.escape(str(getattr(first, 'site_kind', '') or 'tickets').strip() or "tickets")
+            extra = f" +{len(tickets)}" if len(tickets) > 1 else ""
+            if href:
+                out.append(f'  🎟 ticket_site_queue:{extra} <a href="{href}">{label}</a>')
+            else:
+                out.append(f"  🎟 ticket_site_queue:{extra}".strip())
+        return out
+
     def _render_fact_stats(stats: Mapping[str, Any] | None) -> str:
         data = stats or {}
         if not data:
@@ -581,7 +768,7 @@ async def _send_unified_event_report(
         note = int(data.get("note") or 0)
         return f"Факты: ✅{added} ↩️{dup} ⚠️{conf} ℹ️{note}"
 
-    def _render_facts_and_photos(info: Any) -> str:
+    def _render_facts_and_photos(info: Any, *, eid: int) -> str:
         stats_text = _render_fact_stats(getattr(info, "fact_stats", None))
         added_posters = getattr(info, "added_posters", None)
         try:
@@ -593,11 +780,16 @@ async def _send_unified_event_report(
             photos = int(photo_count or 0)
         except Exception:
             photos = 0
+        try:
+            videos_total = int(video_counts.get(int(eid), 0) or 0)
+        except Exception:
+            videos_total = 0
         if added_posters_int is None:
             photos_label = f"Иллюстрации: {'⚠️0' if photos == 0 else photos}"
         else:
             photos_label = f"Иллюстрации: +{added_posters_int}, всего {'⚠️0' if photos == 0 else photos}"
-        return f"{stats_text} | {photos_label}"
+        videos_label = f" | Видео: {videos_total}" if videos_total > 0 else ""
+        return f"{stats_text} | {photos_label}{videos_label}"
 
     def _render_meta(date_value: str | None, time_value: str | None) -> str:
         meta: list[str] = []
@@ -606,12 +798,6 @@ async def _send_unified_event_report(
         if time_value:
             meta.append(str(time_value))
         return f" — {' '.join(meta)}" if meta else ""
-
-    def _render_ics(ics_url: str | None, *, has_time: bool) -> str:
-        value = (ics_url or "").strip()
-        if value:
-            return value
-        return "⏳" if has_time else "—"
 
     def _render_source(source_url: str, info: Any) -> str:
         ord_value = getattr(info, "source_ordinal", None)
@@ -624,6 +810,16 @@ async def _send_unified_event_report(
 
     if created or updated:
         lines.append("<b>Smart Update (детали событий):</b>")
+        if post_metrics:
+            parts: list[str] = []
+            v = post_metrics.get("views") if isinstance(post_metrics, Mapping) else None
+            l = post_metrics.get("likes") if isinstance(post_metrics, Mapping) else None
+            if isinstance(v, int) and v >= 0:
+                parts.append(f"views={v}")
+            if isinstance(l, int) and l >= 0:
+                parts.append(f"likes={l}")
+            if parts:
+                lines.append(f"Метрики поста: {html.escape(' '.join(parts))}")
     if created:
         lines.append(f"✅ Созданные события: {len(created)}")
         for eid in created[:12]:
@@ -633,6 +829,8 @@ async def _send_unified_event_report(
             if added_posters_by_event_id is not None:
                 info.added_posters = int(added_posters_by_event_id.get(int(eid), 0) or 0)
             title = html.escape(info.title or "Без названия")
+            if (post_popularity or "").strip():
+                title = f"{html.escape(str(post_popularity).strip())} {title}"
             tg_url = html.escape(info.telegraph_url or "", quote=True)
             meta = _render_meta(info.date, info.time)
             if info.telegraph_url:
@@ -640,7 +838,9 @@ async def _send_unified_event_report(
             else:
                 lines.append(f"• {title} (id={info.event_id}){meta}")
             lines.append(f"  {html.escape(_render_source(source_url, info))}")
-            lines.append(f"  Telegraph: {html.escape(info.telegraph_url) if info.telegraph_url else '⏳ в очереди'}")
+            if not info.telegraph_url:
+                lines.append("  Telegraph: ⏳ в очереди")
+            lines.extend(_sources_lines(int(info.event_id)))
             if info.log_cmd:
                 href = _log_deeplink(bot_username, int(info.event_id))
                 if href:
@@ -649,10 +849,9 @@ async def _send_unified_event_report(
                     )
                 else:
                     lines.append(f"  Лог: {html.escape(info.log_cmd)}")
-            lines.append(
-                f"  ICS: {html.escape(_render_ics(info.ics_url, has_time=bool((info.time or '').strip())))}"
-            )
-            lines.append(f"  {_render_facts_and_photos(info)}")
+            lines.append(f"  {_ics_line(info.ics_url, has_time=bool((info.time or '').strip()))}")
+            lines.append(f"  {_render_facts_and_photos(info, eid=int(info.event_id))}")
+            lines.extend(_queue_lines(int(info.event_id)))
             lines.append("")
         if len(created) > 12:
             lines.append(f"... ещё {len(created) - 12}")
@@ -667,6 +866,8 @@ async def _send_unified_event_report(
             if added_posters_by_event_id is not None:
                 info.added_posters = int(added_posters_by_event_id.get(int(eid), 0) or 0)
             title = html.escape(info.title or "Без названия")
+            if (post_popularity or "").strip():
+                title = f"{html.escape(str(post_popularity).strip())} {title}"
             tg_url = html.escape(info.telegraph_url or "", quote=True)
             meta = _render_meta(info.date, info.time)
             if info.telegraph_url:
@@ -674,7 +875,9 @@ async def _send_unified_event_report(
             else:
                 lines.append(f"• {title} (id={info.event_id}){meta}")
             lines.append(f"  {html.escape(_render_source(source_url, info))}")
-            lines.append(f"  Telegraph: {html.escape(info.telegraph_url) if info.telegraph_url else '⏳ в очереди'}")
+            if not info.telegraph_url:
+                lines.append("  Telegraph: ⏳ в очереди")
+            lines.extend(_sources_lines(int(info.event_id)))
             if info.log_cmd:
                 href = _log_deeplink(bot_username, int(info.event_id))
                 if href:
@@ -683,10 +886,9 @@ async def _send_unified_event_report(
                     )
                 else:
                     lines.append(f"  Лог: {html.escape(info.log_cmd)}")
-            lines.append(
-                f"  ICS: {html.escape(_render_ics(info.ics_url, has_time=bool((info.time or '').strip())))}"
-            )
-            lines.append(f"  {_render_facts_and_photos(info)}")
+            lines.append(f"  {_ics_line(info.ics_url, has_time=bool((info.time or '').strip()))}")
+            lines.append(f"  {_render_facts_and_photos(info, eid=int(info.event_id))}")
+            lines.extend(_queue_lines(int(info.event_id)))
             lines.append("")
         if len(updated) > 12:
             lines.append(f"... ещё {len(updated) - 12}")
@@ -723,6 +925,126 @@ async def _send_unified_event_report(
         return False
 
 
+async def _prefetch_vk_inbox_row(
+    db: Database,
+    *,
+    bot: Any | None,
+    post: Any,
+    source_url: str,
+    festival_names: list[str] | None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None,
+) -> VkInboxPrefetch:
+    """Best-effort prefetch for VK auto-import pipelining (N+1).
+
+    Prefetch has no write side-effects in the DB; it only prepares data that would
+    otherwise be computed inside `_process_vk_inbox_row`.
+    """
+    import main as main_mod
+
+    stage: dict[str, float] = {}
+
+    # Fetch VK source defaults.
+    source_name_val: str | None = None
+    location_hint_val: str | None = None
+    default_time_val: str | None = None
+    default_ticket_link_val: str | None = None
+    source_is_festival = False
+    t0 = time.monotonic()
+    try:
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT name, location, default_time, default_ticket_link, festival_source FROM vk_source WHERE group_id=?",
+                (post.group_id,),
+            )
+            row = await cur.fetchone()
+        if row:
+            source_name_val, location_hint_val, default_time_val, default_ticket_link_val, source_is_festival = row
+    except Exception as exc:
+        logger.warning("vk_auto: prefetch db_source_defaults failed url=%s err=%s", source_url, exc)
+    stage["db_source_defaults"] = float(time.monotonic() - t0)
+
+    # Refresh text/photos from VK (best effort) to include attachments.
+    t0 = time.monotonic()
+    fetched_text, photos, published_at, metrics, vk_fetch = await fetch_vk_post_text_and_photos(
+        post.group_id, post.post_id, db=db, bot=bot
+    )
+    stage["vk_fetch_post"] = float(time.monotonic() - t0)
+    allow_stale = _vk_auto_allow_stale_inbox_text()
+    text = ""
+    if vk_fetch.ok:
+        text = (fetched_text or post.text or "").strip()
+    elif allow_stale and vk_fetch.kind != "not_found":
+        text = (post.text or "").strip()
+    publish_ts: datetime | int | float | None = getattr(post, "date", None)
+    if published_at is not None:
+        publish_ts = int(published_at.timestamp())
+
+    # Normalize configured hints to canonical venue lines when possible.
+    if not (location_hint_val or "").strip() and (source_name_val or "").strip():
+        try:
+            matcher = getattr(main_mod, "_match_known_venue", None)
+            if callable(matcher):
+                venue = matcher(source_name_val)
+                if venue is not None:
+                    location_hint_val = getattr(venue, "canonical_line", None) or location_hint_val
+        except Exception:
+            logger.warning("vk_auto: prefetch infer location_hint failed", exc_info=True)
+    elif (location_hint_val or "").strip():
+        try:
+            matcher = getattr(main_mod, "_match_known_venue", None)
+            if callable(matcher):
+                venue = matcher(location_hint_val)
+                if venue is not None:
+                    location_hint_val = getattr(venue, "canonical_line", None) or location_hint_val
+        except Exception:
+            logger.warning("vk_auto: prefetch canonicalize location_hint failed", exc_info=True)
+
+    parse_festival_names = festival_names if source_is_festival else None
+    parse_festival_alias_pairs = festival_alias_pairs if source_is_festival else None
+    drafts: Any | None = None
+    err: str | None = None
+    t0 = time.monotonic()
+    try:
+        if vk_fetch.ok and text and (not _looks_like_cancellation_notice(text)):
+            drafts, _festival_info = await vk_intake.build_event_drafts(
+                text,
+                photos=photos,
+                source_name=source_name_val,
+                location_hint=location_hint_val,
+                default_time=default_time_val,
+                default_ticket_link=default_ticket_link_val,
+                operator_extra=None,
+                festival_names=parse_festival_names,
+                festival_alias_pairs=parse_festival_alias_pairs or None,
+                festival_hint=bool(source_is_festival),
+                publish_ts=publish_ts,
+                event_ts_hint=post.event_ts_hint,
+                db=db,
+            )
+    except Exception as exc:
+        drafts = None
+        err = str(exc)
+    stage["build_drafts_total"] = float(time.monotonic() - t0)
+
+    return VkInboxPrefetch(
+        source_url=source_url,
+        source_name=source_name_val,
+        location_hint=location_hint_val,
+        default_time=default_time_val,
+        default_ticket_link=default_ticket_link_val,
+        source_is_festival=bool(source_is_festival),
+        text=text,
+        photos=list(photos or []),
+        publish_ts=publish_ts,
+        published_at=published_at,
+        metrics=metrics if isinstance(metrics, dict) else None,
+        vk_fetch=vk_fetch,
+        drafts=drafts,
+        stage_sec=stage,
+        error=err,
+    )
+
+
 async def run_vk_auto_import(
     db: Database,
     bot: Any,
@@ -731,6 +1053,8 @@ async def run_vk_auto_import(
     limit: int = 25,
     operator_id: int = 0,
     include_skipped: bool = False,
+    trigger: str = "manual",
+    run_id: str | None = None,
 ) -> VkAutoImportReport:
     """Auto-import VK inbox queue sequentially via Smart Update (LLM).
 
@@ -740,6 +1064,19 @@ async def run_vk_auto_import(
     """
     batch_id = f"auto:{int(time.time())}"
     report = VkAutoImportReport(batch_id=batch_id)
+    ops_run_id = await start_ops_run(
+        db,
+        kind="vk_auto_import",
+        trigger=trigger,
+        chat_id=chat_id,
+        operator_id=operator_id,
+        details={
+            "batch_id": batch_id,
+            "run_id": run_id,
+            "limit_requested": limit,
+            "include_skipped": int(bool(include_skipped)),
+        },
+    )
     _clear_vk_auto_import_cancel(chat_id=chat_id, operator_id=operator_id)
     try:
         limit_int = int(limit)
@@ -790,8 +1127,8 @@ async def run_vk_auto_import(
                 WHERE status='skipped' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
                 ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
                          event_ts_hint ASC,
-                         date DESC,
-                         id DESC
+                         date ASC,
+                         id ASC
                 LIMIT ?
                 """,
                 (reject_cutoff, requeue_limit),
@@ -831,8 +1168,6 @@ async def run_vk_auto_import(
         festival_names, festival_alias_pairs = [], []
         report.errors.append(f"festival_hints_failed: {exc}")
 
-    import main as main_mod
-
     total_estimate = None
     try:
         statuses = ("pending", "skipped") if include_skipped else ("pending",)
@@ -855,18 +1190,66 @@ async def run_vk_auto_import(
         total_estimate = None
 
     start = time.time()
-    async with main_mod.HEAVY_SEMAPHORE:
+    from heavy_ops import heavy_operation
+
+    async with heavy_operation(
+        kind="vk_auto_import",
+        trigger=trigger,
+        mode="wait",
+        run_id=run_id,
+        operator_id=operator_id,
+        chat_id=chat_id,
+    ):
         current_no = 0
+        prefetch_enabled = _env_enabled("VK_AUTO_IMPORT_PREFETCH", True)
+
+        async def _await_prefetch(task: asyncio.Task | None) -> VkInboxPrefetch | None:
+            if task is None:
+                return None
+            try:
+                res = await task
+            except asyncio.CancelledError:
+                return None
+            except Exception:
+                return None
+            return res if isinstance(res, VkInboxPrefetch) else None
+
+        def _start_prefetch(post_obj: Any) -> asyncio.Task | None:
+            if not prefetch_enabled or not post_obj:
+                return None
+            next_url = _vk_wall_url(post_obj.group_id, post_obj.post_id)
+            return asyncio.create_task(
+                _prefetch_vk_inbox_row(
+                    db,
+                    bot=bot,
+                    post=post_obj,
+                    source_url=next_url,
+                    festival_names=festival_names,
+                    festival_alias_pairs=festival_alias_pairs,
+                )
+            )
+
         if unbounded:
-            while True:
+            post = await vk_review.pick_next(
+                db,
+                operator_id,
+                batch_id,
+                requeue_skipped=False,
+                prefer_oldest=True,
+                strict_chronological=True,
+            )
+            prefetch_task = _start_prefetch(post) if post else None
+            while post:
                 if _vk_auto_import_cancelled(chat_id=chat_id, operator_id=operator_id):
                     report.cancelled = True
+                    try:
+                        await vk_review.mark_pending(db, int(post.id))
+                    except Exception:
+                        logger.warning("vk_auto: mark_pending failed on cancel", exc_info=True)
+                    if prefetch_task:
+                        prefetch_task.cancel()
                     break
-                post = await vk_review.pick_next(
-                    db, operator_id, batch_id, requeue_skipped=False, prefer_oldest=True
-                )
-                if not post:
-                    break
+
                 current_no += 1
                 report.inbox_processed += 1
                 source_url = _vk_wall_url(post.group_id, post.post_id)
@@ -884,8 +1267,10 @@ async def run_vk_auto_import(
                             progress_mid = int(progress_mid)
                     except Exception:
                         logger.warning("vk_auto: progress_send_failed", exc_info=True)
-                try:
-                    await _process_vk_inbox_row(
+
+                prefetched_row = await _await_prefetch(prefetch_task)
+                process_task = asyncio.create_task(
+                    _process_vk_inbox_row(
                         db,
                         bot,
                         chat_id=chat_id,
@@ -899,10 +1284,24 @@ async def run_vk_auto_import(
                         progress_message_id=progress_mid,
                         progress_current_no=current_no,
                         progress_total_txt=total_txt,
+                        prefetched=prefetched_row,
                     )
+                )
+
+                next_post = await vk_review.pick_next(
+                    db,
+                    operator_id,
+                    batch_id,
+                    requeue_skipped=False,
+                    prefer_oldest=True,
+                    strict_chronological=True,
+                    resume_locked=False,
+                )
+                next_prefetch_task = _start_prefetch(next_post) if next_post else None
+
+                try:
+                    await process_task
                 except Exception as exc:
-                    # Hard safety net: do not let a single unexpected exception
-                    # keep the row locked forever (which would look like a hang).
                     report.inbox_failed += 1
                     report.errors.append(f"unexpected_failed {source_url}: {exc}")
                     try:
@@ -922,18 +1321,33 @@ async def run_vk_auto_import(
                         )
                     except Exception:
                         pass
+
+                post = next_post
+                prefetch_task = next_prefetch_task
         else:
-            for _ in range(max(1, int(limit_int))):
+            remaining = max(1, int(limit_int))
+            post = await vk_review.pick_next(
+                db,
+                operator_id,
+                batch_id,
+                requeue_skipped=False,
+                prefer_oldest=True,
+                strict_chronological=True,
+            )
+            prefetch_task = _start_prefetch(post) if post else None
+            while post and remaining > 0:
                 if _vk_auto_import_cancelled(chat_id=chat_id, operator_id=operator_id):
                     report.cancelled = True
-                    break
-                post = await vk_review.pick_next(
-                    db, operator_id, batch_id, requeue_skipped=False, prefer_oldest=True
-                )
-                if not post:
+                    try:
+                        await vk_review.mark_pending(db, int(post.id))
+                    except Exception:
+                        logger.warning("vk_auto: mark_pending failed on cancel", exc_info=True)
+                    if prefetch_task:
+                        prefetch_task.cancel()
                     break
 
                 current_no += 1
+                remaining -= 1
                 report.inbox_processed += 1
                 source_url = _vk_wall_url(post.group_id, post.post_id)
                 total_txt = str(int(total_estimate)) if isinstance(total_estimate, int) else str(int(limit_int))
@@ -951,8 +1365,9 @@ async def run_vk_auto_import(
                     except Exception:
                         logger.warning("vk_auto: progress_send_failed", exc_info=True)
 
-                try:
-                    await _process_vk_inbox_row(
+                prefetched_row = await _await_prefetch(prefetch_task)
+                process_task = asyncio.create_task(
+                    _process_vk_inbox_row(
                         db,
                         bot,
                         chat_id=chat_id,
@@ -966,10 +1381,27 @@ async def run_vk_auto_import(
                         progress_message_id=progress_mid,
                         progress_current_no=current_no,
                         progress_total_txt=total_txt,
+                        prefetched=prefetched_row,
                     )
+                )
+
+                next_post = None
+                next_prefetch_task = None
+                if remaining > 0:
+                    next_post = await vk_review.pick_next(
+                        db,
+                        operator_id,
+                        batch_id,
+                        requeue_skipped=False,
+                        prefer_oldest=True,
+                        strict_chronological=True,
+                        resume_locked=False,
+                    )
+                    next_prefetch_task = _start_prefetch(next_post) if next_post else None
+
+                try:
+                    await process_task
                 except Exception as exc:
-                    # Hard safety net: do not let a single unexpected exception
-                    # keep the row locked forever (which would look like a hang).
                     report.inbox_failed += 1
                     report.errors.append(f"unexpected_failed {source_url}: {exc}")
                     try:
@@ -990,6 +1422,9 @@ async def run_vk_auto_import(
                     except Exception:
                         pass
 
+                post = next_post
+                prefetch_task = next_prefetch_task
+
     took = time.time() - start
     total_txt = str(int(total_estimate)) if isinstance(total_estimate, int) else "?"
     summary = (
@@ -1002,6 +1437,7 @@ async def run_vk_auto_import(
         f"inbox imported: {report.inbox_imported}\n"
         f"inbox rejected: {report.inbox_rejected}\n"
         f"inbox failed: {report.inbox_failed}\n"
+        f"inbox deferred: {report.inbox_deferred}\n"
         f"events created: {len(set(report.created_event_ids))}\n"
         f"events updated: {len(set(report.updated_event_ids))}\n"
         f"took_sec: {took:.1f}"
@@ -1012,6 +1448,30 @@ async def run_vk_auto_import(
         logger.exception("vk_auto: failed to send summary")
 
     _clear_vk_auto_import_cancel(chat_id=chat_id, operator_id=operator_id)
+    await finish_ops_run(
+        db,
+        run_id=ops_run_id,
+        status="canceled" if report.cancelled else "success",
+        metrics={
+            "inbox_processed": int(report.inbox_processed),
+            "inbox_imported": int(report.inbox_imported),
+            "inbox_rejected": int(report.inbox_rejected),
+            "inbox_failed": int(report.inbox_failed),
+            "inbox_deferred": int(report.inbox_deferred),
+            "events_created": int(len(set(report.created_event_ids))),
+            "events_updated": int(len(set(report.updated_event_ids))),
+            "cancelled": int(bool(report.cancelled)),
+            "skipped_requeued": int(report.skipped_requeued),
+            "include_skipped": int(bool(include_skipped)),
+            "limit": int(limit_int),
+            "duration_sec": round(float(took), 3),
+        },
+        details={
+            "batch_id": batch_id,
+            "run_id": run_id,
+            "errors": list(report.errors or [])[:40],
+        },
+    )
     return report
 
 
@@ -1030,16 +1490,40 @@ async def _process_vk_inbox_row(
     progress_message_id: int | None,
     progress_current_no: int,
     progress_total_txt: str,
+    prefetched: VkInboxPrefetch | None = None,
 ) -> None:
     import main as main_mod
 
     start_ts = time.monotonic()
     timings_on = _timings_enabled()
     t_stage: dict[str, float] = {}
+    try:
+        slow_log_sec = float(os.getenv("VK_AUTO_IMPORT_SLOW_ROW_LOG_SEC", "60") or "60")
+    except Exception:
+        slow_log_sec = 60.0
+    slow_log_sec = max(0.0, min(slow_log_sec, 3600.0))
 
     def _tmark(name: str, elapsed: float) -> None:
-        if timings_on:
-            t_stage[name] = float(elapsed)
+        t_stage[name] = float(elapsed)
+
+    def _log_row_timing(*, drafts_count: int, ok_value: bool) -> None:
+        took_total = time.monotonic() - start_ts
+        slow_log_due = took_total >= slow_log_sec if slow_log_sec > 0 else True
+        if not (timings_on or slow_log_due or not ok_value):
+            return
+        try:
+            logger.info(
+                "timing vk_auto_import_row inbox_id=%s group_id=%s post_id=%s drafts=%s ok=%s took_sec=%.3f stages=%s",
+                int(getattr(post, "id", 0) or 0),
+                int(getattr(post, "group_id", 0) or 0),
+                int(getattr(post, "post_id", 0) or 0),
+                int(drafts_count),
+                1 if ok_value else 0,
+                float(took_total),
+                {k: round(v, 3) for k, v in sorted(t_stage.items())},
+            )
+        except Exception:
+            pass
 
     async def _emit_progress(icon: str, extra_lines: Sequence[str] | None = None) -> None:
         if not progress_message_id:
@@ -1063,50 +1547,161 @@ async def _process_vk_inbox_row(
     location_hint_val: str | None = None
     default_time_val: str | None = None
     default_ticket_link_val: str | None = None
-    t0 = time.monotonic()
-    async with db.raw_conn() as conn:
-        cur = await conn.execute(
-            "SELECT name, location, default_time, default_ticket_link FROM vk_source WHERE group_id=?",
-            (post.group_id,),
+    source_is_festival = False
+    pf = prefetched if (prefetched and prefetched.source_url == source_url) else None
+
+    if pf is not None:
+        source_name_val = pf.source_name
+        location_hint_val = pf.location_hint
+        default_time_val = pf.default_time
+        default_ticket_link_val = pf.default_ticket_link
+        source_is_festival = bool(pf.source_is_festival)
+        _tmark("db_source_defaults", float(pf.stage_sec.get("db_source_defaults", 0.0) or 0.0))
+
+        text = (pf.text or "").strip()
+        photos = list(pf.photos or [])
+        published_at = pf.published_at
+        metrics = pf.metrics if isinstance(pf.metrics, dict) else None
+        vk_fetch = pf.vk_fetch
+        publish_ts = pf.publish_ts if pf.publish_ts is not None else getattr(post, "date", None)
+        _tmark("vk_fetch_post", float(pf.stage_sec.get("vk_fetch_post", 0.0) or 0.0))
+    else:
+        t0 = time.monotonic()
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT name, location, default_time, default_ticket_link, festival_source FROM vk_source WHERE group_id=?",
+                (post.group_id,),
+            )
+            row = await cur.fetchone()
+        if row:
+            source_name_val, location_hint_val, default_time_val, default_ticket_link_val, source_is_festival = row
+        _tmark("db_source_defaults", time.monotonic() - t0)
+
+        # Refresh text/photos from VK (best effort) to include attachments.
+        t0 = time.monotonic()
+        fetched_text, photos, published_at, metrics, vk_fetch = await fetch_vk_post_text_and_photos(
+            post.group_id, post.post_id, db=db, bot=bot
         )
-        row = await cur.fetchone()
-    if row:
-        source_name_val, location_hint_val, default_time_val, default_ticket_link_val = row
-    _tmark("db_source_defaults", time.monotonic() - t0)
+        _tmark("vk_fetch_post", time.monotonic() - t0)
+        allow_stale = _vk_auto_allow_stale_inbox_text()
+        if vk_fetch.ok:
+            text = (fetched_text or post.text or "").strip()
+        elif allow_stale and vk_fetch.kind != "not_found":
+            text = (post.text or "").strip()
+        else:
+            text = ""
+        publish_ts = post.date
+        if published_at is not None:
+            publish_ts = int(published_at.timestamp())
 
-    # Refresh text/photos from VK (best effort) to include attachments.
-    t0 = time.monotonic()
-    fetched_text, photos, published_at = await fetch_vk_post_text_and_photos(
-        post.group_id, post.post_id, db=db, bot=bot
-    )
-    _tmark("vk_fetch_post", time.monotonic() - t0)
-    text = (fetched_text or post.text or "").strip()
-    publish_ts = post.date
-    if published_at is not None:
-        publish_ts = int(published_at.timestamp())
+        # If VK source has no explicit location hint configured, try to map its name
+        # to a canonical location from docs/reference/locations.md.
+        if not (location_hint_val or "").strip() and (source_name_val or "").strip():
+            try:
+                matcher = getattr(main_mod, "_match_known_venue", None)
+                if callable(matcher):
+                    venue = matcher(source_name_val)
+                    if venue is not None:
+                        location_hint_val = getattr(venue, "canonical_line", None) or location_hint_val
+            except Exception:
+                logger.warning("vk_auto: failed to infer location_hint from reference", exc_info=True)
+        elif (location_hint_val or "").strip():
+            # Normalize configured hints to canonical venue lines when possible,
+            # so LLM gets a stable "name, address, city" format.
+            try:
+                matcher = getattr(main_mod, "_match_known_venue", None)
+                if callable(matcher):
+                    venue = matcher(location_hint_val)
+                    if venue is not None:
+                        location_hint_val = getattr(venue, "canonical_line", None) or location_hint_val
+            except Exception:
+                logger.warning("vk_auto: failed to canonicalize location_hint", exc_info=True)
 
-    # If VK source has no explicit location hint configured, try to map its name
-    # to a canonical location from docs/reference/locations.md.
-    if not (location_hint_val or "").strip() and (source_name_val or "").strip():
+    if vk_fetch is not None and not vk_fetch.ok:
+        allow_stale = _vk_auto_allow_stale_inbox_text()
+        if vk_fetch.kind == "not_found":
+            report.inbox_rejected += 1
+            await vk_review.mark_rejected(db, int(post.id))
+            await _emit_progress(
+                "🗑️",
+                [
+                    "Результат: пост недоступен в VK (удалён/не найден)",
+                    f"Причина: {vk_fetch.error_code or ''} {_shorten_reason(vk_fetch.error) or ''}".strip(),
+                    f"took_sec: {(time.monotonic() - start_ts):.1f}",
+                ],
+            )
+            return
+        if not (allow_stale and (text or "").strip()):
+            report.inbox_failed += 1
+            report.errors.append(
+                f"vk_fetch_failed {source_url}: kind={vk_fetch.kind} code={vk_fetch.error_code} err={vk_fetch.error}"
+            )
+            await vk_review.mark_failed(db, int(post.id))
+            await _emit_progress(
+                "❌",
+                [
+                    "Результат: не удалось загрузить пост из VK (wall.getById)",
+                    f"Причина: kind={vk_fetch.kind} code={vk_fetch.error_code}",
+                    f"took_sec: {(time.monotonic() - start_ts):.1f}",
+                ],
+            )
+            return
+
+    post_popularity: str | None = None
+    if isinstance(metrics, dict) and metrics:
         try:
-            matcher = getattr(main_mod, "_match_known_venue", None)
-            if callable(matcher):
-                venue = matcher(source_name_val)
-                if venue is not None:
-                    location_hint_val = getattr(venue, "canonical_line", None) or location_hint_val
+            from source_parsing.post_metrics import (
+                compute_age_day,
+                load_vk_popularity_baseline,
+                normalize_age_day,
+                popularity_marks,
+                upsert_vk_post_metric,
+            )
+
+            collected_ts = int(time.time())
+            published_ts: int | None = None
+            if isinstance(publish_ts, datetime):
+                dt = publish_ts
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                published_ts = int(dt.timestamp())
+            elif isinstance(publish_ts, (int, float)):
+                published_ts = int(publish_ts)
+
+            age_day = normalize_age_day(compute_age_day(published_ts=published_ts, collected_ts=collected_ts))
+            if isinstance(age_day, int) and age_day >= 0:
+                views = metrics.get("views")
+                likes = metrics.get("likes")
+                await upsert_vk_post_metric(
+                    db,
+                    group_id=int(post.group_id),
+                    post_id=int(post.post_id),
+                    age_day=int(age_day),
+                    source_url=source_url,
+                    post_ts=published_ts,
+                    views=int(views) if isinstance(views, int) else None,
+                    likes=int(likes) if isinstance(likes, int) else None,
+                    collected_ts=int(collected_ts),
+                )
+                baseline = await load_vk_popularity_baseline(
+                    db,
+                    group_id=int(post.group_id),
+                    age_day=int(age_day),
+                    now_ts=int(collected_ts),
+                )
+                marks = popularity_marks(
+                    views=views if isinstance(views, int) else None,
+                    likes=likes if isinstance(likes, int) else None,
+                    baseline=baseline,
+                )
+                post_popularity = marks.text or None
         except Exception:
-            logger.warning("vk_auto: failed to infer location_hint from reference", exc_info=True)
-    elif (location_hint_val or "").strip():
-        # Normalize configured hints to canonical venue lines when possible,
-        # so LLM gets a stable "name, address, city" format.
-        try:
-            matcher = getattr(main_mod, "_match_known_venue", None)
-            if callable(matcher):
-                venue = matcher(location_hint_val)
-                if venue is not None:
-                    location_hint_val = getattr(venue, "canonical_line", None) or location_hint_val
-        except Exception:
-            logger.warning("vk_auto: failed to canonicalize location_hint", exc_info=True)
+            logger.warning(
+                "vk_auto: failed to persist/score post metrics gid=%s post_id=%s",
+                getattr(post, "group_id", None),
+                getattr(post, "post_id", None),
+                exc_info=True,
+            )
 
     # Cancellation/transfer notices: do not create new events. Instead, try to find the
     # matching existing event and mark it inactive (cancelled/postponed).
@@ -1157,6 +1752,8 @@ async def _process_vk_inbox_row(
                 updated=[int(event_id)],
                 source_url=source_url,
                 added_posters_by_event_id={int(event_id): 0},
+                post_metrics=metrics,
+                post_popularity=post_popularity,
             )
             return
         # Cancellation notices must not create new events.
@@ -1172,37 +1769,150 @@ async def _process_vk_inbox_row(
         )
         return
 
-    try:
-        t0 = time.monotonic()
-        drafts, _festival_info = await vk_intake.build_event_drafts(
-            text,
-            photos=photos,
-            source_name=source_name_val,
-            location_hint=location_hint_val,
-            default_time=default_time_val,
-            default_ticket_link=default_ticket_link_val,
-            operator_extra=None,
-            festival_names=festival_names,
-            festival_alias_pairs=festival_alias_pairs or None,
-            festival_hint=False,
-            publish_ts=publish_ts,
-            event_ts_hint=post.event_ts_hint,
-            db=db,
-        )
-        _tmark("build_drafts_total", time.monotonic() - t0)
-    except Exception as exc:
-        report.inbox_failed += 1
-        report.errors.append(f"drafts_failed {source_url}: {exc}")
-        await vk_review.mark_failed(db, post.id)
-        await _emit_progress(
-            "❌",
-            [
-                "Результат: ошибка извлечения событий (drafts)",
-                f"Причина: {_shorten_reason(str(exc)) or '—'}",
-                f"took_sec: {(time.monotonic() - start_ts):.1f}",
-            ],
-        )
-        return
+    if pf is not None and pf.drafts is not None and not (pf.error or "").strip():
+        drafts = pf.drafts
+        _tmark("build_drafts_total", float(pf.stage_sec.get("build_drafts_total", 0.0) or 0.0))
+    else:
+        try:
+            parse_festival_names = festival_names if source_is_festival else None
+            parse_festival_alias_pairs = festival_alias_pairs if source_is_festival else None
+            rl_max_wait_sec = float(os.getenv("VK_AUTO_IMPORT_RATE_LIMIT_MAX_WAIT_SEC", "120") or "120")
+            rl_max_wait_sec = max(0.0, min(rl_max_wait_sec, 1800.0))
+            rl_deadline = time.monotonic() + rl_max_wait_sec
+            t0 = time.monotonic()
+            build_attempt = 1
+            while True:
+                try:
+                    drafts, _festival_info = await vk_intake.build_event_drafts(
+                        text,
+                        photos=photos,
+                        source_name=source_name_val,
+                        location_hint=location_hint_val,
+                        default_time=default_time_val,
+                        default_ticket_link=default_ticket_link_val,
+                        operator_extra=None,
+                        festival_names=parse_festival_names,
+                        festival_alias_pairs=parse_festival_alias_pairs or None,
+                        festival_hint=bool(source_is_festival),
+                        publish_ts=publish_ts,
+                        event_ts_hint=post.event_ts_hint,
+                        rate_limit_max_wait_sec=0,
+                        db=db,
+                    )
+                    break
+                except Exception as exc:
+                    is_rate_limit = False
+                    retry_after_ms = 0
+                    try:
+                        from google_ai.exceptions import (
+                            RateLimitError as _RateLimitError,
+                            ProviderError as _ProviderError,
+                        )
+                    except Exception:
+                        _RateLimitError = None
+                        _ProviderError = None
+                    if _RateLimitError is not None and isinstance(exc, _RateLimitError):
+                        is_rate_limit = True
+                        retry_after_ms = int(getattr(exc, "retry_after_ms", 0) or 0)
+                    elif _ProviderError is not None and isinstance(exc, _ProviderError):
+                        if int(getattr(exc, "status_code", 0) or 0) == 429:
+                            is_rate_limit = True
+                            retry_after_ms = int(getattr(exc, "retry_after_ms", 0) or 0)
+
+                    if not is_rate_limit:
+                        raise
+                    if rl_max_wait_sec <= 0:
+                        raise
+                    if time.monotonic() >= rl_deadline:
+                        raise
+
+                    wait_sec = (
+                        min(60.0, max(0.2, (retry_after_ms / 1000.0) + 0.2))
+                        if retry_after_ms
+                        else 1.0
+                    )
+                    logger.warning(
+                        "vk_auto: rate_limited build_drafts attempt=%d retry_in=%.1fs url=%s err=%s",
+                        build_attempt,
+                        wait_sec,
+                        source_url,
+                        exc,
+                    )
+                    build_attempt += 1
+                    await asyncio.sleep(wait_sec)
+                    continue
+
+            _tmark("build_drafts_total", time.monotonic() - t0)
+        except Exception as exc:
+            is_rate_limit = False
+            retry_after_ms = 0
+            try:
+                from google_ai.exceptions import RateLimitError as _RateLimitError, ProviderError as _ProviderError
+            except Exception:
+                _RateLimitError = None
+                _ProviderError = None
+            if _RateLimitError is not None and isinstance(exc, _RateLimitError):
+                is_rate_limit = True
+                retry_after_ms = int(getattr(exc, "retry_after_ms", 0) or 0)
+            elif _ProviderError is not None and isinstance(exc, _ProviderError):
+                if int(getattr(exc, "status_code", 0) or 0) == 429:
+                    is_rate_limit = True
+                    retry_after_ms = int(getattr(exc, "retry_after_ms", 0) or 0)
+
+            if is_rate_limit:
+                report.inbox_deferred += 1
+                report.errors.append(f"drafts_rate_limited {source_url}: {exc}")
+                try:
+                    rl_max_wait_sec = float(os.getenv("VK_AUTO_IMPORT_RATE_LIMIT_MAX_WAIT_SEC", "120") or "120")
+                    rl_max_wait_sec = max(0.0, min(rl_max_wait_sec, 1800.0))
+                    if rl_max_wait_sec <= 0:
+                        await vk_review.mark_pending(db, int(post.id))
+                    else:
+                        # Keep the row locked to avoid immediately picking it again in the same
+                        # unbounded run. The lock will auto-expire via vk_review._unlock_stale().
+                        async with db.raw_conn() as conn:
+                            await conn.execute(
+                                "UPDATE vk_inbox SET status='locked', locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                                (int(post.id),),
+                            )
+                            await conn.commit()
+                except Exception:
+                    logger.warning("vk_auto: defer_lock_failed after rate limit", exc_info=True)
+                retry_hint = (
+                    f"Retry-after: {max(1, int(retry_after_ms / 1000))}s"
+                    if retry_after_ms
+                    else "Retry-after: —"
+                )
+                await _emit_progress(
+                    "⏸️",
+                    [
+                        "Результат: лимит LLM — пост отложен",
+                        f"Причина: {_shorten_reason(str(exc)) or '—'}",
+                        retry_hint,
+                        f"took_sec: {(time.monotonic() - start_ts):.1f}",
+                    ],
+                )
+                return
+
+            report.inbox_failed += 1
+            report.errors.append(f"drafts_failed {source_url}: {exc}")
+            logger.error(
+                "vk_auto: build_event_drafts failed inbox_id=%s source=%s",
+                int(post.id),
+                source_url,
+                exc_info=True,
+            )
+            await vk_review.mark_failed(db, int(post.id))
+            await _emit_progress(
+                "❌",
+                [
+                    "Результат: ошибка извлечения событий (drafts)",
+                    f"Причина: {_shorten_reason(str(exc)) or '—'}",
+                    f"took_sec: {(time.monotonic() - start_ts):.1f}",
+                ],
+            )
+            _log_row_timing(drafts_count=0, ok_value=False)
+            return
 
     if not drafts:
         report.inbox_rejected += 1
@@ -1294,6 +2004,12 @@ async def _process_vk_inbox_row(
     added_posters_total = 0
     added_posters_by_event_id: dict[int, int] = {}
     partial_error: str | None = None
+    inline_jobs_enabled = (os.getenv("VK_AUTO_IMPORT_INLINE_JOBS", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     ok = True
     persist_total_sec = 0.0
@@ -1305,6 +2021,7 @@ async def _process_vk_inbox_row(
                 photos,
                 db,
                 source_post_url=source_url,
+                wait_for_telegraph_url=not inline_jobs_enabled,
             )
             took_one = time.monotonic() - t0
             persist_total_sec += float(took_one)
@@ -1333,6 +2050,7 @@ async def _process_vk_inbox_row(
                         f"took_sec: {(time.monotonic() - start_ts):.1f}",
                     ],
                 )
+                _log_row_timing(drafts_count=len(drafts or []), ok_value=False)
                 return
             if "smart_update returned no event_id:" in exc_txt:
                 report.inbox_rejected += 1
@@ -1346,6 +2064,7 @@ async def _process_vk_inbox_row(
                         f"took_sec: {(time.monotonic() - start_ts):.1f}",
                     ],
                 )
+                _log_row_timing(drafts_count=len(drafts or []), ok_value=False)
                 return
 
             report.inbox_failed += 1
@@ -1360,33 +2079,20 @@ async def _process_vk_inbox_row(
                         f"took_sec: {(time.monotonic() - start_ts):.1f}",
                     ],
                 )
+                _log_row_timing(drafts_count=len(drafts or []), ok_value=False)
                 return
             # Partial success: keep already imported events linked to this inbox row.
             partial_error = exc_txt
             ok = True
             break
-    if timings_on and drafts:
+    if drafts:
         _tmark("persist_total", persist_total_sec)
 
-    if timings_on:
-        took_total = time.monotonic() - start_ts
-        try:
-            logger.info(
-                "timing vk_auto_import_row inbox_id=%s group_id=%s post_id=%s drafts=%s ok=%s took_sec=%.3f stages=%s",
-                int(getattr(post, "id", 0) or 0),
-                int(getattr(post, "group_id", 0) or 0),
-                int(getattr(post, "post_id", 0) or 0),
-                len(drafts or []),
-                1 if ok else 0,
-                float(took_total),
-                {k: round(v, 3) for k, v in sorted(t_stage.items())},
-            )
-        except Exception:
-            pass
-
     if not ok:
+        _log_row_timing(drafts_count=len(drafts or []), ok_value=False)
         return
 
+    t0 = time.monotonic()
     await vk_review.mark_imported_events(
         db,
         inbox_id=post.id,
@@ -1395,6 +2101,7 @@ async def _process_vk_inbox_row(
         event_ids=imported_event_ids,
         event_dates=imported_event_dates,
     )
+    _tmark("mark_imported_events", time.monotonic() - t0)
     report.inbox_imported += 1
     report.created_event_ids.extend(created_ids)
     report.updated_event_ids.extend(updated_ids)
@@ -1419,23 +2126,29 @@ async def _process_vk_inbox_row(
         extra_lines.insert(0, f"⚠️ Частично: {_shorten_reason(partial_error) or 'persist error'}")
     await _emit_progress(icon, extra_lines)
 
-    inline_jobs_enabled = (os.getenv("VK_AUTO_IMPORT_INLINE_JOBS", "1") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     if inline_jobs_enabled:
         timeout_sec = float(os.getenv("VK_AUTO_IMPORT_INLINE_JOBS_TIMEOUT_SEC", "90") or "90")
+        t0 = time.monotonic()
         try:
+            # Inline jobs exist only to make the operator report reflect the final
+            # Telegraph URL right away. ICS publishing can be slow / flaky (and in
+            # local E2E it may be intentionally misconfigured), so we do NOT wait
+            # for it by default.
             allowed = {main_mod.JobTask.telegraph_build}
+
+            include_ics_inline = (os.getenv("VK_AUTO_IMPORT_INLINE_INCLUDE_ICS") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
             disable_ics_jobs = (os.getenv("DISABLE_ICS_JOBS") or "").strip().lower() in {
                 "1",
                 "true",
                 "yes",
                 "on",
             }
-            if not disable_ics_jobs:
+            if include_ics_inline and not disable_ics_jobs:
                 allowed.add(main_mod.JobTask.ics_publish)
             for eid in imported_event_ids:
                 await asyncio.wait_for(
@@ -1460,9 +2173,11 @@ async def _process_vk_inbox_row(
                 source_url,
                 imported_event_ids,
             )
+        _tmark("inline_jobs", time.monotonic() - t0)
 
     # Send the unified report after inline Telegraph/ICS jobs so the operator sees
     # the final (potentially recreated) Telegraph URL, not the stale snapshot value.
+    t0 = time.monotonic()
     report_sent = await _send_unified_event_report(
         db,
         bot,
@@ -1471,13 +2186,22 @@ async def _process_vk_inbox_row(
         updated=updated_ids,
         source_url=source_url,
         added_posters_by_event_id=added_posters_by_event_id,
+        post_metrics=metrics,
+        post_popularity=post_popularity,
     )
+    _tmark("send_unified_report", time.monotonic() - t0)
     extra_lines[-1] = f"Отчёт Smart Update: {'✅' if report_sent else '⚠️'}"
     extra_lines.append(f"took_sec: {(time.monotonic() - start_ts):.1f}")
     await _emit_progress(icon, extra_lines)
+    _log_row_timing(drafts_count=len(drafts or []), ok_value=True)
 
 
-async def vk_auto_import_scheduler(db: Database, bot: Any | None = None) -> None:
+async def vk_auto_import_scheduler(
+    db: Database,
+    bot: Any | None = None,
+    *,
+    run_id: str | None = None,
+) -> None:
     """Scheduled job entrypoint: imports VK inbox queue when enabled.
 
     The report goes to ADMIN chat because there is no operator context.
@@ -1492,4 +2216,12 @@ async def vk_auto_import_scheduler(db: Database, bot: Any | None = None) -> None
     except (TypeError, ValueError):
         return
     limit = int(os.getenv("VK_AUTO_IMPORT_LIMIT", "25") or "25")
-    await run_vk_auto_import(db, bot, chat_id=chat_id, limit=limit, operator_id=0)
+    await run_vk_auto_import(
+        db,
+        bot,
+        chat_id=chat_id,
+        limit=limit,
+        operator_id=0,
+        trigger="scheduled",
+        run_id=run_id,
+    )

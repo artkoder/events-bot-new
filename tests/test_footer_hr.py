@@ -20,14 +20,16 @@ def test_nodes_without_hr():
     nodes = html_to_nodes("<p>text</p>")
     nav_nodes = html_to_nodes("<h4>nav</h4>")
     res = ensure_footer_nav_with_hr(nodes, nav_nodes, month="2025-01", page=1)
-    assert nodes_to_html(res) == "<p>text</p><hr><h4>nav</h4>"
+    out = nodes_to_html(res).replace("<hr/>", "<hr>")
+    assert out == "<p>text</p><hr><h4>nav</h4>"
 
 
 def test_nodes_with_duplicates():
     nodes = html_to_nodes("<p>text</p><hr><h4>old</h4><p>junk</p>")
     nav_nodes = html_to_nodes("<h4>nav</h4>")
     res = ensure_footer_nav_with_hr(nodes, nav_nodes, month="2025-01", page=1)
-    assert nodes_to_html(res) == "<p>text</p><hr><h4>nav</h4>"
+    out = nodes_to_html(res).replace("<hr/>", "<hr>")
+    assert out == "<p>text</p><hr><h4>nav</h4>"
 
 
 def test_idempotent_html():
@@ -37,3 +39,12 @@ def test_idempotent_html():
     res2 = ensure_footer_nav_with_hr(res1, nav, month="2025-01", page=1)
     assert res1 == res2
 
+
+def test_html_body_divider_hr_does_not_truncate_body():
+    html = "<p>sum</p><!--BODY_DIVIDER--><hr><p>body</p>"
+    nav = "<h4>nav</h4>"
+    res = ensure_footer_nav_with_hr(html, nav, month="2025-01", page=1)
+    # The internal divider must remain, and the body after it must not be dropped.
+    assert "<p>body</p>" in res
+    # Footer anchor should be appended because only internal hr exists.
+    assert res.endswith("<h4>nav</h4>")

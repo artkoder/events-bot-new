@@ -31,6 +31,37 @@ logging.basicConfig(
 def _is_offline_mode() -> bool:
     return (os.getenv("E2E_OFFLINE") or "").strip() in {"1", "true", "yes"}
 
+def _is_manual_run_enabled() -> bool:
+    """Allow heavy @manual scenarios only when explicitly requested.
+
+    There are two explicit opt-ins:
+    - E2E_RUN_MANUAL=1 (recommended for CI-like runs)
+    - behave invoked with a manual tag filter (e.g. --tags=manual)
+    """
+    if (os.getenv("E2E_RUN_MANUAL") or "").strip() == "1":
+        return True
+
+    # Best-effort: detect explicit tag filter in behave argv.
+    # Examples:
+    # - behave ... --tags=manual
+    # - behave ... --tags manual
+    # - behave ... -t manual
+    raw: list[str] = []
+    argv = list(sys.argv or [])
+    for i, arg in enumerate(argv):
+        if arg.startswith("--tags="):
+            raw.append(arg.split("=", 1)[1])
+            continue
+        if arg in {"--tags", "-t"} and (i + 1) < len(argv):
+            raw.append(argv[i + 1])
+            continue
+
+    if not raw:
+        return False
+
+    haystack = " ".join(raw).lower().replace("@", " ")
+    return "manual" in {x.strip() for x in haystack.replace(",", " ").split() if x.strip()}
+
 def _ensure_db_path_env() -> None:
     """Set DB_PATH for local E2E runs when it's missing.
 
@@ -41,14 +72,35 @@ def _ensure_db_path_env() -> None:
     """
     if (os.getenv("DB_PATH") or "").strip():
         return
-    candidates = [
-        project_root / "db_prod_snapshot.sqlite",
-        project_root / "db_prod_snapshot_2026-01-28_154329.sqlite",
-    ]
+
+    def _sqlite_snapshot_ok(path: Path) -> bool:
+        try:
+            conn = sqlite3.connect(str(path))
+            try:
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            finally:
+                conn.close()
+            return True
+        except Exception:
+            return False
+
+    base = project_root / "db_prod_snapshot.sqlite"
+    globbed = sorted(
+        [p for p in project_root.glob("db_prod_snapshot_*.sqlite") if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    # Prefer the conventional "current" snapshot if it's healthy; otherwise fall back
+    # to the newest timestamped snapshot available.
+    candidates: list[Path] = ([base] if base.exists() else []) + globbed
+
     for p in candidates:
-        if p.exists():
+        if not p.exists():
+            continue
+        if _sqlite_snapshot_ok(p):
             os.environ["DB_PATH"] = str(p)
             return
+        logger.warning("E2E DB snapshot is malformed (skipping): %s", p.name)
 
 
 def _ensure_isolated_e2e_db_copy() -> None:
@@ -77,13 +129,19 @@ def _ensure_isolated_e2e_db_copy() -> None:
     if not src.exists() or not src.is_file():
         return
 
-    # Only auto-isolate "prod snapshot" DBs in repo root.
-    if src.parent != project_root:
-        return
-    if not (src.name.startswith("db_prod_snapshot") and src.suffix == ".sqlite"):
+    # Treat any "*snapshot*.sqlite" as a snapshot DB that must be isolated per-run,
+    # otherwise live E2E runs mutate the file and become non-repeatable.
+    if not (src.suffix == ".sqlite" and "snapshot" in src.name):
         return
 
-    out_dir = project_root / "artifacts" / "test-results"
+    # Use a local filesystem path by default to avoid rare hangs on network/9p mounts
+    # during sqlite backup/journal writes. Can be overridden to keep DB copies under
+    # artifacts for inspection.
+    isolate_dir = (os.getenv("E2E_DB_ISOLATE_DIR") or "").strip()
+    if isolate_dir:
+        out_dir = Path(isolate_dir)
+    else:
+        out_dir = Path("/tmp") / "events-bot-new" / "e2e-db"
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     dst = out_dir / f"db_e2e_{ts}.sqlite"
@@ -131,17 +189,33 @@ def _load_dotenv_from_repo_root() -> None:
             continue
         k, v = s.split("=", 1)
         key = (k or "").strip()
-        if not key or key in os.environ:
+        if not key:
             continue
         val = (v or "").strip()
         if (len(val) >= 2) and ((val[0] == val[-1]) and val[0] in ("'", '"')):
             val = val[1:-1]
-        if val:
-            os.environ[key] = val
+        if not val:
+            continue
+
+        # E2E safety: do not override env by default, but some CI/dev shells can export
+        # placeholder values (e.g. short Supabase keys) that break media uploads.
+        # Supabase anon/service keys are long JWT strings; treat very short values as invalid.
+        existing = os.environ.get(key)
+        if existing is not None:
+            if key in {"SUPABASE_KEY", "SUPABASE_SERVICE_KEY"} and len(existing.strip()) < 80 and len(val) >= 120:
+                os.environ[key] = val
+                logger.info("E2E dotenv override: %s replaced weak env value from .env", key)
+            continue
+
+        os.environ[key] = val
 
 
-def _resolve_bot_username() -> str:
-    """Resolve bot username from TELEGRAM_BOT_TOKEN via Telegram Bot API."""
+def _resolve_bot_username(*, telethon_client=None) -> str:
+    """Resolve bot username for E2E runs.
+
+    Preferred: Telegram Bot API `getMe` (simple and doesn't require Telethon).
+    Fallback: resolve by bot user-id via Telethon (works when Bot API is blocked).
+    """
     forced = (os.environ.get("E2E_BOT_USERNAME") or "").strip()
     if forced:
         forced = forced.lstrip("@").strip()
@@ -156,6 +230,17 @@ def _resolve_bot_username() -> str:
         with urllib.request.urlopen(url, timeout=20) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
+        # Bot API can be blocked in some environments. Fallback to Telethon using bot user-id.
+        if telethon_client is not None:
+            try:
+                bot_id = int(token.split(":", 1)[0])
+                loop = asyncio.get_event_loop()
+                entity = loop.run_until_complete(telethon_client.get_entity(bot_id))
+                username = (getattr(entity, "username", "") or "").strip()
+                if username:
+                    return username
+            except Exception:
+                pass
         raise EnvironmentError(f"Failed to resolve bot username via getMe: {exc}") from exc
     if not isinstance(payload, dict) or not payload.get("ok"):
         raise EnvironmentError(f"Telegram getMe failed: {payload}")
@@ -316,11 +401,13 @@ def _start_local_bot_process() -> tuple[subprocess.Popen, Path]:
 
     env = os.environ.copy()
     env.setdefault("DEV_MODE", "1")
+    # Ensure bot logs are visible immediately for the readiness probe.
+    env.setdefault("PYTHONUNBUFFERED", "1")
     # Be explicit: DEV mode uses polling; webhook must be empty/ignored.
     env.pop("WEBHOOK_URL", None)
 
     # Run main.py which exec()s main_part2.py and will start polling in DEV_MODE.
-    cmd = [sys.executable, str(project_root / "main.py")]
+    cmd = [sys.executable, "-u", str(project_root / "main.py")]
     with open(log_path, "w", encoding="utf-8") as f:
         proc = subprocess.Popen(
             cmd,
@@ -381,6 +468,8 @@ def before_all(context):
 
     # Ensure `.env` variables are available (common in local dev).
     _load_dotenv_from_repo_root()
+    # sqlite WAL on some mounts can be flaky under concurrency; DELETE is slower but robust.
+    os.environ.setdefault("DB_JOURNAL_MODE", "DELETE")
     _ensure_db_path_env()
     _ensure_isolated_e2e_db_copy()
     _maybe_disable_catbox_for_e2e()
@@ -435,7 +524,32 @@ def before_all(context):
     
     # Initialize HumanUserClient
     context.client = create_human_client()
-    context.loop.run_until_complete(context.client.connect())
+    async def _connect_with_retries(max_attempts: int = 10) -> None:
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                await context.client.connect()
+                return
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    await context.client.disconnect()
+                except Exception:
+                    pass
+                sleep_s = min(10.0, 0.8 * attempt)
+                logger.warning(
+                    "Telethon connect failed (attempt %s/%s): %s; retry in %.1fs",
+                    attempt,
+                    max_attempts,
+                    exc,
+                    sleep_s,
+                )
+                await asyncio.sleep(sleep_s)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("Telethon connect failed: unknown error")
+
+    context.loop.run_until_complete(_connect_with_retries(int(os.getenv("E2E_TELETHON_CONNECT_RETRIES", "10"))))
 
     # Ensure our Telethon user exists in DB (prod snapshot gating requires it).
     try:
@@ -444,8 +558,9 @@ def before_all(context):
     except Exception as exc:
         logger.warning("Failed to ensure E2E user in DB: %s", exc)
     
-    # Bot username to test (resolve from token to avoid extra env wiring)
-    context.bot_username = _resolve_bot_username()
+    # Bot username to test (resolve from token to avoid extra env wiring).
+    # Prefer Bot API, but fallback to Telethon when Bot API is blocked/unreachable.
+    context.bot_username = _resolve_bot_username(telethon_client=context.client.client)
     
     # Store for last message/response
     context.last_message = None
@@ -492,8 +607,8 @@ def before_scenario(context, scenario):
         if "offline" not in getattr(scenario, "effective_tags", []):
             scenario.skip("requires Telegram/Telethon (run without E2E_OFFLINE=1)")
     if "manual" in getattr(scenario, "effective_tags", []):
-        if os.getenv("E2E_RUN_MANUAL") != "1":
-            scenario.skip("manual scenario (set E2E_RUN_MANUAL=1 to run)")
+        if not _is_manual_run_enabled():
+            scenario.skip("manual scenario (set E2E_RUN_MANUAL=1 or run with --tags=manual)")
     _cleanup_test_smart_update_data()
 
 
@@ -501,5 +616,7 @@ def after_scenario(context, scenario):
     """Log scenario result."""
     if scenario.status == "passed":
         logger.info(f"✅ Сценарий PASSED: {scenario.name}")
+    elif scenario.status == "skipped":
+        logger.warning(f"⏭️ Сценарий SKIPPED: {scenario.name} ({scenario.skip_reason})")
     else:
         logger.error(f"❌ Сценарий FAILED: {scenario.name}")

@@ -26,6 +26,9 @@ def _base_event(**overrides: object) -> Event:
 
 
 async def _patch_llm_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Keep unit tests offline/deterministic: exhibitions merge logic should not depend on live LLM calls.
+    monkeypatch.setattr(su, "SMART_UPDATE_LLM_DISABLED", True)
+
     async def _merge(*args, **kwargs):  # noqa: ANN001 - test helper
         return {
             "title": None,
@@ -49,10 +52,14 @@ async def _patch_llm_minimal(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _no_topics(*args, **kwargs):  # noqa: ANN001 - test helper
         return None
 
+    async def _no_gemma(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
     monkeypatch.setattr(su, "_llm_merge_event", _merge)
     monkeypatch.setattr(su, "_rewrite_description_journalistic", _no_rewrite)
     monkeypatch.setattr(su, "_llm_build_search_digest", _no_digest)
     monkeypatch.setattr(su, "_classify_topics", _no_topics)
+    monkeypatch.setattr(su, "_ask_gemma_text", _no_gemma)
 
 
 @pytest.mark.asyncio
@@ -111,8 +118,8 @@ async def test_exhibition_merges_when_candidate_date_is_inside_existing_period(
                 select(EventSource).where(EventSource.event_id == int(merged.id or 0))
             )
         ).scalars().all()
-        assert len(sources) == 1
-        assert sources[0].source_url == "https://t.me/vorotagallery/21"
+        non_legacy = [s for s in sources if (s.source_type or "") != "legacy"]
+        assert any(s.source_url == "https://t.me/vorotagallery/21" for s in non_legacy)
 
 
 @pytest.mark.asyncio
@@ -219,6 +226,7 @@ async def test_exhibition_without_end_date_gets_default_one_month_period(
         event = await session.get(Event, int(create_result.event_id or 0))
         assert event is not None
         assert event.end_date == "2026-02-10"
+        assert event.end_date_is_inferred is True
 
     # Later source with explicit end_date must update the same exhibition, not create a duplicate.
     extended = EventCandidate(
@@ -248,6 +256,145 @@ async def test_exhibition_without_end_date_gets_default_one_month_period(
         events = (await session.execute(select(Event))).scalars().all()
         assert len(events) == 1
         assert events[0].end_date == "2026-03-31"
+        assert events[0].end_date_is_inferred is False
+
+
+@pytest.mark.asyncio
+async def test_exhibition_same_explicit_end_date_clears_inferred_flag(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_minimal(monkeypatch)
+
+    created = EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/vorotagallery/31",
+        source_text="Открытие выставки с датой старта.",
+        raw_excerpt="Открытие выставки.",
+        title="Выставка TEST inferred flag",
+        date="2026-01-10",
+        end_date=None,
+        time="",
+        location_name="Галерея TEST",
+        city="Калининград",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    create_result = await smart_event_update(
+        db,
+        created,
+        check_source_url=True,
+        schedule_tasks=False,
+    )
+    assert create_result.status == "created"
+
+    confirmed = EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/vorotagallery/32",
+        source_text="Выставка работает по 10 февраля 2026 года.",
+        raw_excerpt="Выставка по 10 февраля.",
+        title="Выставка TEST inferred flag",
+        date="2026-01-10",
+        end_date="2026-02-10",
+        time="",
+        location_name="Галерея TEST",
+        city="Калининград",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    merge_result = await smart_event_update(
+        db,
+        confirmed,
+        check_source_url=True,
+        schedule_tasks=False,
+    )
+    assert merge_result.status == "merged"
+    assert merge_result.event_id == create_result.event_id
+
+    async with db.get_session() as session:
+        event = await session.get(Event, int(create_result.event_id or 0))
+        assert event is not None
+        assert event.end_date == "2026-02-10"
+        assert event.end_date_is_inferred is False
+
+
+@pytest.mark.asyncio
+async def test_inferred_end_date_does_not_override_confirmed_end_date(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_minimal(monkeypatch)
+
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="Выставка TEST confirmed end date",
+                date="2026-03-01",
+                end_date="2026-04-30",
+                source_text="Официальный анонс выставки до конца апреля.",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/vorotagallery/40",
+        source_text="Открытие выставки. Дата закрытия не указана.",
+        raw_excerpt="Открытие выставки.",
+        title="Выставка TEST confirmed end date",
+        date="2026-03-01",
+        end_date=None,
+        time="",
+        location_name="Галерея TEST",
+        city="Калининград",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    result = await smart_event_update(
+        db,
+        candidate,
+        check_source_url=True,
+        schedule_tasks=False,
+    )
+    assert result.status == "merged"
+    assert result.event_id == 1
+
+    async with db.get_session() as session:
+        event = await session.get(Event, 1)
+        assert event is not None
+        assert event.end_date == "2026-04-30"
+        assert event.end_date_is_inferred is False
+
+
+def test_action_post_does_not_get_default_one_month_end_date():
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-1_999",
+        title="Акция «Музей! Безвозмездно — то есть даром!»",
+        date="2026-02-18",
+        end_date=None,
+        time="",
+        location_name="Музей",
+        city="Калининград",
+        # Upstream can misclassify it as a long event because the text mentions "экспозиции".
+        event_type="выставка",
+        source_text=(
+            "40 бесплатных билетов в музей и 10 билетов в Дом-музей уже ждут вас.\n"
+            "Бесплатный билет действует только указанную дату.\n"
+            "Завтра, 18 февраля, посетить экспозиции можно разово."
+        ),
+        raw_excerpt="",
+    )
+
+    out = su._maybe_apply_default_end_date_for_long_event(candidate)
+    assert out is None
+    assert candidate.end_date is None
 
 
 @pytest.mark.asyncio
@@ -458,8 +605,9 @@ async def test_single_candidate_title_mismatch_does_not_merge_long_event(
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def _no_match(*args, **kwargs):  # noqa: ANN001 - test helper
-        return None, 0.0, "no_match_for_test"
+    async def _force_bad_match(*args, **kwargs):  # noqa: ANN001 - test helper
+        # Even if the LLM thinks it's a match, Smart Update must not merge unrelated exhibitions.
+        return 1, 0.99, "force_match_for_test"
 
     async def _no_rewrite(*args, **kwargs):  # noqa: ANN001 - test helper
         return None
@@ -473,7 +621,7 @@ async def test_single_candidate_title_mismatch_does_not_merge_long_event(
     async def _no_topics(*args, **kwargs):  # noqa: ANN001 - test helper
         return None
 
-    monkeypatch.setattr(su, "_llm_match_event", _no_match)
+    monkeypatch.setattr(su, "_llm_match_event", _force_bad_match)
     monkeypatch.setattr(su, "_rewrite_description_journalistic", _no_rewrite)
     monkeypatch.setattr(su, "_llm_build_search_digest", _no_digest)
     monkeypatch.setattr(su, "_llm_extract_candidate_facts", _no_facts)
@@ -536,5 +684,112 @@ async def test_single_candidate_title_mismatch_does_not_merge_long_event(
         original = await session.get(Event, 1)
         assert original is not None
         assert original.title == "Космос красного"
+        events = (await session.execute(select(Event))).scalars().all()
+        assert len(events) == 2
+
+
+@pytest.mark.asyncio
+async def test_exhibition_unrelated_titles_do_not_auto_merge_even_if_periods_overlap(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_minimal(monkeypatch)
+
+    # Disable region filter to keep this unit test fully deterministic.
+    monkeypatch.setenv("REGION_FILTER_ENABLED", "0")
+    monkeypatch.setenv("SMART_UPDATE_MATCH_CREATE_BUNDLE", "0")
+
+    async def _no_match(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None, 0.0, "no_match_for_test"
+
+    async def _no_bundle(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
+    async def _no_rewrite(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
+    async def _no_digest(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
+    async def _no_short(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
+    async def _no_facts(*args, **kwargs):  # noqa: ANN001 - test helper
+        return []
+
+    async def _no_ff_desc(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
+    async def _no_topics(*args, **kwargs):  # noqa: ANN001 - test helper
+        return None
+
+    monkeypatch.setattr(su, "_llm_match_event", _no_match)
+    monkeypatch.setattr(su, "_llm_match_or_create_bundle", _no_bundle)
+    monkeypatch.setattr(su, "_llm_create_description_facts_and_digest", _no_bundle)
+    monkeypatch.setattr(su, "_rewrite_description_journalistic", _no_rewrite)
+    monkeypatch.setattr(su, "_llm_build_search_digest", _no_digest)
+    monkeypatch.setattr(su, "_llm_build_short_description", _no_short)
+    monkeypatch.setattr(su, "_llm_extract_candidate_facts", _no_facts)
+    monkeypatch.setattr(su, "_llm_fact_first_description_md", _no_ff_desc)
+    monkeypatch.setattr(su, "_classify_topics", _no_topics)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                id=1,
+                title="🎨 Гусевская палитра",
+                description="Выставка в честь юбилея области.",
+                date="2026-03-01",
+                end_date="2026-04-01",
+                time="",
+                location_name="Гусевский музей, Московская 36а, Гусев",
+                location_address="Московская 36а",
+                city="Гусев",
+                event_type="выставка",
+                source_text="Текст источника A.",
+            )
+        )
+        session.add(
+            EventSource(
+                event_id=1,
+                source_type="vk",
+                source_url="https://vk.com/wall-1_1",
+                source_text="Текст источника A.",
+                trust_level="high",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-1_2",
+        source_text="Выставка посвящена творчеству Маргариты Батясовой.",
+        raw_excerpt="Выставка Маргариты Батясовой.",
+        title="🎨 Акварельные впечатления",
+        date="2026-03-04",
+        end_date="2026-04-02",
+        time="",
+        location_name="Гусевский музей",
+        city="Гусев",
+        event_type="выставка",
+        trust_level="high",
+    )
+
+    result = await smart_event_update(
+        db,
+        candidate,
+        check_source_url=False,
+        schedule_tasks=False,
+    )
+
+    assert result.status == "created"
+    assert result.event_id is not None
+    assert int(result.event_id) != 1
+
+    async with db.get_session() as session:
+        original = await session.get(Event, 1)
+        assert original is not None
+        assert original.title == "🎨 Гусевская палитра"
         events = (await session.execute(select(Event))).scalars().all()
         assert len(events) == 2
