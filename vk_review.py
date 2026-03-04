@@ -116,6 +116,29 @@ async def release_stale_locks(db: Database) -> int:
     return count
 
 
+async def release_all_locks(db: Database) -> int:
+    """Unlock *all* locked inbox rows.
+
+    Intended for app startup recovery after unexpected restarts/OOM, when the
+    previous in-flight review/auto-import task is gone and any locks would be
+    orphaned.
+    """
+
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            """
+            UPDATE vk_inbox
+            SET status='pending', locked_by=NULL, locked_at=NULL, review_batch=NULL
+            WHERE status='locked'
+            """
+        )
+        count = cursor.rowcount
+        await conn.commit()
+    if count:
+        logging.info("vk_review release_all_locks count=%s", count)
+    return int(count or 0)
+
+
 async def refresh_vk_event_ts_hints(db: Database) -> int:
     """Recompute :mod:`vk_inbox` timestamp hints for queued rows."""
 

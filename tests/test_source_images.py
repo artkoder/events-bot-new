@@ -369,6 +369,24 @@ async def test_build_source_page_content_history_spacing():
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_no_spacer_before_lists_default_mode():
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "Вступление\n\n- Пункт 1\n- Пункт 2\n\nХвост",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    spacer = main.BODY_SPACER_HTML
+    assert "<p>Вступление</p><ul><li>Пункт 1</li><li>Пункт 2</li></ul>" in html
+    assert f"<p>Вступление</p>{spacer}<ul>" not in html
+    # Keep normal spacing for non-list transitions.
+    assert f"</ul>{spacer}<p>Хвост</p>" in html
+
+
+@pytest.mark.asyncio
 async def test_build_source_page_content_history_footer():
     source = "https://example.com/src"
     html, _, _ = await main.build_source_page_content(

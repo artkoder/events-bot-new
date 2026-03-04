@@ -4833,6 +4833,20 @@ async def init_db_and_scheduler(
 ) -> None:
     logging.info("Initializing database")
     await db.init()
+    try:
+        from ops_run import cleanup_running_ops_runs_on_startup
+        from vk_review import release_all_locks
+
+        crashed = await cleanup_running_ops_runs_on_startup(db)
+        unlocked = await release_all_locks(db)
+        if crashed or unlocked:
+            logging.info(
+                "startup_recovery ops_run_crashed=%s vk_inbox_unlocked=%s",
+                crashed,
+                unlocked,
+            )
+    except Exception:
+        logging.exception("startup_recovery failed")
     await get_tz_offset(db)
     global CATBOX_ENABLED
     CATBOX_ENABLED = await get_catbox_enabled(db)
@@ -14419,7 +14433,20 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
                 bio = BytesIO()
                 async with span("tg-send"):
                     await bot.download(photo.file_id, destination=bio)
-                data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
+                try:
+                    data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
+                except Exception:
+                    logging.warning(
+                        "festival_edit image convert_failed type=photo user=%s fest_id=%s",
+                        message.from_user.id,
+                        fid,
+                        exc_info=True,
+                    )
+                    await bot.send_message(
+                        message.chat.id,
+                        "Не удалось обработать изображение (слишком большое или неподдерживаемый формат).",
+                    )
+                    return
                 images.append((data, name))
             if message.document:
                 mime = message.document.mime_type or ""
@@ -14428,7 +14455,21 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
                     async with span("tg-send"):
                         await bot.download(message.document.file_id, destination=bio)
                     doc_name = message.document.file_name or "image.jpg"
-                    data, doc_name = ensure_jpeg(bio.getvalue(), doc_name)
+                    try:
+                        data, doc_name = ensure_jpeg(bio.getvalue(), doc_name)
+                    except Exception:
+                        logging.warning(
+                            "festival_edit image convert_failed type=document user=%s fest_id=%s name=%s",
+                            message.from_user.id,
+                            fid,
+                            doc_name,
+                            exc_info=True,
+                        )
+                        await bot.send_message(
+                            message.chat.id,
+                            "Не удалось обработать изображение (слишком большое или неподдерживаемый формат).",
+                        )
+                        return
                     images.append((data, doc_name))
                 else:
                     await bot.send_message(
@@ -16360,6 +16401,7 @@ async def build_source_page_content(
 
         paragraph_tag_re = re.compile(r"<p\b", re.IGNORECASE)
         heading_tag_re = re.compile(r"<h[1-6]\b", re.IGNORECASE)
+        list_tag_re = re.compile(r"<(?:ul|ol)\b", re.IGNORECASE)
         media_tag_re = re.compile(r"<(?:figure|img)\b", re.IGNORECASE)
         body_text_tag_re = re.compile(
             r"<(?:p|ul|ol|blockquote|pre|table)\b", re.IGNORECASE
@@ -16370,6 +16412,10 @@ async def build_source_page_content(
                 return False
             last = previous_blocks[-1]
             if last == spacer:
+                return False
+            # Event/source pages should not add an artificial blank paragraph
+            # right before list blocks (`<ul>/<ol>`).
+            if page_mode != "history" and list_tag_re.match(upcoming.strip()):
                 return False
             if (
                 heading_tag_re.match(last.strip())

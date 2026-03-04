@@ -1003,9 +1003,20 @@ async def _prefetch_vk_inbox_row(
     parse_festival_alias_pairs = festival_alias_pairs if source_is_festival else None
     drafts: Any | None = None
     err: str | None = None
+    prefetch_drafts = (os.getenv("VK_AUTO_IMPORT_PREFETCH_DRAFTS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     t0 = time.monotonic()
     try:
-        if vk_fetch.ok and text and (not _looks_like_cancellation_notice(text)):
+        if (
+            prefetch_drafts
+            and vk_fetch.ok
+            and text
+            and (not _looks_like_cancellation_notice(text))
+        ):
             drafts, _festival_info = await vk_intake.build_event_drafts(
                 text,
                 photos=photos,

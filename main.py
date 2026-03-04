@@ -2144,8 +2144,19 @@ def ensure_jpeg(data: bytes, name: str) -> tuple[bytes, str]:
     if kind in {"webp", "avif"}:
         from PIL import Image
 
+        max_pixels_raw = (os.getenv("ENSURE_JPEG_MAX_PIXELS") or "").strip()
+        try:
+            max_pixels = int(max_pixels_raw) if max_pixels_raw else 20_000_000
+        except Exception:
+            max_pixels = 20_000_000
         bio_in = BytesIO(data)
         with Image.open(bio_in) as im:
+            try:
+                width, height = im.size
+            except Exception:
+                width, height = (0, 0)
+            if max_pixels > 0 and width > 0 and height > 0 and (width * height) > max_pixels:
+                raise ValueError(f"image too large to convert: {width}x{height} > {max_pixels} px")
             rgb = im.convert("RGB")
             bio_out = BytesIO()
             rgb.save(bio_out, format="JPEG")
@@ -3751,7 +3762,11 @@ async def upload_vk_photo(
                                 return data
 
                 img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
-                img_bytes, _ = ensure_jpeg(img_bytes, "image.jpg")
+                try:
+                    img_bytes, _ = ensure_jpeg(img_bytes, "image.jpg")
+                except Exception as exc:
+                    logging.warning("vk.upload convert_failed url=%s error=%s", url, exc)
+                    return None
                 if detect_image_type(img_bytes) == "jpeg":
                     validate_jpeg_markers(img_bytes)
                 form = FormData()
@@ -4919,9 +4934,13 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         bio = BytesIO()
         async with span("tg-send"):
             await bot.download(message.photo[-1].file_id, destination=bio)
-        data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
-        images.append((data, name))
-        logging.info("IMG download type=photo name=%s size=%d", name, len(data))
+        try:
+            data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
+        except Exception as exc:
+            logging.warning("IMG download convert_failed type=photo error=%s", exc)
+        else:
+            images.append((data, name))
+            logging.info("IMG download type=photo name=%s size=%d", name, len(data))
     if (
         message.document
         and message.document.mime_type
@@ -4931,9 +4950,17 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         async with span("tg-send"):
             await bot.download(message.document.file_id, destination=bio)
         name = message.document.file_name or "image.jpg"
-        data, name = ensure_jpeg(bio.getvalue(), name)
-        images.append((data, name))
-        logging.info("IMG download type=document name=%s size=%d", name, len(data))
+        try:
+            data, name = ensure_jpeg(bio.getvalue(), name)
+        except Exception as exc:
+            logging.warning(
+                "IMG download convert_failed type=document name=%s error=%s",
+                name,
+                exc,
+            )
+        else:
+            images.append((data, name))
+            logging.info("IMG download type=document name=%s size=%d", name, len(data))
     names = [n for _, n in images[:MAX_ALBUM_IMAGES]]
     logging.info(
         "IMG extract done count=%d names=%s limit=%d",
@@ -5116,7 +5143,11 @@ async def upload_images(
         if supabase_fallback_enabled:
             supabase_urls: list[str] = []
             for data, name in images[:limit]:
-                data, name = ensure_jpeg(data, name)
+                try:
+                    data, name = ensure_jpeg(data, name)
+                except Exception as exc:
+                    logging.warning("supabase.upload_images convert_failed name=%s error=%s", name, exc)
+                    continue
                 if not detect_image_type(data):
                     continue
                 hosted = await _upload_to_supabase(data, name)
@@ -5129,7 +5160,11 @@ async def upload_images(
     session = get_http_session()
 
     for data, name in images[:limit]:
-        data, name = ensure_jpeg(data, name)
+        try:
+            data, name = ensure_jpeg(data, name)
+        except Exception as exc:
+            logging.warning("upload_images convert_failed name=%s error=%s", name, exc)
+            continue
         logging.info("CATBOX candidate name=%s size=%d", name, len(data))
         kind = detect_image_type(data)
         if not kind:

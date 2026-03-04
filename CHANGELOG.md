@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 ### Fixed
+- **Telegraph Event Pages**: Removed synthetic blank `&#8203;` spacer right before `<ul>/<ol>` list blocks on event/source pages, while preserving other existing paragraph spacings.
 - **Deploy**: Excluded local backups, `__pycache__`, `.pytest_cache`, and temp directories from Docker build context to avoid oversized Fly deploy uploads.
+- **VK Auto Queue**: Prevented `/vk_auto_import` from being killed by OOM on small machines by making N+1 prefetch lightweight by default; full media/OCR/LLM prefetch is now opt-in via `VK_AUTO_IMPORT_PREFETCH_DRAFTS=1`.
+- **Ops Run / VK Inbox**: On app startup, orphaned `ops_run(status=running)` are marked as `crashed` and VK inbox locks are released, so queues recover automatically after restarts/OOM.
+- **Media**: Added a guardrail for WEBP/AVIF→JPEG conversion (`ENSURE_JPEG_MAX_PIXELS`, default `20000000`) to skip oversized images instead of risking OOM.
+- **Smart Update / Tickets**: Prevented donor compensation amounts (e.g. “компенсация 1063 руб.”) from being treated as ticket prices; blood donation actions are auto-marked free so Telegraph/VK summaries don’t show them as paid.
 
 ## [1.12.0] - 2026-03-04
 ### Highlights
