@@ -1,10 +1,10 @@
-import asyncio
 import types
 from datetime import date
 
 import pytest
 
 import main
+import smart_event_update as smart_event_update_mod
 import vk_intake
 from db import Database
 
@@ -76,6 +76,13 @@ def test_holiday_date_range_legacy_single_mm_dd():
     assert end == "2024-10-31"
 
 
+def test_holiday_date_range_movable_maslenitsa():
+    record = _record("movable:maslenitsa")
+    start, end = vk_intake._holiday_date_range(record, 2026)
+    assert start == "2026-02-16"
+    assert end == "2026-02-22"
+
+
 def test_event_date_matches_holiday_with_tolerance_before():
     record = _record("31.10")
     assert vk_intake._event_date_matches_holiday(record, "2025-10-30", None, 1)
@@ -103,26 +110,12 @@ def test_event_date_matches_partial_range_with_tolerance():
 
 
 @pytest.mark.asyncio
-async def test_persist_event_passes_holiday_range_to_ensure(tmp_path, monkeypatch):
+async def test_smart_update_passes_holiday_range_to_ensure(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_assign(event):
-        return [], len(event.description or ""), "", False
-
-    scheduled: list[str] = []
-
-    async def fake_schedule(db_obj, event_obj, drain_nav: bool = True, skip_vk_sync: bool = False):
-        scheduled.append(event_obj.festival)
-        return {}
-
-    async def fake_rebuild(*_args, **_kwargs):
-        return False
-
-    sync_calls: list[str] = []
-
-    async def fake_sync_page(db_obj, name: str):
-        sync_calls.append(name)
+    monkeypatch.setenv("REGION_FILTER_ENABLED", "0")
+    monkeypatch.setattr(smart_event_update_mod, "SMART_UPDATE_LLM_DISABLED", True)
 
     captured: dict[str, str | None] = {}
 
@@ -142,32 +135,32 @@ async def test_persist_event_passes_holiday_range_to_ensure(tmp_path, monkeypatc
         normalized_aliases=("тест",),
     )
 
-    monkeypatch.setattr(main, "assign_event_topics", fake_assign)
-    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule)
-    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
-    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "ensure_festival", fake_ensure)
     monkeypatch.setattr(main, "get_holiday_record", lambda value: record)
 
-    draft = vk_intake.EventDraft(
+    candidate = smart_event_update_mod.EventCandidate(
+        source_type="telegram",
+        source_url="test://holiday/1",
+        source_text="text",
+        raw_excerpt="text",
         title="Праздник",
         date="2025-10-30",
         time="20:00",
+        location_name="Калининград",
+        city="Калининград",
         festival="Тестовый фестиваль",
-        source_text="text",
     )
 
-    await vk_intake.persist_event_and_pages(draft, [], db)
-    await asyncio.sleep(0)
+    res = await smart_event_update_mod.smart_event_update(
+        db,
+        candidate,
+        check_source_url=False,
+        schedule_tasks=False,
+    )
+    assert res.status == "created"
 
-    current_year = date.today().year
     assert captured["name"] == "Тестовый фестиваль"
-    assert captured["start_date"] == f"{current_year}-10-31"
-    assert captured["end_date"] == f"{current_year}-11-02"
+    assert captured["start_date"] == "2025-10-31"
+    assert captured["end_date"] == "2025-11-02"
     assert captured["description"] == "Описание"
     assert captured["aliases"] == ["тест"]
-
-    assert scheduled == ["Тестовый фестиваль"]
-    assert sync_calls == ["Тестовый фестиваль"]
-
-

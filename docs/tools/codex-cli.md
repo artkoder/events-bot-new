@@ -93,3 +93,4 @@ codex exec --output-schema ./schema.json -o artifacts/codex/reports/report.json 
 
 1. `codex exec resume --last "исправь найденные проблемы"`
 2. Всегда проверяй `git diff` перед коммитом.
+3. Live E2E: запуск локального бота и чеклист — `docs/operations/e2e-testing.md`.

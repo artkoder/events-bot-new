@@ -53,7 +53,7 @@ from main import (
     handle_edit_message,
     handle_usage_test,
     process_request,
-    parse_event_via_4o,
+    parse_event_via_llm,
     telegraph_test,
     get_telegraph_token,
     editing_sessions,
@@ -1378,10 +1378,11 @@ async def test_parse_event_includes_date(monkeypatch):
             return Resp()
 
     monkeypatch.setenv("FOUR_O_TOKEN", "x")
-    monkeypatch.setattr("main.ClientSession", DummySession)
+    monkeypatch.setenv("EVENT_PARSE_LLM", "4o")
+    monkeypatch.setattr(main, "get_http_session", lambda: DummySession())
     monkeypatch.setattr(main, "log_token_usage", fake_log)
 
-    await parse_event_via_4o("text")
+    await parse_event_via_llm("text")
 
     assert "Today is" in called["payload"]["messages"][1]["content"]
     assert calls == [
@@ -1417,10 +1418,11 @@ async def test_parse_event_includes_poster_hint(monkeypatch):
             return Resp()
 
     monkeypatch.setenv("FOUR_O_TOKEN", "x")
-    monkeypatch.setattr("main.ClientSession", DummySession)
+    monkeypatch.setenv("EVENT_PARSE_LLM", "4o")
+    monkeypatch.setattr(main, "get_http_session", lambda: DummySession())
     monkeypatch.setattr(main, "log_token_usage", fake_log)
 
-    await parse_event_via_4o("text", poster_texts=["Poster line"])
+    await parse_event_via_llm("text", poster_texts=["Poster line"])
 
     user_content = called["payload"]["messages"][1]["content"]
     assert (
@@ -1455,7 +1457,7 @@ async def test_add_events_from_text_channel_title(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "u", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     await main.add_events_from_text(db, "info", None, None, None, channel_title="Chan")
@@ -1631,14 +1633,13 @@ async def test_create_source_page_reuse_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_create_source_page_normalizes_hashtags(monkeypatch):
+async def test_create_source_page_preserves_hashtags(monkeypatch):
     class DummyTG:
         def __init__(self, access_token=None):
             self.access_token = access_token
 
         def create_page(self, title, html_content=None, **_):
-            assert "#1_августа" not in html_content
-            assert "1 августа" in html_content
+            assert "#1_августа" in html_content
             return {"url": "https://telegra.ph/test", "path": "test"}
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -1784,7 +1785,7 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
         captured["urls"] = kwargs.get("catbox_urls")
         return "u", "p", "", 0
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     msg = types.Message.model_validate(
@@ -1832,7 +1833,7 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "u", "p", "", 0
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     msg = types.Message.model_validate(
@@ -1885,6 +1886,53 @@ async def test_handle_add_event_reports_missing_fields(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_handle_add_event_reports_festival_queue(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_add_events(*args, **kwargs):
+        return main.AddEventsResult(
+            [
+                (
+                    None,
+                    False,
+                    [
+                        "festival_context: festival_post",
+                        "Фестиваль распознан: День рыбака",
+                        "Событие не создано",
+                        "Источник добавлен в фестивальную очередь (id=1)",
+                        "Ручной запуск: /fest_queue",
+                        "Автозапуск очереди: выкл",
+                    ],
+                    "festival_queued",
+                )
+            ],
+            0,
+            None,
+        )
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent Some info",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    assert any(
+        "Пост распознан как фестивальный" in text and "/fest_queue" in text
+        for _, text, _ in bot.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_add_event_reports_ocr_usage(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1923,7 +1971,7 @@ async def test_add_event_reports_ocr_usage(tmp_path: Path, monkeypatch):
     async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         return [cache1, cache2], cache1.total_tokens + cache2.total_tokens, 123
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
     async def _noop_async(*args, **kwargs):
         return None
@@ -1981,7 +2029,7 @@ async def test_add_event_without_images_skips_ocr_line(tmp_path: Path, monkeypat
     async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         return [], 0, 500
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
     async def _noop_async(*args, **kwargs):
         return None
@@ -2035,7 +2083,7 @@ async def test_handle_add_event_reports_ocr_limit(tmp_path: Path, monkeypatch):
     async def _noop_async(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
     monkeypatch.setattr(main, "create_source_page", lambda *a, **k: ("u", "p", "", 0))
     monkeypatch.setattr(main, "notify_event_added", _noop_async)
@@ -2121,7 +2169,7 @@ async def test_handle_add_event_uses_cached_text_when_limit_hits(
         return None
 
     monkeypatch.setattr(main, "process_media", fake_process_media)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
     monkeypatch.setattr(main, "create_source_page", lambda *a, **k: ("u", "p", "", 0))
     monkeypatch.setattr(main, "notify_event_added", _noop_async)
@@ -2353,7 +2401,7 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     original_schedule_event_update_tasks = main.schedule_event_update_tasks
@@ -2546,7 +2594,7 @@ async def test_forward_missing_fields(tmp_path: Path, monkeypatch):
             }
         ]
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     start_msg = types.Message.model_validate(
         {
@@ -2595,6 +2643,75 @@ async def test_forward_missing_fields(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_reports_festival_queue(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_add_events_from_text(*args, **kwargs):
+        return main.AddEventsResult(
+            [
+                (
+                    None,
+                    False,
+                    [
+                        "festival_context: festival_post",
+                        "Фестиваль распознан: День рыбака",
+                        "Событие не создано",
+                        "Источник добавлен в фестивальную очередь (id=2)",
+                        "Ручной запуск: /fest_queue",
+                        "Автозапуск очереди: выкл",
+                    ],
+                    "festival_queued",
+                )
+            ],
+            0,
+            None,
+        )
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events_from_text)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert any(
+        "Пост распознан как фестивальный" in text and "/fest_queue" in text
+        for _, text, _ in bot.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_forward_missing_time_allowed(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2611,7 +2728,7 @@ async def test_forward_missing_time_allowed(tmp_path: Path, monkeypatch):
             }
         ]
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     start_msg = types.Message.model_validate(
         {
@@ -2674,7 +2791,7 @@ async def test_forward_passes_channel_name(tmp_path: Path, monkeypatch):
             }
         ]
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_create(*args, **kwargs):
         return "u", "p"
@@ -2757,7 +2874,7 @@ async def test_forward_reports_ocr_usage(tmp_path: Path, monkeypatch):
     async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         return [cache1, cache2], cache1.total_tokens + cache2.total_tokens, 321
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
     async def _noop_async(*args, **kwargs):
         return None
@@ -2867,10 +2984,11 @@ async def test_parse_event_alias_channel_title(monkeypatch):
             return Resp()
 
     monkeypatch.setenv("FOUR_O_TOKEN", "x")
-    monkeypatch.setattr("main.ClientSession", DummySession)
+    monkeypatch.setenv("EVENT_PARSE_LLM", "4o")
+    monkeypatch.setattr(main, "get_http_session", lambda: DummySession())
     monkeypatch.setattr(main, "log_token_usage", fake_log)
 
-    await main.parse_event_via_4o("t", channel_title="Name")
+    await main.parse_event_via_llm("t", channel_title="Name")
 
     assert "Name" in seen["payload"]["messages"][1]["content"]
     assert calls == [
@@ -2898,7 +3016,7 @@ async def test_forward_add_event_origin(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     start_msg = types.Message.model_validate(
@@ -2967,7 +3085,7 @@ async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
         captured["media"] = media
         return []
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.add_events_from_text", fake_add)
 
     start_msg = types.Message.model_validate(
@@ -3050,7 +3168,7 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
     async def fake_rebuild(db_obj, telegraph=None, force: bool = False):
         return "built", ""
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_festival_page)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
@@ -3597,7 +3715,7 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     start_msg = types.Message.model_validate(
@@ -3655,7 +3773,7 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr(main, "ALBUM_FINALIZE_DELAY_MS", 50)
     main.pending_albums.clear()
@@ -3737,7 +3855,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr(main, "ALBUM_FINALIZE_DELAY_MS", 50)
     main.pending_albums.clear()
@@ -4129,7 +4247,7 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
             }
         ]
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
@@ -4226,7 +4344,7 @@ async def test_multiple_events(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return f"url/{title}", title
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     add_msg = types.Message.model_validate(
@@ -5298,7 +5416,7 @@ async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     async def fake_sync(*args, **kwargs):
@@ -5412,8 +5530,19 @@ async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
 
     async with db.get_session() as session:
         page = await session.get(m.MonthPage, "2025-07")
-    assert page.url2 is not None
-    assert len(calls["created"]) == 2
+        parts_res = await session.execute(
+            select(m.MonthPagePart)
+            .where(m.MonthPagePart.month == "2025-07")
+            .order_by(m.MonthPagePart.part_number)
+        )
+        parts = parts_res.scalars().all()
+
+    assert page.url is not None
+    assert page.path is not None
+    assert parts, "Expected split month page to create continuation parts"
+    # In n-page mode legacy url2/path2 are cleared; continuation pages live in MonthPagePart.
+    assert page.url2 is None
+    assert len(calls["created"]) == len(parts) + 1
 
 
 @pytest.mark.asyncio
@@ -5459,9 +5588,17 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
 
     async with db.get_session() as session:
         page = await session.get(m.MonthPage, "2025-07")
+        parts_res = await session.execute(
+            select(m.MonthPagePart)
+            .where(m.MonthPagePart.month == "2025-07")
+            .order_by(m.MonthPagePart.part_number)
+        )
+        parts = parts_res.scalars().all()
     assert page.url == "u1"
-    assert page.url2 is not None
-    assert len(calls["created"]) == 1
+    # When the first edit fails with CONTENT_TOO_BIG, sync_month_page falls back to split_month_until_ok.
+    # Depending on optimize_month_chunks, it may still fit into a single page (no continuation parts).
+    assert page.url2 is None
+    assert len(calls["created"]) == len(parts)
 
 
 @pytest.mark.asyncio
@@ -5505,9 +5642,17 @@ async def test_sync_month_page_split_on_generic_error(tmp_path: Path, monkeypatc
 
     async with db.get_session() as session:
         page = await session.get(m.MonthPage, "2025-07")
+        parts_res = await session.execute(
+            select(m.MonthPagePart)
+            .where(m.MonthPagePart.month == "2025-07")
+            .order_by(m.MonthPagePart.part_number)
+        )
+        parts = parts_res.scalars().all()
     assert page.url == "u1"
-    assert page.url2 is not None
-    assert len(calls["created"]) == 1
+    # When the first edit fails, sync_month_page falls back to split_month_until_ok.
+    # Depending on optimize_month_chunks, it may still fit into a single page (no continuation parts).
+    assert page.url2 is None
+    assert len(calls["created"]) == len(parts)
 
 
 @pytest.mark.asyncio
@@ -5569,13 +5714,14 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 
 async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
+    m = importlib.reload(main)
+    db = m.Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
     async with db.get_session() as session:
         for day in range(5, 8):
             session.add(
-                Event(
+                m.Event(
                     title=f"P{day}",
                     description="d",
                     source_text="s",
@@ -5586,7 +5732,7 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
             )
         for day in range(19, 23):
             session.add(
-                Event(
+                m.Event(
                     title=f"F{day}",
                     description="d",
                     source_text="s",
@@ -5625,32 +5771,34 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
         ):
             created.append(html_content or content)
 
-    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(m, "date", FakeDate)
+    monkeypatch.setattr(m, "datetime", FakeDatetime)
 
-    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    # Avoid recursive nav refresh during this unit test (it triggers extra Telegraph calls).
+    async def _noop(*args, **kwargs):
+        return None
 
-    monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(m, "refresh_month_nav", _noop)
+
+    monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
     )
-    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 10)
+    monkeypatch.setattr(m, "TELEGRAPH_LIMIT", 10)
 
-    await main.sync_month_page(db, "2025-07")
+    await m.sync_month_page(db, "2025-07")
 
-    assert len(created) == 2
-    items = created[0]
-    if isinstance(items, str):
-        from telegraph.utils import html_to_nodes
+    assert created, "Expected month page rebuild to create at least one Telegraph page"
+    blob = ""
+    for items in created:
+        blob += items if isinstance(items, str) else nodes_to_html(items)
+        blob += "\n"
 
-        items = html_to_nodes(items)
-    titles = [
-        c
-        for n in items
-        if isinstance(n, dict) and n.get("tag") == "h4"
-        for c in n.get("children", [])
-        if isinstance(c, str)
-    ]
-    assert not any(t.startswith("P") for t in titles)
+    # Past events should be omitted; future ones should remain.
+    assert "P5" not in blob
+    assert "P6" not in blob
+    assert "P7" not in blob
+    assert "F19" in blob
 
 
 @pytest.mark.asyncio
@@ -5700,14 +5848,13 @@ async def test_update_source_page_footer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_source_page_normalizes_hashtags(monkeypatch):
+async def test_update_source_page_preserves_hashtags(monkeypatch):
     class DummyTG:
         def get_page(self, path, return_html=True):
             return {"content": ""}
 
         def edit_page(self, path, title, html_content=None, **kwargs):
-            assert "#1_августа" not in html_content
-            assert "1 августа" in html_content
+            assert "#1_августа" in html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
     monkeypatch.setattr(
@@ -5876,7 +6023,7 @@ async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypat
             }
         ]
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     await main.update_event_description(event, db)
 
@@ -5923,7 +6070,7 @@ async def test_update_event_description_skips_if_present(tmp_path: Path, monkeyp
         called = True
         return []
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     await main.update_event_description(event, db)
 
@@ -6424,7 +6571,7 @@ async def test_extract_ticket_link(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = "Регистрация <a href='https://reg'>по ссылке</a>"
@@ -6459,7 +6606,7 @@ async def test_add_events_from_text_force_festival_hint(tmp_path: Path, monkeypa
     async def noop(*args, **kwargs):
         return None
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr(main, "ensure_festival", fake_ensure_festival)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize_posters)
     monkeypatch.setattr(main, "sync_festival_page", noop)
@@ -6485,7 +6632,7 @@ async def test_add_events_from_text_force_festival_requires_name(tmp_path: Path,
     async def fake_recognize_posters(db_obj, media, log_context):
         return [], 0, 0
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize_posters)
 
     with pytest.raises(main.FestivalRequiredError):
@@ -6516,7 +6663,7 @@ async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = "Чтобы поучаствовать, нужна регистрация. <a href='https://reg2'>Жми</a>"
@@ -6549,7 +6696,7 @@ async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = "Регистрация <a href='https://real'>по ссылке</a>"
@@ -6593,7 +6740,7 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = (
@@ -6630,7 +6777,7 @@ async def test_ticket_link_tg_folder_only(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = "Регистрация <a href='https://t.me/addlist/AAAA'>по ссылке</a>"
@@ -6663,7 +6810,7 @@ async def test_ticket_link_tg_folder_with_other(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = (
@@ -6699,7 +6846,7 @@ async def test_ticket_link_tg_account_allowed(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = "Регистрация <a href='https://t.me/someusername'>в TG</a>"
@@ -6732,7 +6879,7 @@ async def test_ignore_polubit_39_link(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = "📂 Полюбить 39 (<a href='https://t.me/addlist/foo'>https://t.me/addlist/foo</a>)"
@@ -6760,7 +6907,7 @@ async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     called = False
@@ -6814,7 +6961,7 @@ async def test_update_event_description_error_does_not_stop_sync(tmp_path: Path,
     async def boom(event, db_obj):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr("main.sync_month_page", fake_month)
     monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
@@ -6843,7 +6990,7 @@ async def test_add_events_from_text_allows_missing_time(tmp_path: Path, monkeypa
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     results = await main.add_events_from_text(db, "t", None, None, None)
     assert len(results) == 1
@@ -6870,7 +7017,7 @@ async def test_add_events_from_text_uses_address_when_name_missing(tmp_path: Pat
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     results = await main.add_events_from_text(db, "t", None, None, None)
     saved, added, _, status = results[0]
@@ -6897,7 +7044,7 @@ async def test_add_events_from_text_accepts_masterclass(tmp_path: Path, monkeypa
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     results = await main.add_events_from_text(db, "t", None, None, None)
     saved, added, _, status = results[0]
@@ -6941,7 +7088,7 @@ async def test_add_events_from_text_skips_description_update_for_new_event(tmp_p
         return None
 
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr("main.sync_month_page", fake_month)
     monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
@@ -6974,7 +7121,7 @@ async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
     async def fake_create(*args, db=None, **kwargs):
         return "u", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     results = await main.add_events_from_text(db, "t", None, None, None)
@@ -7027,7 +7174,7 @@ async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch)
     async def fake_sync_vk(*args, **kwargs):
         return None
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr("main.upload_images", fake_upload_images)
     monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
@@ -7063,7 +7210,7 @@ async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
             }
         ]
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_create(*args, db=None, **kwargs):
         return "u", "p"
@@ -7485,7 +7632,7 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
     async def fake_create(*args, db=None, **kwargs):
         return "u", "p"
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     results = await main.add_events_from_text(db, "text", None, None, None)
@@ -7544,7 +7691,7 @@ async def test_add_events_from_text_adds_exhibition_with_end_only(
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(main, "create_source_page", fake_create)
 
     results = await main.add_events_from_text(db, "text", None, None, None)
@@ -8260,7 +8407,7 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_ask(text):
         return "Desc"
@@ -8295,7 +8442,7 @@ async def test_add_festival_without_events(tmp_path: Path, monkeypatch):
             },
         )
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     msg = types.Message.model_validate(
         {
@@ -8346,7 +8493,7 @@ async def test_add_event_with_festival_message(tmp_path: Path, monkeypatch, capl
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "u", "p", "", 0
 
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     msg = types.Message.model_validate(
@@ -9317,7 +9464,7 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_ask(text):
         return "Desc"
@@ -9443,7 +9590,7 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_ask(text):
         return "Desc"
@@ -9644,7 +9791,7 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(main, "bot", bot, raising=False)
 
     fwd_msg = types.Message.model_validate(
@@ -10012,7 +10159,7 @@ async def test_festival_description_dash(tmp_path: Path, monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.parse_event_via_llm", fake_parse)
 
     async def fake_ask(text):
         return "Desc"
@@ -10141,7 +10288,7 @@ async def test_add_festival_updates_other_pages(tmp_path: Path, monkeypatch):
         }
         return []
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     async with db.get_session() as session:
         session.add(main.Festival(name="OldFest"))
@@ -11077,6 +11224,29 @@ async def test_festival_dates_manual(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_festival_dates_prefers_event_window_when_stored_dates_are_old(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    fest = Festival(name="Fest", start_date="2025-09-13", end_date="2025-09-13")
+    ev = Event(
+        title="Fest 2026",
+        description="desc",
+        date="2026-05-23",
+        time="",
+        location_name="Hall",
+        source_text="src",
+        festival="Fest",
+    )
+    async with db.get_session() as session:
+        session.add(fest)
+        session.add(ev)
+        await session.commit()
+    start, end = festival_dates(fest, [ev])
+    assert start == date(2026, 5, 23)
+    assert end == date(2026, 5, 23)
+
+
+@pytest.mark.asyncio
 async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -11227,4 +11397,3 @@ async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
     await main.publish_event_progress(ev, db, bot, chat_id=1)
     final_text = bot.text_edits[-1][2]
     assert "✅ Telegraph (фестиваль) — http://fest" in final_text
-

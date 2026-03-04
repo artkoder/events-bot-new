@@ -280,11 +280,15 @@ class TestE2EDomIskusstv:
         
         async def mock_update_ticket_status(db, event_id, status, url):
             return True
+
+        async def mock_has_parser_source(*args, **kwargs):
+            return True
         
         async def mock_update_linked(*args, **kwargs):
             pass
         
         monkeypatch.setattr("source_parsing.dom_iskusstv.find_existing_event", mock_find_existing)
+        monkeypatch.setattr("source_parsing.dom_iskusstv.event_has_parser_source", mock_has_parser_source)
         monkeypatch.setattr("source_parsing.dom_iskusstv.update_event_ticket_status", mock_update_ticket_status)
         monkeypatch.setattr("source_parsing.dom_iskusstv.update_linked_events", mock_update_linked)
         

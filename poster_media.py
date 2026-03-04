@@ -18,6 +18,7 @@ __all__ = [
     "collect_poster_texts",
     "build_poster_summary",
     "apply_ocr_results_to_media",
+    "is_supabase_storage_url",
 ]
 
 
@@ -28,6 +29,7 @@ class PosterMedia:
     data: bytes = field(repr=False)
     name: str
     catbox_url: str | None = None
+    supabase_url: str | None = None
     digest: str | None = None
     ocr_text: str | None = None
     ocr_title: str | None = None
@@ -89,6 +91,13 @@ def _ensure_ocr_http() -> None:
     _OCR_CONFIGURED = True
 
 
+def is_supabase_storage_url(url: str | None) -> bool:
+    raw = str(url or "").strip().lower()
+    if not raw:
+        return False
+    return "/storage/v1/object/" in raw or "supabase.co/storage/" in raw
+
+
 async def _run_ocr(poster: PosterMedia, model: str, detail: str) -> None:
     try:
         result: OcrResult = await run_ocr(poster.data, model=model, detail=detail)
@@ -143,6 +152,8 @@ async def process_media(
         )
         for poster, url in zip(posters, catbox_urls):
             poster.catbox_url = url
+            if is_supabase_storage_url(url):
+                poster.supabase_url = url
 
     if need_ocr:
         _ensure_ocr_http()

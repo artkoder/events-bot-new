@@ -15,11 +15,7 @@ def test_apply_festival_nav_insert_when_missing():
     assert replaced is False
     assert updated.startswith('<p>start</p>')
     assert updated.count(FEST_NAV_START) == 1
-    assert '<!-- FEST_NAV_START -->' not in updated
-    assert '<!-- FEST_NAV_END -->' not in updated
-    assert '<!--FEST_NAV_START-->' not in updated
-    assert '<!--FEST_NAV_END-->' not in updated
-    assert '<!--NAV_HASH:' in updated
+    assert "#near-festivals:hash:" in updated
     assert updated.endswith(FOOTER_LINK_HTML)
 
 
@@ -112,4 +108,3 @@ def test_apply_footer_link_idempotent():
     second = main.apply_footer_link(first)
     assert first == second
     assert second.count('https://t.me/kenigevents') == 1
-

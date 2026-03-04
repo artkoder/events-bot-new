@@ -180,7 +180,13 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     async def fake_fetch(*args, **kwargs):
         return []
 
-    draft = vk_intake.EventDraft(title="T", date="2025-09-02", time="10:00", source_text="T")
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-02",
+        time="10:00",
+        venue="Локация",
+        source_text="T",
+    )
 
     async def fake_build(
         text,
@@ -206,10 +212,17 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     captured = {}
 
-    async def fake_mark_imported(
-        db_, inbox_id, batch_id, operator_id, event_id, event_date
+    async def fake_mark_imported_events(
+        db_,
+        *,
+        inbox_id: int,
+        batch_id: str,
+        operator_id: int,
+        event_ids=None,
+        event_dates=None,
     ):
-        captured["event_id"] = event_id
+        ids = list(event_ids or [])
+        captured["event_id"] = ids[0] if ids else None
 
     tasks = []
 
@@ -230,7 +243,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
     async def fake_assign_event_topics(event_obj):
@@ -301,6 +314,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         title="T",
         date="2025-09-02",
         time="10:00",
+        venue="Локация",
         source_text="T",
         poster_media=poster_media,
         ocr_tokens_spent=12,
@@ -323,15 +337,15 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
     ):
         return [draft], None
 
-    async def fake_mark_imported(db_, inbox_id, batch_id, operator_id, event_id, event_date):
-        pass
+    async def fake_mark_imported_events(*_args, **_kwargs):
+        return None
 
     async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None, **kwargs):
         return "job"
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
     bot = DummyBot()
@@ -365,6 +379,7 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
         title="T",
         date="2025-09-02",
         time="10:00",
+        venue="Локация",
         source_text="T",
         poster_media=poster_media,
         ocr_tokens_spent=0,
@@ -375,15 +390,15 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
     async def fake_build(*args, **kwargs):
         return [draft], None
 
-    async def fake_mark_imported(*args, **kwargs):
-        pass
+    async def fake_mark_imported_events(*_args, **_kwargs):
+        return None
 
     async def fake_enqueue_job(*args, **kwargs):
         return "job"
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
     bot = DummyBot()
@@ -440,7 +455,7 @@ async def test_vkrev_import_flow_passes_festival_hint(tmp_path, monkeypatch):
         ]
 
     def fake_require(name: str):
-        if name == "LOCAL_TZ": return timezone.utc; assert name == "parse_event_via_4o"
+        if name == "LOCAL_TZ": return timezone.utc; assert name == "parse_event_via_llm"
         return fake_parse
 
     async def fake_persist(draft, photos, db_, source_post_url=None):
@@ -456,15 +471,15 @@ async def test_vkrev_import_flow_passes_festival_hint(tmp_path, monkeypatch):
             is_free=False,
         )
 
-    async def fake_mark_imported(*args, **kwargs):
-        pass
+    async def fake_mark_imported_events(*_args, **_kwargs):
+        return None
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download_photo_media)
     monkeypatch.setattr(vk_intake.poster_ocr, "recognize_posters", fake_recognize_posters)
     monkeypatch.setattr(vk_intake, "require_main_attr", fake_require)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
 
     bot = DummyBot()
     await main._vkrev_import_flow(
@@ -506,12 +521,14 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
         title="First",
         date="2025-09-02",
         time="10:00",
+        venue="Локация",
         source_text="First",
     )
     draft2 = vk_intake.EventDraft(
         title="Second",
         date="2025-09-03",
         time="12:00",
+        venue="Локация",
         source_text="Second",
     )
 
@@ -520,10 +537,11 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
     captured_mark_id: dict[str, int] = {}
 
-    async def fake_mark_imported(
-        db_, inbox_id, batch_id, operator_id, event_id, event_date
+    async def fake_mark_imported_events(
+        db_, *, inbox_id: int, batch_id: str, operator_id: int, event_ids=None, event_dates=None
     ):
-        captured_mark_id["event_id"] = event_id
+        ids = list(event_ids or [])
+        captured_mark_id["event_id"] = ids[0] if ids else None
 
     tasks: list[str] = []
 
@@ -543,7 +561,7 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
     bot = DummyBot()
@@ -621,13 +639,13 @@ async def test_vkrev_import_flow_notifies_on_persist_failure(tmp_path, monkeypat
 
     mark_calls: list[tuple[Any, Any]] = []
 
-    async def fake_mark_imported(*args, **kwargs):
+    async def fake_mark_imported_events(*args, **kwargs):
         mark_calls.append((args, kwargs))
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setenv("ADMIN_CHAT_ID", "1234")
 
     bot = DummyBot()
@@ -791,7 +809,7 @@ async def test_vkrev_import_flow_creates_festival_without_events_from_llm(
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize_posters)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse, raising=False)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
@@ -840,6 +858,7 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
         title="T",
         date="2025-09-02",
         time="10:00",
+        venue="Локация",
         source_text="T",
     )
 
@@ -848,7 +867,7 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
 
     mark_called = False
 
-    async def fake_mark_imported(*args, **kwargs):
+    async def fake_mark_imported_events(*args, **kwargs):
         nonlocal mark_called
         mark_called = True
 
@@ -857,7 +876,7 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
 
     bot = DummyBot()
@@ -899,6 +918,7 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
         title="T",
         date="2025-09-02",
         time="10:00",
+        venue="Локация",
         source_text="Source",
         poster_media=[poster],
     )
@@ -906,8 +926,8 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
     async def fake_build(*args, **kwargs):
         return [draft], fest_payload
 
-    async def fake_mark_imported(*args, **kwargs):
-        pass
+    async def fake_mark_imported_events(*args, **kwargs):
+        return None
 
     async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None, **kwargs):
         if task == JobTask.telegraph_build:
@@ -944,7 +964,7 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
@@ -1014,6 +1034,7 @@ async def test_vk_persist_event_updates_ocr_records(tmp_path, monkeypatch):
             title="T",
             date="2025-09-02",
             time="10:00",
+            venue="Локация",
             source_text="T",
             poster_media=[poster],
             ocr_tokens_spent=total,
@@ -1110,7 +1131,7 @@ async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_pa
 
     monkeypatch.setattr(vk_intake, "process_media", fake_process_media)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
 
     draft, festival_payload = await vk_intake.build_event_draft(
@@ -1196,7 +1217,7 @@ async def test_build_event_payload_includes_operator_extra(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "Original announcement", operator_extra=" Extra context "
@@ -1220,7 +1241,7 @@ async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "", operator_extra="  Only extra  "
@@ -1261,7 +1282,7 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 4242
     message = SimpleNamespace(
@@ -1332,7 +1353,7 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 5151
     url = "https://example.com/foo(bar)"
@@ -1403,7 +1424,7 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 5252
     message = SimpleNamespace(
@@ -1471,7 +1492,7 @@ async def test_handle_vk_extra_message_forces_festival(monkeypatch):
         ]
 
     monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     user_id = 5353
     message = SimpleNamespace(
@@ -1621,7 +1642,7 @@ async def test_build_event_draft_handles_ocr_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
     monkeypatch.setattr(vk_intake, "process_media", fake_process)
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
 
     draft, festival_payload = await vk_intake.build_event_draft(
@@ -1658,6 +1679,7 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
         title="T",
         date="2025-09-02",
         time="10:00",
+        venue="Локация",
         source_text="T",
     )
 
@@ -1679,11 +1701,19 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
 
     captured: dict[str, Any] = {}
 
-    async def fake_mark_imported(
-        _db, _inbox_id, _batch_id, _operator_id, event_id, event_date
+    async def fake_mark_imported_events(
+        _db,
+        *,
+        inbox_id: int,
+        batch_id: str,
+        operator_id: int,
+        event_ids=None,
+        event_dates=None,
     ):
-        captured["event_id"] = event_id
-        captured["event_date"] = event_date
+        ids = list(event_ids or [])
+        dates = list(event_dates or [])
+        captured["event_id"] = ids[0] if ids else None
+        captured["event_date"] = dates[0] if dates else None
 
     async def fake_enqueue_job(
         db_, eid, task, depends_on=None, coalesce_key=None, **kwargs
@@ -1708,7 +1738,7 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
     monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)
     monkeypatch.setattr(main, "ensure_festival", fake_ensure_festival)
@@ -1796,7 +1826,7 @@ async def test_vkrev_import_flow_marks_supabase_result(tmp_path, monkeypatch):
             is_free=False,
         )
 
-    async def fake_mark_imported(*args, **kwargs):
+    async def fake_mark_imported_events(*args, **kwargs):
         return None
 
     async def fake_sync(*args, **kwargs):
@@ -1807,7 +1837,7 @@ async def test_vkrev_import_flow_marks_supabase_result(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync)
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync)
@@ -1870,8 +1900,17 @@ async def test_vkrev_import_flow_supabase_error_does_not_abort(tmp_path, monkeyp
 
     captured: dict[str, Any] = {}
 
-    async def fake_mark_imported(_db, inbox_id, batch_id, operator_id, event_id, event_date):
-        captured["event_id"] = event_id
+    async def fake_mark_imported_events(
+        _db,
+        *,
+        inbox_id: int,
+        batch_id: str,
+        operator_id: int,
+        event_ids=None,
+        event_dates=None,
+    ):
+        ids = list(event_ids or [])
+        captured["event_id"] = ids[0] if ids else None
 
     async def fake_sync(*args, **kwargs):
         return None
@@ -1881,7 +1920,7 @@ async def test_vkrev_import_flow_supabase_error_does_not_abort(tmp_path, monkeyp
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
-    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_review, "mark_imported_events", fake_mark_imported_events)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync)
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync)

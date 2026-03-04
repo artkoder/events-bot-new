@@ -21,6 +21,7 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from db import optimize, wal_checkpoint_truncate, vacuum
+from heavy_ops import current_heavy_meta, describe_heavy_meta, heavy_operation
 from runtime import get_running_main
 
 
@@ -109,7 +110,7 @@ def _env_enabled(key: str, *, default: bool = False) -> bool:
     raw = os.getenv(key)
     if raw is None:
         return default
-    return raw == "1"
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class BatchProgress:
@@ -382,14 +383,49 @@ def schedule_event_batch(
 
 _scheduler: AsyncIOScheduler | None = None
 _run_meta: dict[str, tuple[str, float]] = {}
+_heavy_job_lock = asyncio.Lock()
+
+# Jobs that can take minutes/hours (Kaggle/LLM/rendering) and should not overlap in prod.
+_HEAVY_JOB_IDS: set[str] = {
+    "tg_monitoring",
+    "vk_auto_import",
+    "source_parsing",
+    "source_parsing_day",
+    "festival_queue",
+    "3di_scheduler",
+    "nightly_page_sync",
+    "telegraph_cache_sanitize",
+}
 
 
 def _job_next_run(job):
     return getattr(job, "next_run_time", None) or getattr(job, "next_run_at", None)
 
 
-def _job_wrapper(job_id: str, func):
+def _job_wrapper(job_id: str, func, *, notify_skip: Callable[[str, str], None] | None = None):
     async def _run(*args, **kwargs):
+        serialize_heavy = (os.getenv("SCHED_SERIALIZE_HEAVY_JOBS") or "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        is_heavy = job_id in _HEAVY_JOB_IDS
+        guard_mode_raw = (os.getenv("SCHED_HEAVY_GUARD_MODE") or "").strip().lower()
+        if guard_mode_raw in {"0", "off", "false", "no", "disable", "disabled"}:
+            guard_mode = "off"
+        elif guard_mode_raw in {"wait", "block", "serialize"}:
+            guard_mode = "wait"
+        elif guard_mode_raw in {"skip", "try", "nonblocking", "non-blocking"}:
+            guard_mode = "skip"
+        else:
+            # Backwards-compatible default: old "serialize" mode implies waiting.
+            guard_mode = "wait" if serialize_heavy else "skip"
+        timeout_raw = (os.getenv("SCHED_HEAVY_TRY_TIMEOUT_SEC") or "0.2").strip()
+        try:
+            guard_timeout = max(0.0, float(timeout_raw))
+        except ValueError:
+            guard_timeout = 0.2
         run_id, start = _run_meta.get(job_id, (uuid4().hex, _time.perf_counter()))
         done = asyncio.Event()
 
@@ -404,12 +440,56 @@ def _job_wrapper(job_id: str, func):
                     took_ms,
                 )
 
-        hb_task = asyncio.create_task(heartbeat())
-        try:
-            return await func(*args, run_id=run_id, **kwargs)
-        finally:
-            done.set()
-            hb_task.cancel()
+        async def _execute():
+            hb_task = asyncio.create_task(heartbeat())
+            try:
+                return await func(*args, run_id=run_id, **kwargs)
+            finally:
+                done.set()
+                hb_task.cancel()
+
+        async def _run_guarded():
+            if not is_heavy or guard_mode == "off":
+                return await _execute()
+
+            if guard_mode == "skip":
+                async with heavy_operation(
+                    kind=job_id,
+                    trigger="scheduled",
+                    mode="try",
+                    timeout_sec=guard_timeout,
+                    run_id=run_id,
+                    operator_id=0,
+                ) as acquired:
+                    if not acquired:
+                        meta = current_heavy_meta()
+                        meta_txt = describe_heavy_meta(meta)
+                        logging.info(
+                            "job_skip_heavy_busy job_id=%s run_id=%s current=%s",
+                            job_id,
+                            run_id,
+                            meta_txt,
+                        )
+                        if notify_skip:
+                            notify_skip(job_id, f"идёт другая тяжёлая операция: {meta_txt}")
+                        return None
+                    return await _execute()
+
+            async with heavy_operation(
+                kind=job_id,
+                trigger="scheduled",
+                mode="wait",
+                run_id=run_id,
+                operator_id=0,
+            ):
+                return await _execute()
+
+        if serialize_heavy and is_heavy:
+            if _heavy_job_lock.locked():
+                logging.info("job_wait_heavy_lock job_id=%s run_id=%s", job_id, run_id)
+            async with _heavy_job_lock:
+                return await _run_guarded()
+        return await _run_guarded()
 
     return _run
 
@@ -490,6 +570,25 @@ def startup(
 
     main_module = None
 
+    def _notify_admin_skip(job_name: str, reason: str) -> None:
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if not admin_chat_id:
+            return
+        try:
+            chat_id = int(admin_chat_id)
+        except (TypeError, ValueError):
+            logging.warning("SCHED invalid ADMIN_CHAT_ID=%r", admin_chat_id)
+            return
+        if bot is None or not hasattr(bot, "send_message"):
+            return
+        text = f"⚠️ SCHED: пропуск {job_name}. Причина: {reason}"
+        try:
+            asyncio.create_task(bot.send_message(chat_id, text))
+        except RuntimeError:
+            logging.warning("SCHED failed to notify admin: no running event loop")
+        except Exception:
+            logging.exception("SCHED failed to notify admin chat")
+
     def resolve(name: str, value):
         nonlocal main_module
         if value is not None:
@@ -534,115 +633,131 @@ def startup(
         )
         return job
 
-    _register_job(
-        "vk_scheduler",
-        _job_wrapper("vk_scheduler", vk_scheduler),
-        "cron",
-        id="vk_scheduler",
-        minute="1,16,31,46",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "vk_poll_scheduler",
-        _job_wrapper("vk_poll_scheduler", vk_poll_scheduler),
-        "cron",
-        id="vk_poll_scheduler",
-        minute="2,17,32,47",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "cleanup_scheduler",
-        _job_wrapper("cleanup_scheduler", cleanup_scheduler),
-        "cron",
-        id="cleanup_scheduler",
-        hour="2",
-        minute="7",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "partner_notification_scheduler",
-        _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
-        "cron",
-        id="partner_notification_scheduler",
-        minute="5",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "fest_nav_rebuild",
-        _job_wrapper("fest_nav_rebuild", rebuild_fest_nav_if_changed),
-        "cron",
-        id="fest_nav_rebuild",
-        hour="3",
-        minute="0",
-        args=[db],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-
-    times_raw = os.getenv(
-        "VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15,22:45"
-    )
-    tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
-    tz = _safe_zoneinfo(tz_name, label="VK_CRAWL_TZ")
-    for idx, t in enumerate(times_raw.split(",")):
-        t = t.strip()
-        if not t:
-            continue
-        try:
-            hh, mm = map(int, t.split(":"))
-        except ValueError:
-            logging.warning("invalid VK_CRAWL_TIMES_LOCAL entry: %s", t)
-            continue
-        now_local = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
-        now_utc = now_local.astimezone(timezone.utc)
+    enable_core_schedulers = _env_enabled("ENABLE_CORE_SCHEDULERS", default=True)
+    if enable_core_schedulers:
         _register_job(
-            f"vk_crawl_cron_{idx}",
-            _job_wrapper("vk_crawl_cron", vk_crawl_cron),
+            "vk_scheduler",
+            _job_wrapper("vk_scheduler", vk_scheduler, notify_skip=_notify_admin_skip),
             "cron",
-            id=f"vk_crawl_cron_{idx}",
-            hour=str(now_utc.hour),
-            minute=str(now_utc.minute),
+            id="vk_scheduler",
+            minute="1,16,31,46",
             args=[db, bot],
             replace_existing=True,
             max_instances=1,
             coalesce=True,
             misfire_grace_time=30,
         )
+        _register_job(
+            "vk_poll_scheduler",
+            _job_wrapper(
+                "vk_poll_scheduler", vk_poll_scheduler, notify_skip=_notify_admin_skip
+            ),
+            "cron",
+            id="vk_poll_scheduler",
+            minute="2,17,32,47",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        _register_job(
+            "cleanup_scheduler",
+            _job_wrapper("cleanup_scheduler", cleanup_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="cleanup_scheduler",
+            hour="2",
+            minute="7",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        _register_job(
+            "partner_notification_scheduler",
+            _job_wrapper(
+                "partner_notification_scheduler",
+                partner_notification_scheduler,
+                notify_skip=_notify_admin_skip,
+            ),
+            "cron",
+            id="partner_notification_scheduler",
+            minute="5",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        _register_job(
+            "fest_nav_rebuild",
+            _job_wrapper(
+                "fest_nav_rebuild",
+                rebuild_fest_nav_if_changed,
+                notify_skip=_notify_admin_skip,
+            ),
+            "cron",
+            id="fest_nav_rebuild",
+            hour="3",
+            minute="0",
+            args=[db],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+
+        times_raw = os.getenv(
+            "VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15,22:45"
+        )
+        tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
+        tz = _safe_zoneinfo(tz_name, label="VK_CRAWL_TZ")
+        for idx, t in enumerate(times_raw.split(",")):
+            t = t.strip()
+            if not t:
+                continue
+            try:
+                hh, mm = map(int, t.split(":"))
+            except ValueError:
+                logging.warning("invalid VK_CRAWL_TIMES_LOCAL entry: %s", t)
+                continue
+            now_local = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
+            now_utc = now_local.astimezone(timezone.utc)
+            _register_job(
+                f"vk_crawl_cron_{idx}",
+                _job_wrapper(
+                    "vk_crawl_cron", vk_crawl_cron, notify_skip=_notify_admin_skip
+                ),
+                "cron",
+                id=f"vk_crawl_cron_{idx}",
+                hour=str(now_utc.hour),
+                minute=str(now_utc.minute),
+                args=[db, bot],
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+    else:
+        logging.info("SCHED skipping core schedulers (ENABLE_CORE_SCHEDULERS!=1)")
 
     # Source parsing from theatres (before daily announcement at 08:00)
     enable_source_parsing = _env_enabled("ENABLE_SOURCE_PARSING", default=is_prod)
     if enable_source_parsing:
         from source_parsing.commands import source_parsing_scheduler
-        parsing_time_raw = os.getenv("SOURCE_PARSING_TIME_LOCAL", "02:15").strip()
+        parsing_time_raw = os.getenv("SOURCE_PARSING_TIME_LOCAL", "04:30").strip()
         parsing_tz_name = os.getenv("SOURCE_PARSING_TZ", "Europe/Kaliningrad")
         parsing_hour, parsing_minute = _cron_from_local(
             parsing_time_raw,
             parsing_tz_name,
-            default_hour="2",
-            default_minute="0",
+            default_hour="4",
+            default_minute="30",
             label="SOURCE_PARSING_TIME_LOCAL",
         )
         _register_job(
             "source_parsing",
-            _job_wrapper("source_parsing", source_parsing_scheduler),
+            _job_wrapper("source_parsing", source_parsing_scheduler, notify_skip=_notify_admin_skip),
             "cron",
             id="source_parsing",
             hour=parsing_hour,
@@ -655,6 +770,7 @@ def startup(
         )
     else:
         logging.info("SCHED skipping source_parsing (ENABLE_SOURCE_PARSING!=1)")
+        _notify_admin_skip("source_parsing", "ENABLE_SOURCE_PARSING!=1")
 
     enable_source_parsing_day = _env_enabled("ENABLE_SOURCE_PARSING_DAY", default=is_prod)
     if enable_source_parsing_day:
@@ -670,7 +786,7 @@ def startup(
         )
         _register_job(
             "source_parsing_day",
-            _job_wrapper("source_parsing_day", source_parsing_scheduler_if_changed),
+            _job_wrapper("source_parsing_day", source_parsing_scheduler_if_changed, notify_skip=_notify_admin_skip),
             "cron",
             id="source_parsing_day",
             hour=day_hour,
@@ -683,13 +799,219 @@ def startup(
         )
     else:
         logging.info("SCHED skipping source_parsing_day (ENABLE_SOURCE_PARSING_DAY!=1)")
+        _notify_admin_skip("source_parsing_day", "ENABLE_SOURCE_PARSING_DAY!=1")
+
+    enable_tg_monitoring = _env_enabled("ENABLE_TG_MONITORING", default=is_prod)
+    if enable_tg_monitoring:
+        from source_parsing.telegram.service import telegram_monitor_scheduler
+        tg_time_raw = os.getenv("TG_MONITORING_TIME_LOCAL", "23:40").strip()
+        tg_tz_name = os.getenv("TG_MONITORING_TZ", "Europe/Kaliningrad")
+        tg_hour, tg_minute = _cron_from_local(
+            tg_time_raw,
+            tg_tz_name,
+            default_hour="23",
+            default_minute="40",
+            label="TG_MONITORING_TIME_LOCAL",
+        )
+        _register_job(
+            "tg_monitoring",
+            _job_wrapper("tg_monitoring", telegram_monitor_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="tg_monitoring",
+            hour=tg_hour,
+            minute=tg_minute,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping tg_monitoring (ENABLE_TG_MONITORING!=1)")
+        _notify_admin_skip("tg_monitoring", "ENABLE_TG_MONITORING!=1")
+
+    enable_vk_auto_import = _env_enabled("ENABLE_VK_AUTO_IMPORT", default=False)
+    if enable_vk_auto_import:
+        from vk_auto_queue import vk_auto_import_scheduler
+
+        vk_auto_times = os.getenv("VK_AUTO_IMPORT_TIMES_LOCAL", "06:30,18:30").strip()
+        vk_auto_tz = os.getenv("VK_AUTO_IMPORT_TZ", "Europe/Kaliningrad").strip()
+        for idx, t in enumerate(vk_auto_times.split(",")):
+            t = t.strip()
+            if not t:
+                continue
+            hour, minute = _cron_from_local(
+                t,
+                vk_auto_tz,
+                default_hour="6",
+                default_minute="30",
+                label="VK_AUTO_IMPORT_TIMES_LOCAL",
+            )
+            _register_job(
+                f"vk_auto_import_{idx}",
+                _job_wrapper("vk_auto_import", vk_auto_import_scheduler, notify_skip=_notify_admin_skip),
+                "cron",
+                id=f"vk_auto_import_{idx}",
+                hour=hour,
+                minute=minute,
+                args=[db, bot],
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+    else:
+        logging.info("SCHED skipping vk_auto_import (ENABLE_VK_AUTO_IMPORT!=1)")
+        _notify_admin_skip("vk_auto_import", "ENABLE_VK_AUTO_IMPORT!=1")
+
+    enable_festival_queue = _env_enabled("ENABLE_FESTIVAL_QUEUE", default=False)
+    if enable_festival_queue:
+        from festival_queue import process_festival_queue
+
+        async def festival_queue_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            run_id: str | None = None,
+        ) -> None:
+            limit_raw = (os.getenv("FESTIVAL_QUEUE_LIMIT") or "").strip()
+            limit: int | None = None
+            if limit_raw:
+                try:
+                    parsed_limit = int(limit_raw)
+                    if parsed_limit > 0:
+                        limit = parsed_limit
+                except ValueError:
+                    logging.warning("invalid FESTIVAL_QUEUE_LIMIT=%r; using no limit", limit_raw)
+            admin_chat_raw = (os.getenv("ADMIN_CHAT_ID") or "").strip()
+            admin_chat_id: int | None = None
+            if admin_chat_raw:
+                try:
+                    admin_chat_id = int(admin_chat_raw)
+                except ValueError:
+                    logging.warning("invalid ADMIN_CHAT_ID=%r for festival queue scheduler", admin_chat_raw)
+            report = await process_festival_queue(
+                db_obj,
+                bot=bot_obj,
+                chat_id=admin_chat_id,
+                limit=limit,
+                trigger="scheduled",
+                operator_id=0,
+                run_id=run_id,
+            )
+            logging.info(
+                "festival_queue_scheduler processed=%s success=%s failed=%s skipped=%s",
+                report.processed,
+                report.success,
+                report.failed,
+                report.skipped,
+            )
+
+        fest_queue_times = os.getenv("FESTIVAL_QUEUE_TIMES_LOCAL", "03:30,16:30").strip()
+        fest_queue_tz = os.getenv("FESTIVAL_QUEUE_TZ", "Europe/Kaliningrad").strip()
+        for idx, t in enumerate(fest_queue_times.split(",")):
+            t = t.strip()
+            if not t:
+                continue
+            hour, minute = _cron_from_local(
+                t,
+                fest_queue_tz,
+                default_hour="3",
+                default_minute="30",
+                label="FESTIVAL_QUEUE_TIMES_LOCAL",
+            )
+            _register_job(
+                f"festival_queue_{idx}",
+                _job_wrapper("festival_queue", festival_queue_scheduler, notify_skip=_notify_admin_skip),
+                "cron",
+                id=f"festival_queue_{idx}",
+                hour=hour,
+                minute=minute,
+                args=[db, bot],
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+    else:
+        logging.info("SCHED skipping festival_queue (ENABLE_FESTIVAL_QUEUE!=1)")
+        _notify_admin_skip("festival_queue", "ENABLE_FESTIVAL_QUEUE!=1")
+
+    enable_ticket_sites_queue = _env_enabled("ENABLE_TICKET_SITES_QUEUE", default=False)
+    if enable_ticket_sites_queue:
+        from ticket_sites_queue import process_ticket_sites_queue
+
+        async def ticket_sites_queue_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            run_id: str | None = None,
+        ) -> None:
+            limit_raw = (os.getenv("TICKET_SITES_QUEUE_LIMIT") or "").strip()
+            limit: int | None = None
+            if limit_raw:
+                try:
+                    parsed_limit = int(limit_raw)
+                    if parsed_limit > 0:
+                        limit = parsed_limit
+                except ValueError:
+                    logging.warning("invalid TICKET_SITES_QUEUE_LIMIT=%r; using default", limit_raw)
+            admin_chat_raw = (os.getenv("ADMIN_CHAT_ID") or "").strip()
+            admin_chat_id: int | None = None
+            if admin_chat_raw:
+                try:
+                    admin_chat_id = int(admin_chat_raw)
+                except ValueError:
+                    logging.warning("invalid ADMIN_CHAT_ID=%r for ticket sites queue scheduler", admin_chat_raw)
+            report = await process_ticket_sites_queue(
+                db_obj,
+                bot=bot_obj,
+                chat_id=admin_chat_id,
+                limit=limit,
+                trigger="scheduled",
+                operator_id=0,
+                run_id=run_id,
+            )
+            logging.info(
+                "ticket_sites_queue_scheduler processed=%s success=%s failed=%s skipped=%s",
+                report.processed,
+                report.success,
+                report.failed,
+                report.skipped,
+            )
+
+        t_time_raw = os.getenv("TICKET_SITES_QUEUE_TIME_LOCAL", "11:20").strip()
+        t_tz_name = os.getenv("TICKET_SITES_QUEUE_TZ", "Europe/Kaliningrad").strip()
+        t_hour, t_minute = _cron_from_local(
+            t_time_raw,
+            t_tz_name,
+            default_hour="9",
+            default_minute="20",
+            label="TICKET_SITES_QUEUE_TIME_LOCAL",
+        )
+        _register_job(
+            "ticket_sites_queue",
+            _job_wrapper("ticket_sites_queue", ticket_sites_queue_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="ticket_sites_queue",
+            hour=t_hour,
+            minute=t_minute,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping ticket_sites_queue (ENABLE_TICKET_SITES_QUEUE!=1)")
+        _notify_admin_skip("ticket_sites_queue", "ENABLE_TICKET_SITES_QUEUE!=1")
 
     enable_3di = _env_enabled("ENABLE_3DI_SCHEDULED", default=is_prod)
     if enable_3di:
         from preview_3d.handlers import run_3di_new_only_scheduler
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
         run_chat_id = int(admin_chat_id) if admin_chat_id else None
-        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "03:15,15:15,17:15")
+        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "05:30,15:15,17:15")
         three_di_tz = os.getenv("THREEDI_TZ", "Europe/Kaliningrad")
         for idx, t in enumerate(three_di_times.split(",")):
             t = t.strip()
@@ -698,13 +1020,13 @@ def startup(
             hour, minute = _cron_from_local(
                 t,
                 three_di_tz,
-                default_hour="3",
-                default_minute="15",
+                default_hour="5",
+                default_minute="30",
                 label="THREEDI_TIMES_LOCAL",
             )
             _register_job(
                 f"3di_scheduler_{idx}",
-                _job_wrapper("3di_scheduler", run_3di_new_only_scheduler),
+                _job_wrapper("3di_scheduler", run_3di_new_only_scheduler, notify_skip=_notify_admin_skip),
                 "cron",
                 id=f"3di_scheduler_{idx}",
                 hour=hour,
@@ -718,11 +1040,152 @@ def startup(
             )
     else:
         logging.info("SCHED skipping 3di_scheduler (ENABLE_3DI_SCHEDULED!=1)")
+        _notify_admin_skip("3di_scheduler", "ENABLE_3DI_SCHEDULED!=1")
+
+    enable_general_stats = _env_enabled("ENABLE_GENERAL_STATS", default=False)
+    if enable_general_stats:
+        from general_stats import general_stats_scheduler
+
+        general_stats_time_raw = os.getenv("GENERAL_STATS_TIME_LOCAL", "07:30").strip()
+        general_stats_tz_name = os.getenv("GENERAL_STATS_TZ", "Europe/Kaliningrad").strip()
+        general_stats_hour, general_stats_minute = _cron_from_local(
+            general_stats_time_raw,
+            general_stats_tz_name,
+            default_hour="5",
+            default_minute="30",
+            label="GENERAL_STATS_TIME_LOCAL",
+        )
+        _register_job(
+            "general_stats",
+            _job_wrapper("general_stats", general_stats_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="general_stats",
+            hour=general_stats_hour,
+            minute=general_stats_minute,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping general_stats (ENABLE_GENERAL_STATS!=1)")
+        _notify_admin_skip("general_stats", "ENABLE_GENERAL_STATS!=1")
+
+    enable_telegraph_cache = _env_enabled("ENABLE_TELEGRAPH_CACHE_SANITIZER", default=False)
+    if enable_telegraph_cache:
+        from telegraph_cache_sanitizer import run_telegraph_cache_sanitizer
+
+        async def telegraph_cache_sanitize_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            run_id: str | None = None,
+        ) -> None:
+            admin_chat_raw = (os.getenv("ADMIN_CHAT_ID") or "").strip()
+            admin_chat_id: int | None = None
+            if admin_chat_raw:
+                try:
+                    admin_chat_id = int(admin_chat_raw)
+                except ValueError:
+                    logging.warning("invalid ADMIN_CHAT_ID=%r for telegraph cache scheduler", admin_chat_raw)
+            res = await run_telegraph_cache_sanitizer(
+                db_obj,
+                bot=bot_obj,
+                chat_id=admin_chat_id,
+                operator_id=0,
+                trigger="scheduled",
+                run_id=run_id,
+            )
+            imported = res.get("imported") or {}
+            regen = res.get("regen") or {}
+            logging.info(
+                "telegraph_cache_sanitize_scheduler total=%s ok=%s fail=%s regen=%s",
+                imported.get("total"),
+                imported.get("ok"),
+                imported.get("fail"),
+                regen,
+            )
+            if admin_chat_id and bot_obj is not None:
+                try:
+                    text = (
+                        "🧼 Telegraph cache sanitizer (scheduled): готово\n"
+                        f"ok={imported.get('ok', 0)} fail={imported.get('fail', 0)} total={imported.get('total', 0)}\n"
+                        + (
+                            (
+                                "regen: "
+                                + ", ".join(
+                                    f"{k}={int(v)}"
+                                    for k, v in regen.items()
+                                    if int(v or 0) > 0
+                                )
+                            )
+                            if regen
+                            else ""
+                        )
+                    ).strip()
+                    await bot_obj.send_message(admin_chat_id, text, disable_web_page_preview=True)
+                except Exception:
+                    logging.warning("telegraph_cache_sanitize_scheduler notify failed", exc_info=True)
+
+        cache_time_raw = os.getenv("TELEGRAPH_CACHE_TIME_LOCAL", "01:10").strip()
+        cache_tz_name = os.getenv("TELEGRAPH_CACHE_TZ", "Europe/Kaliningrad").strip() or "Europe/Kaliningrad"
+        cache_hour, cache_minute = _cron_from_local(
+            cache_time_raw,
+            cache_tz_name,
+            default_hour="23",
+            default_minute="10",
+            label="TELEGRAPH_CACHE_TIME_LOCAL",
+        )
+        _register_job(
+            "telegraph_cache_sanitize",
+            _job_wrapper(
+                "telegraph_cache_sanitize",
+                telegraph_cache_sanitize_scheduler,
+                notify_skip=_notify_admin_skip,
+            ),
+            "cron",
+            id="telegraph_cache_sanitize",
+            hour=cache_hour,
+            minute=cache_minute,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping telegraph_cache_sanitize (ENABLE_TELEGRAPH_CACHE_SANITIZER!=1)")
+        _notify_admin_skip("telegraph_cache_sanitize", "ENABLE_TELEGRAPH_CACHE_SANITIZER!=1")
+
+    enable_kaggle_recovery = _env_enabled("ENABLE_KAGGLE_RECOVERY", default=is_prod)
+    if enable_kaggle_recovery:
+        from kaggle_recovery import kaggle_recovery_scheduler
+        interval_raw = os.getenv("KAGGLE_RECOVERY_INTERVAL_MINUTES", "5").strip()
+        try:
+            interval_min = max(1, int(interval_raw))
+        except ValueError:
+            interval_min = 5
+        _register_job(
+            "kaggle_recovery",
+            _job_wrapper("kaggle_recovery", kaggle_recovery_scheduler, notify_skip=_notify_admin_skip),
+            "interval",
+            id="kaggle_recovery",
+            minutes=interval_min,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping kaggle_recovery (ENABLE_KAGGLE_RECOVERY!=1)")
+        _notify_admin_skip("kaggle_recovery", "ENABLE_KAGGLE_RECOVERY!=1")
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
         _register_job(
             "nightly_page_sync",
-            _job_wrapper("nightly_page_sync", nightly_page_sync),
+            _job_wrapper("nightly_page_sync", nightly_page_sync, notify_skip=_notify_admin_skip),
             "cron",
             id="nightly_page_sync",
             hour="2",
@@ -744,7 +1207,7 @@ def startup(
     pinned_utc = pinned_local.astimezone(timezone.utc)
     _register_job(
         "pinned_button_scheduler",
-        _job_wrapper("pinned_button_scheduler", pinned_button_scheduler),
+        _job_wrapper("pinned_button_scheduler", pinned_button_scheduler, notify_skip=_notify_admin_skip),
         "cron",
         id="pinned_button_scheduler",
         hour=str(pinned_utc.hour),
@@ -753,7 +1216,7 @@ def startup(
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=60,
+        misfire_grace_time=30,
     )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:
@@ -770,9 +1233,14 @@ def startup(
             logging.warning("db_maintenance %s failed", name, exc_info=True)
 
     if db is not None:
+        try:
+            from source_parsing.post_metrics import cleanup_post_metrics
+        except Exception:
+            cleanup_post_metrics = None  # type: ignore[assignment]
+
         _register_job(
             "db_optimize",
-            _job_wrapper("db_optimize", _run_maintenance),
+            _job_wrapper("db_optimize", _run_maintenance, notify_skip=_notify_admin_skip),
             "interval",
             id="db_optimize",
             hours=1,
@@ -784,7 +1252,7 @@ def startup(
         )
         _register_job(
             "db_wal_checkpoint",
-            _job_wrapper("db_wal_checkpoint", _run_maintenance),
+            _job_wrapper("db_wal_checkpoint", _run_maintenance, notify_skip=_notify_admin_skip),
             "interval",
             id="db_wal_checkpoint",
             hours=1,
@@ -796,7 +1264,7 @@ def startup(
         )
         _register_job(
             "db_vacuum",
-            _job_wrapper("db_vacuum", _run_maintenance),
+            _job_wrapper("db_vacuum", _run_maintenance, notify_skip=_notify_admin_skip),
             "interval",
             id="db_vacuum",
             hours=12,
@@ -806,6 +1274,19 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
+        if cleanup_post_metrics is not None:
+            _register_job(
+                "post_metrics_cleanup",
+                _job_wrapper("post_metrics_cleanup", _run_maintenance, notify_skip=_notify_admin_skip),
+                "interval",
+                id="post_metrics_cleanup",
+                hours=24,
+                args=[partial(cleanup_post_metrics, db), "post_metrics_cleanup", 20.0],
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
 
     _scheduler.add_listener(
         _on_event,

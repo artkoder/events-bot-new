@@ -2,7 +2,6 @@
 import asyncio
 import json
 import logging
-import os
 import random
 import re
 import time
@@ -12,9 +11,6 @@ from aiohttp import ClientSession, TCPConnector
 
 _connector: TCPConnector | None = None
 _session: ClientSession | None = None
-
-# Feature flag to control Telegraph image uploads
-TELEGRAPH_IMAGE_UPLOAD = os.getenv("TELEGRAPH_IMAGE_UPLOAD", "0") != "0"
 
 # VK API error codes that trigger actor fallback from group to user token
 # include generic "Access denied" errors for posting methods
@@ -114,25 +110,3 @@ async def http_call(
                 continue
             raise
     raise last_exc if last_exc else RuntimeError("http_call failed")
-
-
-async def telegraph_upload(data: bytes, filename: str) -> str | None:
-    """Upload an image to Telegraph and return full URL."""
-    if not TELEGRAPH_IMAGE_UPLOAD:
-        return None
-    session = _get_session()
-    from aiohttp import FormData
-
-    form = FormData()
-    form.add_field("file", data, filename=filename)
-    async with session.post("https://telegra.ph/upload", data=form) as resp:
-        try:
-            body = await resp.json()
-        except Exception:
-            body = await resp.text()
-        if resp.status == 200 and isinstance(body, list) and body and "src" in body[0]:
-            return "https://telegra.ph" + body[0]["src"]
-        logging.error(
-            "telegraph upload failed %s: %s %s", filename, resp.status, body
-        )
-        return None

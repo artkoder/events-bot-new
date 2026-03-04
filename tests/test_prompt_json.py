@@ -59,3 +59,11 @@ def test_base_prompt_includes_known_holidays():
         "- Хеллоуин (aliases: хэллоуин, halloween) — Костюмированное празднование с тыквами и сладостями."
         in prompt
     )
+
+
+def test_base_prompt_excludes_unrelated_prompt_sections():
+    main._read_base_prompt.cache_clear()
+    prompt = main._read_base_prompt()
+    assert "## Digest intro (4o)" not in prompt
+    assert "Event topics classifier" not in prompt
+    assert "Telegram channel metadata" not in prompt

@@ -9,7 +9,7 @@ import pytest
 
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.asyncio,
+    pytest.mark.asyncio(scope="session"),
 ]
 
 

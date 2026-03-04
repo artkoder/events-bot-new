@@ -14,5 +14,8 @@ async def test_scheduler_offsets_and_limits():
     assert all(job.misfire_grace_time == 30 for job in jobs)
     assert all(job.max_instances == 1 for job in jobs)
     assert any("minute='1,16,31,46'" in str(job.trigger) for job in jobs)
-    assert scheduler._executors["default"]._max_workers == 2
+    # Scheduler runs async jobs in the event loop via AsyncIOExecutor (no thread pool max_workers).
+    from apscheduler.executors.asyncio import AsyncIOExecutor
+
+    assert isinstance(scheduler._executors["default"], AsyncIOExecutor)
     cleanup()

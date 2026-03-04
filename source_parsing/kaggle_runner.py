@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 import time
 from datetime import datetime
@@ -18,6 +19,7 @@ from video_announce.kaggle_client import (
     KERNELS_ROOT_PATH,
     LOCAL_KERNEL_PREFIX,
 )
+from kaggle_registry import register_job, remove_job
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ async def run_kaggle_kernel(
     client = KaggleClient()
     kernel_path = KERNELS_ROOT_PATH / kernel_folder
     kernel_ref = f"{LOCAL_KERNEL_PREFIX}{kernel_folder}"
+    registered = False
 
     async def _notify(phase: str, status: dict | None = None) -> None:
         if not status_callback:
@@ -149,6 +152,15 @@ async def run_kaggle_kernel(
         return "push_failed", [], time.time() - start_time
 
     await _notify("pushed")
+    try:
+        await register_job(
+            "parse_theatres",
+            kernel_ref,
+            meta={"kernel_folder": kernel_folder, "pid": os.getpid()},
+        )
+        registered = True
+    except Exception:
+        logger.warning("theatres_kaggle: failed to register recovery job", exc_info=True)
     
     # Wait for Kaggle to start
     await asyncio.sleep(10)
@@ -205,8 +217,10 @@ async def run_kaggle_kernel(
         )
         if final_status == "timeout":
             await _notify("timeout", last_status)
+        if registered:
+            await remove_job("parse_theatres", kernel_ref)
         return final_status, [], duration
-    
+
     # Download output files
     output_files = await _download_outputs(client, kernel_ref)
     
@@ -216,6 +230,8 @@ async def run_kaggle_kernel(
         len(output_files),
     )
     
+    if registered:
+        await remove_job("parse_theatres", kernel_ref)
     return final_status, output_files, duration
 
 

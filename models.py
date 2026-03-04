@@ -328,6 +328,26 @@ class Setting(SQLModel, table=True):
     value: str
 
 
+class SupabaseDeleteQueue(SQLModel, table=True):
+    __tablename__ = "supabase_delete_queue"
+    __table_args__ = (
+        Index("ix_supabase_delete_queue_created_at", "created_at"),
+        UniqueConstraint("bucket", "path", name="ux_supabase_delete_queue_bucket_path"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    bucket: str
+    path: str
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    last_attempt_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    attempts: int = 0
+    last_error: Optional[str] = None
+
+
 class Event(SQLModel, table=True):
     __table_args__ = (
         Index("idx_event_date", "date"),
@@ -348,10 +368,12 @@ class Event(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
     description: str
+    short_description: Optional[str] = None
     search_digest: Optional[str] = None
     festival: Optional[str] = None
     date: str
     time: str
+    time_is_default: bool = False
     location_name: str
     location_address: Optional[str] = None
     city: Optional[str] = None
@@ -362,18 +384,25 @@ class Event(SQLModel, table=True):
     vk_ticket_short_key: Optional[str] = None
     vk_ics_short_url: Optional[str] = None
     vk_ics_short_key: Optional[str] = None
+    ticket_trust_level: Optional[str] = None
     event_type: Optional[str] = None
     emoji: Optional[str] = None
     end_date: Optional[str] = None
+    end_date_is_inferred: bool = False
     is_free: bool = False
     pushkin_card: bool = False
     silent: bool = False
+    lifecycle_status: str = "active"  # active|cancelled|postponed
     telegraph_path: Optional[str] = None
     source_text: str
+    source_texts: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     telegraph_url: Optional[str] = None
     ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
     source_vk_post_url: Optional[str] = None
+    # Hash of the latest VK source-post payload (used to avoid redundant wall edits).
+    # Kept separate from `content_hash` (Telegraph HTML hash).
+    vk_source_hash: Optional[str] = None
     vk_repost_url: Optional[str] = None
     ics_hash: Optional[str] = None
     ics_file_id: Optional[str] = None
@@ -540,13 +569,19 @@ class VideoAnnounceLLMTrace(SQLModel, table=True):
 class EventPoster(SQLModel, table=True):
     __table_args__ = (
         Index("ix_eventposter_event", "event_id"),
+        Index("ix_eventposter_phash", "phash"),
         UniqueConstraint("event_id", "poster_hash", name="ux_eventposter_event_hash"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     event_id: int = Field(foreign_key="event.id")
     catbox_url: Optional[str] = None
+    # Optional fallback storage for posters to make Telegraph previews more reliable
+    # and to survive Catbox outages/TLS issues.
+    supabase_url: Optional[str] = None
+    supabase_path: Optional[str] = None
     poster_hash: str
+    phash: Optional[str] = None
     ocr_text: Optional[str] = None
     ocr_title: Optional[str] = None
     prompt_tokens: int = 0
@@ -555,6 +590,178 @@ class EventPoster(SQLModel, table=True):
     updated_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
+
+
+class EventMediaAsset(SQLModel, table=True):
+    __tablename__ = "event_media_asset"
+    __table_args__ = (
+        Index("ix_event_media_asset_event", "event_id"),
+        Index("ix_event_media_asset_kind", "kind"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id")
+    kind: str = Field(default="video")
+    supabase_url: Optional[str] = None
+    supabase_path: Optional[str] = None
+    sha256: Optional[str] = None
+    size_bytes: Optional[int] = None
+    mime_type: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class EventSource(SQLModel, table=True):
+    __tablename__ = "event_source"
+    __table_args__ = (
+        Index("ix_event_source_event", "event_id"),
+        Index("ix_event_source_type_url", "source_type", "source_url"),
+        UniqueConstraint("event_id", "source_url", name="ux_event_source_event_url"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id")
+    source_type: str
+    source_url: str
+    source_chat_username: Optional[str] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
+    source_text: Optional[str] = None
+    imported_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    trust_level: Optional[str] = None
+
+
+class EventSourceFact(SQLModel, table=True):
+    __tablename__ = "event_source_fact"
+    __table_args__ = (
+        Index("ix_event_source_fact_event", "event_id"),
+        Index("ix_event_source_fact_source", "source_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id")
+    source_id: int = Field(foreign_key="event_source.id")
+    fact: str
+    # Status of this fact in this source-iteration.
+    # - added: applied to event (and should generally reflect in Telegraph content)
+    # - duplicate: observed in source but already present -> not applied
+    # - conflict: anchor conflict / ignored change
+    # - note: technical/service note (filters, snippets, poster actions)
+    status: str = Field(default="added")
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class TelegramSource(SQLModel, table=True):
+    __tablename__ = "telegram_source"
+    __table_args__ = (
+        Index("ix_telegram_source_username", "username", unique=True),
+        Index("ix_telegram_source_enabled", "enabled"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str
+    title: Optional[str] = None
+    enabled: bool = Field(default=True, sa_column=Column(Boolean, default=True))
+    default_location: Optional[str] = None
+    default_ticket_link: Optional[str] = None
+    trust_level: Optional[str] = None
+    filters_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    festival_source: Optional[bool] = Field(
+        default=False, sa_column=Column(Boolean, default=False)
+    )
+    festival_series: Optional[str] = None
+    about: Optional[str] = None
+    about_links_json: Optional[list[str]] = Field(
+        default=None, sa_column=Column(JSON, nullable=True)
+    )
+    meta_hash: Optional[str] = None
+    meta_fetched_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    suggested_festival_series: Optional[str] = None
+    suggested_website_url: Optional[str] = None
+    suggestion_confidence: Optional[float] = None
+    suggestion_rationale: Optional[str] = None
+    last_scanned_message_id: Optional[int] = None
+    last_scan_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class TelegramScannedMessage(SQLModel, table=True):
+    __tablename__ = "telegram_scanned_message"
+    __table_args__ = (
+        Index("ix_tg_scanned_source", "source_id"),
+        Index("ix_tg_scanned_processed_at", "processed_at"),
+    )
+
+    source_id: int = Field(foreign_key="telegram_source.id", primary_key=True)
+    message_id: int = Field(primary_key=True)
+    message_date: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    processed_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    status: str = "done"
+    events_extracted: int = 0
+    events_imported: int = 0
+    error: Optional[str] = None
+
+
+class TelegramSourceForceMessage(SQLModel, table=True):
+    __tablename__ = "telegram_source_force_message"
+    __table_args__ = (Index("ix_tg_force_source", "source_id"),)
+
+    source_id: int = Field(foreign_key="telegram_source.id", primary_key=True)
+    message_id: int = Field(primary_key=True)
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class TelegramPostMetric(SQLModel, table=True):
+    __tablename__ = "telegram_post_metric"
+    __table_args__ = (
+        Index("ix_tg_metric_source_age", "source_id", "age_day"),
+        Index("ix_tg_metric_source_message", "source_id", "message_id"),
+        UniqueConstraint("source_id", "message_id", "age_day", name="ux_tg_metric_source_message_age"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="telegram_source.id")
+    message_id: int
+    age_day: int
+    source_url: Optional[str] = None
+    message_ts: Optional[int] = None
+    collected_ts: int = Field(default_factory=lambda: int(utc_now().timestamp()))
+    views: Optional[int] = None
+    likes: Optional[int] = None
+    reactions_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+
+class VkPostMetric(SQLModel, table=True):
+    __tablename__ = "vk_post_metric"
+    __table_args__ = (
+        Index("ix_vk_metric_group_age", "group_id", "age_day"),
+        Index("ix_vk_metric_group_post", "group_id", "post_id"),
+        UniqueConstraint("group_id", "post_id", "age_day", name="ux_vk_metric_group_post_age"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    group_id: int
+    post_id: int
+    age_day: int
+    source_url: Optional[str] = None
+    post_ts: Optional[int] = None
+    collected_ts: int = Field(default_factory=lambda: int(utc_now().timestamp()))
+    views: Optional[int] = None
+    likes: Optional[int] = None
 
 
 class TomorrowPage(SQLModel, table=True):
@@ -665,7 +872,113 @@ class Festival(SQLModel, table=True):
             server_default=text("CURRENT_TIMESTAMP"),
         ),
     )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=text("CURRENT_TIMESTAMP"),
+        ),
+    )
 
+
+
+class FestivalQueueItem(SQLModel, table=True):
+    __tablename__ = "festival_queue"
+    __table_args__ = (
+        Index("ix_festival_queue_status_next_run", "status", "next_run_at"),
+        Index("ix_festival_queue_source_kind", "source_kind"),
+        Index("ix_festival_queue_source_url", "source_url"),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    status: str = Field(default="pending")
+    source_kind: str  # vk | tg | url
+    source_url: str
+    source_text: Optional[str] = None
+    source_chat_username: Optional[str] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
+    source_group_id: Optional[int] = None
+    source_post_id: Optional[int] = None
+    festival_context: Optional[str] = None
+    festival_name: Optional[str] = None
+    festival_full: Optional[str] = None
+    festival_series: Optional[str] = None
+    dedup_links_json: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    signals_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    result_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    attempts: int = 0
+    last_error: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    next_run_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class TicketSiteQueueItem(SQLModel, table=True):
+    __tablename__ = "ticket_site_queue"
+    __table_args__ = (
+        Index("ix_ticket_site_queue_status_next_run", "status", "next_run_at"),
+        Index("ix_ticket_site_queue_site_kind", "site_kind"),
+        Index("ux_ticket_site_queue_url", "url", unique=True),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    status: str = Field(default="active")  # active|running|error|disabled
+    site_kind: str  # pyramida|dom_iskusstv|qtickets
+    url: str
+    event_id: Optional[int] = None
+    source_post_url: Optional[str] = None
+    source_chat_username: Optional[str] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
+    attempts: int = 0
+    last_error: Optional[str] = None
+    last_result_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    last_run_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    next_run_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class OpsRun(SQLModel, table=True):
+    __tablename__ = "ops_run"
+    __table_args__ = (
+        Index("ix_ops_run_kind_started_at", "kind", "started_at"),
+        Index("ix_ops_run_status_started_at", "status", "started_at"),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    kind: str
+    trigger: str = "manual"
+    chat_id: Optional[int] = None
+    operator_id: Optional[int] = None
+    started_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    finished_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    status: str = "running"
+    metrics_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    details_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
 class JobTask(str, Enum):

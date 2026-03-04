@@ -2,6 +2,27 @@
 
 This document describes how the bot communicates with model **4o**.
 
+## LLM-first policy (applies to all LLM providers)
+
+If a change affects the *meaning* or perceived quality of event text (`title`,
+`description`, `search_digest`), prefer doing it **inside the LLM** (prompt rules
+in `docs/llm/prompts.md`, or Smart Update LLM passes).
+
+Deterministic code is allowed as *supporting plumbing*:
+
+- sanitizers / escaping (HTML/Markdown safety, whitespace, URL cleanup);
+- canonicalization / normalization (venues, dates, phone masking);
+- guardrails (skip non-events, region filters, safety checks);
+- hints passed *to the LLM input* to steer it (without rewriting the resulting text).
+
+Avoid deterministic “editorial” rewrites (e.g. renaming, adding semantic prefixes,
+rewriting sentences) unless it’s a narrowly scoped safety invariant and it’s
+explicitly documented as an exception.
+
+Documented exceptions (rare, guardrail-only):
+- Collapsing duplicate drafts produced from a single umbrella “program/schedule” post
+  into one event with a `time` range (prevents accidental duplicates).
+
 Requests are sent as HTTP `POST` to the URL stored in the environment variable
 `FOUR_O_URL` (defaults to `https://api.openai.com/v1/chat/completions`). The
 header `Authorization: Bearer <FOUR_O_TOKEN>` is added. Set these values via Fly

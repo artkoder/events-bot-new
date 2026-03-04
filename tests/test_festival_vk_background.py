@@ -44,7 +44,7 @@ async def test_add_events_from_text_vk_failure(tmp_path: Path, monkeypatch, capl
     async def fake_rebuild(*args, **kwargs):
         return "skipped", ""
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(main, "upload_images", fake_upload)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)

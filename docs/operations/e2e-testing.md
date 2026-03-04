@@ -2,6 +2,8 @@
 
 > Ретроспектива реализации тестирования Dom Iskusstv. Консолидация подходов для будущих E2E тестов.
 
+Список всех актуальных E2E сценариев и их «срока годности»: `docs/operations/e2e-scenarios.md`.
+
 ## Архитектура тестирования
 
 ### Структура директорий
@@ -54,7 +56,7 @@ tests/e2e/
 #### Ожидание ответа
 ```python
 @then('я жду сообщения с текстом "{text}"')
-@then('я жду долгой операции с текстом "{text}"')  # до 5 минут
+@then('я жду долгой операции с текстом "{text}"')  # до 35 минут (Kaggle/парсеры)
 ```
 
 #### Проверка кнопок
@@ -73,15 +75,16 @@ tests/e2e/
 ## Работа с долгими операциями
 
 ### Проблема
-Kaggle notebook выполняется 2-5 минут. Стандартный timeout недостаточен.
+Kaggle notebook и парсеры могут выполняться долго (cold start, OCR/vision, сеть). Стандартный timeout недостаточен.
 
 ### Решение
 ```python
 @then('я жду долгой операции с текстом "{text}"')
 def step_wait_long_operation(context, text):
-    """Wait up to 5 minutes for long operations like Kaggle."""
+    """Wait for long operations like Kaggle (configurable, default is generous)."""
     async def _wait():
-        for i in range(600):  # 5 минут = 600 * 0.5s
+        # Timeout can be overridden via env (e.g. E2E_TG_MONITOR_TIMEOUT_SEC, E2E_PARSE_TIMEOUT_SEC).
+        for i in range(600):  # пример: 5 минут = 600 * 0.5s
             messages = await context.client.client.get_messages(
                 context.bot_entity, limit=10
             )
@@ -98,6 +101,16 @@ def step_wait_long_operation(context, text):
 - Polling каждые 0.5 секунды вместо блокирующего ожидания
 - Проверка последних 10 сообщений (не только последнее)
 - Case-insensitive поиск текста
+
+---
+
+## Реакция на ошибки в Telegram UI (обязательно)
+
+Live E2E — это не только `behave`-assert’ы, но и **операторские сообщения бота в Telegram**.
+
+- Любое сообщение с шаблоном `Результат: ошибка …` считается **провалом прогона** и требует расследования.
+- Не допускается “тихий пропуск” постов/событий из‑за ошибок: E2E должен падать как можно раньше.
+- Логи для расследования: `artifacts/test-results/e2e_local_bot_*.log` + текст сообщения в Telegram UI.
 
 ---
 
@@ -130,6 +143,14 @@ def step_verify_telegraph_content(context, required_text):
 ### Использование
 ```gherkin
 И каждая Telegraph страница должна содержать "🎟, Билеты, руб."
+```
+
+### Проверка отсутствия «раздутой логистики»
+
+Если инфоблок (дата/место/билеты) уже показан сверху, `description` не должен дублировать его словами вроде «по адресу», «по телефону», «стоимость билета».
+
+```gherkin
+И каждая Telegraph страница не должна содержать "по адресу, по телефону, стоимость билета"
 ```
 
 ---
@@ -183,12 +204,65 @@ def step_log(ctx): ...
 
 ---
 
+## Старые контрольные посты (важно для скорости и лимитов Gemma)
+
+Если сценарий E2E ссылается на **конкретный** Telegram‑пост для сверки (по `message_id`/URL) и этот пост уже старый, не расширяйте глобально окно перескана.
+
+Рекомендованный подход:
+
+- держать базовый профиль мониторинга как обычно: `TG_MONITORING_DAYS_BACK=3` (и умеренный `TG_MONITORING_LIMIT`);
+- нужный конкретный пост добирать **точечно**: отдельным шагом сценария вида `И я выбираю конкретный пост "https://t.me/<channel>/<id>"`.
+
+Почему так:
+
+- меньше лишних запросов в Gemma (лимиты не бесконечны),
+- ниже риск FloodWait,
+- E2E прогон заметно быстрее.
+
+---
+
 ## Чеклист для нового E2E теста
 
 ### Подготовка
-- [ ] Запустить бота локально с `DB_PATH=db_prod_snapshot.sqlite`
+- [ ] Обновить snapshot прод-БД (для live-сценариев): `./scripts/sync_prod_db_if_stale.sh --max-age-hours 6`
+- [ ] Подготовить **изолированную** БД для E2E (чтобы прогон не мутировал snapshot):
+  - `eval "$(./scripts/prepare_e2e_db_from_prod_snapshot.sh --max-age-hours 6)"`
+  - (альтернатива) вручную сделать sqlite backup/copy в `artifacts/test-results/` и выставить `DB_PATH` на копию
+- [ ] Запустить бота локально в polling режиме (использует `DB_PATH` из шага выше):
+  - рекомендуемо: `DEV_MODE=1 python main.py`
+  - или просто `python main.py` (если `WEBHOOK_URL` не задан — бот сам стартует в polling режиме)
+  - если `WEBHOOK_URL` задан, но нужен polling: `FORCE_POLLING=1 python main.py`
+- [ ] Если админ-команды (`/vk`, `/fest_queue`, и т.п.) отвечают `Access denied` для тестового пользователя:
+  - один раз выполнить `python scripts/seed_dev_superadmin.py` (выдаёт superadmin в sqlite `DB_PATH` для Telethon‑аккаунта из `TELEGRAM_AUTH_BUNDLE_E2E`/`TELEGRAM_SESSION`)
+- [ ] Если БД-снимок лежит на нестабильной FS, выставить `DB_JOURNAL_MODE=DELETE` (иначе возможны ошибки WAL)
 - [ ] Убедиться что бот отвечает на `/start`
 - [ ] Проверить что нет конфликтов с production ботом
+- [ ] Установить `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (или `TG_API_ID`/`TG_API_HASH`) и одну из: `TELEGRAM_AUTH_BUNDLE_E2E` или `TELEGRAM_SESSION`
+- [ ] (Опционально) выставить `E2E_BOT_USERNAME`, чтобы E2E не делал HTTP вызов в Bot API (`getMe`) для определения username (полезно, если `api.telegram.org` недоступен, но MTProto доступен).
+- [ ] Перед каждым повторным прогоном сценария на конкретных постах выполнить предочистку: `И база очищена от событий источника "<source>"` + `И очищены отметки мониторинга для "<username>"`, иначе в проверку попадут следы прошлых прогонов.
+
+#### TELEGRAM_AUTH_BUNDLE_E2E (формат и расшифровка)
+
+`TELEGRAM_AUTH_BUNDLE_E2E` — это **base64 (urlsafe) JSON** с данными Telethon‑сессии и параметрами устройства.
+
+Обязательные ключи в JSON:
+- `session`
+- `device_model`
+- `system_version`
+- `app_version`
+- `lang_code`
+- `system_lang_code`
+
+Пример расшифровки (локально, без логирования результата):
+```python
+import base64, json
+
+raw = base64.urlsafe_b64decode(B64.encode("ascii")).decode("utf-8")
+bundle = json.loads(raw)
+session = bundle["session"]
+```
+
+Важно: **не запускайте одну и ту же session строку параллельно** в двух процессах (иначе можно словить `AuthKeyDuplicatedError`). Разные session строки для одного аккаунта допустимы.
 
 ### Написание теста
 - [ ] Создать `.feature` файл с Gherkin сценариями
@@ -197,12 +271,116 @@ def step_log(ctx): ...
 
 ### Запуск
 ```bash
+# Подготовка изолированной БД из snapshot (и выставление DB_PATH)
+eval "$(./scripts/prepare_e2e_db_from_prod_snapshot.sh --max-age-hours 6)"
+
 # Запуск бота
-DB_PATH=db_prod_snapshot.sqlite python3 main.py &
+python3 main.py &
 
 # Запуск тестов
 behave tests/e2e/features/your_feature.feature --no-capture
 ```
+
+Примечание про `@manual` сценарии:
+- `@manual` — это тяжёлые/долгие live-сценарии (массовые прогоны).
+- Чтобы они запускались, используйте **один** из вариантов:
+  - `E2E_RUN_MANUAL=1 behave ...`
+  - `behave ... --tags=manual`
+
+Примечание:
+- Если вы запускаете `behave`, `tests/e2e/features/environment.py` **автоматически** делает копию, когда `DB_PATH`
+  указывает на `db_prod_snapshot*.sqlite` в корне репозитория (можно отключить `E2E_DB_ISOLATE=0`).
+- Если `DB_PATH` не задан, `tests/e2e/features/environment.py` пытается выбрать snapshot автоматически:
+  - сначала `db_prod_snapshot.sqlite` (если файл “здоровый”);
+  - иначе — самый новый `db_prod_snapshot_*.sqlite` по времени изменения (если он “здоровый”).
+  Если snapshot повреждён (например, незавершённая загрузка), он будет пропущен с warning в логах E2E.
+
+Примечание про переменные окружения:
+- `export ...` в одном терминале влияет только на текущую shell-сессию и её дочерние процессы. Если IDE открыла новый терминал/процесс, переменные “исчезнут”.
+- Для E2E предпочтительнее хранить настройки в `.env` в корне репозитория: `tests/e2e/features/environment.py` подхватывает `.env` автоматически (best-effort), заполняя отсутствующие переменные.
+  - Если в окружении уже задан **явно неверный** `SUPABASE_KEY`/`SUPABASE_SERVICE_KEY` (например слишком короткое значение), E2E‑раннер заменит его на значение из `.env` (иначе ломаются media upload fallback’и, где нужен доступ к Storage).
+  - Если ты запускаешь бота вручную из терминала (не через `behave`), `.env` в процесс не подхватится сам — перед `python main.py` выполни:
+    - `set -a; source .env; set +a`
+
+### Быстрая диагностика “бот не отвечает на команды”
+
+Симптом: отправляешь `/start` или `/vk`, а в Telegram тишина.
+
+1) Проверь в логах строку режима:
+   - ожидаемо для local/live E2E: `Mode: DEV_MODE | Connection: POLLING | Webhook: DISABLED`
+   - если видишь `Mode: PROD_MODE | Connection: WEBHOOK | Polling: DISABLED` — бот не будет получать апдейты без корректно настроенного webhook.
+2) Запусти заново в polling режиме:
+   - `DEV_MODE=1 python main.py` или `FORCE_POLLING=1 python main.py`
+3) Если запускаешь вручную — не забудь подхватить `.env`:
+   - `set -a; source .env; set +a`
+
+Опционально (чтобы уменьшить шум/фоновую активность при live E2E): `DISABLE_PAGE_JOBS=1`.
+
+Если в рамках E2E вы проверяете только **страницы событий** (Telegraph build) и не хотите, чтобы фоновая очередь пыталась пересобирать агрегирующие страницы (месяц/неделя/выходные), запускайте бота с:
+
+```bash
+DISABLE_PAGE_JOBS=1
+```
+
+Это уменьшает шум и риск долгих блокирующих операций (например `PAGE_ACCESS_DENIED` на старых страницах).
+
+Если при этом вы отключаете JobOutbox worker (чтобы не пытаться разбирать весь backlog прод‑снапшота), но всё равно хотите, чтобы Telegram Monitoring в E2E обновлял Telegraph страницы **только затронутых событий**, используйте:
+
+```bash
+ENABLE_JOB_OUTBOX_WORKER=0 TG_MONITORING_DRAIN_EVENT_JOBS=1
+```
+
+Поведение: после импорта результатов мониторинга бот в фоне “дренит” задачи только для `event_id`, которые были `created/merged` этим мониторингом (обычно `ics_publish` + `telegraph_build`). Это делает проверку “афиша появилась на Telegraph” детерминированной, не включая глобальный воркер.
+
+### Окно сканирования для E2E (лимиты Gemma + время прогона)
+
+- По умолчанию держите `TG_MONITORING_DAYS_BACK=3` и не расширяйте окно “на всякий случай”.
+- Если нужно проверить **конкретный старый пост** (например `https://t.me/dramteatr39/3802`), не увеличивайте `DAYS_BACK` для всего источника и не “прокручивайте” историю назад.
+- Правильный паттерн для E2E: обычный прогон оставляем с `TG_MONITORING_DAYS_BACK=3` (быстро, без лишних LLM вызовов).
+- Правильный паттерн для E2E: конкретный пост запрашиваем **дополнительно** точечно по `message_id` (Telethon `get_messages(ids=...)`) и прогоняем импорт/проверку только для него.
+- Это уменьшает нагрузку на Telegram API и снижает число лишних LLM/Gemma запросов (там лимиты не бесконечные), а также ускоряет E2E.
+
+Пример точечной выборки поста:
+
+```python
+msg = await client.get_messages("dramteatr39", ids=3802)
+```
+
+### Offline (без сети / без Telegram)
+
+Часть сценариев помечена тегом `@offline` и не требует Telethon/Telegram API (DB‑only регрессии).
+
+```bash
+E2E_OFFLINE=1 SMART_UPDATE_LLM=off EVENT_TOPICS_LLM=off DB_PATH=db_prod_snapshot.sqlite \\
+  DB_INIT_MINIMAL=1 \\
+  behave tests/e2e/features/smart_event_update.feature --no-capture
+```
+
+## Рекомендуемые сценарии (Gherkin) для регрессий мёржа
+
+При изменениях в Telegram Monitoring / Smart Update полезно держать отдельные сценарии, которые ловят типовые регрессии:
+
+- **Мёрж текста**: новый абзац из источника не теряется, но старые факты не дублируются.
+- **Афиши**: промо‑баннеры (скидки/акции) не мёржатся как иллюстрации события; в логе источников нет дублей `Афиша в источнике`/`Добавлена афиша` для одного URL.
+- **Розыгрыши**: пост “анонс + розыгрыш” импортируется/мёржится по фактам события, а “механика розыгрыша” вырезается.
+- **/3di**: если у события меняется число/набор иллюстраций, `preview_3d_url` сбрасывается и событие снова попадает в “🆕 Только новые”.
+- **Telegram-first двухфазно**: фиксируются два состояния одного события (`telegram-first` и `after-parse`) с отдельными snapshot-артефактами (лог источников + Telegraph текст), чтобы можно было вручную сравнить, как изменился текст и какие факты добавились.
+- **Смысловые тезисы Telegram**: в `telegram-first` логе должен быть минимум один текстовый тезис события (не только `Дата/Время/Локация/Афиша`).
+- **Согласованность фактов**: после `/parse` смысловые факты из лога должны присутствовать в тексте Telegraph страницы.
+- **Анти-шум multi-event**: в Telegraph тексте не должно оставаться строк расписания/чужих названий из того же Telegram поста.
+- **Telegram preview**: для итоговой Telegraph страницы события должен собираться `cached_page + photo` (иначе в клиенте возможен “чёрный экран” превью).
+  - Частая причина отсутствия `cached_page`: на странице события есть `<img>` с битой ссылкой (например, Catbox `404`), из-за чего Telegram не может собрать Instant View.
+  - Бот при сборке/обновлении event‑страницы теперь (по умолчанию) проверяет типовые источники иллюстраций (Catbox/Supabase) и **подменяет** битые URL на fallback (если есть) или **удаляет** их из набора иллюстраций. Управляется через `TELEGRAPH_VALIDATE_IMAGE_URLS=1` и `HTTP_IMAGE_UA` (User-Agent для скачивания изображений).
+
+Канонические файлы сценариев:
+- `tests/e2e/features/telegram_monitoring.feature`
+- `tests/e2e/features/smart_event_update.feature`
+
+Артефакты двухфазных snapshot-проверок:
+- `artifacts/e2e/stage_snapshots/<timestamp>_<scenario>/telegram-first.json`
+- `artifacts/e2e/stage_snapshots/<timestamp>_<scenario>/telegram-first.source_log.txt`
+- `artifacts/e2e/stage_snapshots/<timestamp>_<scenario>/telegram-first.telegraph.txt`
+- `artifacts/e2e/stage_snapshots/<timestamp>_<scenario>/after-parse.*`
 
 ### Отладка
 - [ ] Проверить логи бота (`bot.log`)

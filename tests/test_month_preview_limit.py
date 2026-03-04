@@ -66,6 +66,7 @@ def test_month_page_show_images_under_limit():
         fest_map=fest_map,
         continuation_url=None,
         size_limit=None,
+        cover_url=None,
         fest_index_url=None,
         include_ics=True,
         include_details=True
@@ -113,6 +114,7 @@ def test_month_page_hide_images_over_limit():
         fest_map=fest_map,
         continuation_url=None,
         size_limit=None,
+        cover_url=None,
         fest_index_url=None,
         include_ics=True,
         include_details=True

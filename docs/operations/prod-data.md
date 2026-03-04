@@ -64,12 +64,30 @@ sqlite3 db_prod_snapshot.sqlite < dump.sql
 # Настройте окружение
 export DEV_MODE=1
 export DB_PATH=./db_prod_snapshot.sqlite
+export DB_JOURNAL_MODE=DELETE   # рекомендуется для локальных/виртуальных FS (устраняет проблемы WAL)
 export TELEGRAM_BOT_TOKEN=your_dev_bot_token
 export FOUR_O_TOKEN=your_openai_token
 
 # Запустите бота локально
 python main.py
 ```
+
+### 0. Рекомендуемый формат имени снимка (чтобы не путать)
+
+Сохраняйте снимки с таймстампом:
+
+`db_prod_snapshot_YYYY-MM-DD_HHMM.sqlite`
+
+Пример:
+
+`db_prod_snapshot_2026-02-03_1915.sqlite`
+
+И используйте через `DB_PATH=...` (см. выше). Это упрощает параллельные прогоны E2E и сравнение результатов.
+
+Рекомендуемая раскладка (локально, не коммитить):
+
+- хранить слепки в `artifacts/db/` (см. `artifacts/README.md`);
+- `db_prod_snapshot.sqlite` можно использовать как “текущий” файл (копию), но для прогонов/сравнений всегда фиксируйте конкретный таймстамп‑файл в `DB_PATH`.
 
 ### 2. Тестирование отдельных операций
 
@@ -120,12 +138,14 @@ python main.py
 Для регулярной синхронизации с продакшеном:
 
 ```bash
-# Создайте cron задачу (опционально)
-# Добавьте в crontab -e:
-0 2 * * * cd /path/to/project && ./scripts/sync_prod_db.sh
+# Обновлять snapshot "не старше 6 часов" (рекомендуется для E2E live-сценариев):
+./scripts/sync_prod_db_if_stale.sh --max-age-hours 6
 
-# Или просто запускайте вручную когда нужно
+# Или просто скачать прямо сейчас:
 ./scripts/sync_prod_db.sh
+
+# Пример cron (опционально, раз в 6 часов):
+# 0 */6 * * * cd /path/to/project && ./scripts/sync_prod_db_if_stale.sh --max-age-hours 6
 ```
 
 ## ⚠️ Важные моменты
@@ -160,7 +180,7 @@ python main.py
 # Создайте файл test_llm_local.py
 import asyncio
 from db import Database
-from main import parse_event_via_4o
+from main import parse_event_via_llm
 
 async def test_llm():
     db = Database("./db_prod_snapshot.sqlite")
@@ -171,7 +191,7 @@ async def test_llm():
         # ... ваш код ...
         
         # Протестируйте LLM
-        result = await parse_event_via_4o(text, source_channel="test")
+        result = await parse_event_via_llm(text, source_channel="test")
         print(result)
 
 asyncio.run(test_llm())

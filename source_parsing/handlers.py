@@ -10,13 +10,16 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Sequence
+from urllib.parse import urlparse, urljoin
 
 from aiogram import Bot
+from sqlalchemy import select
 
 from db import Database
+from ops_run import finish_ops_run, start_ops_run
 from source_parsing.kaggle_runner import run_kaggle_kernel
 from source_parsing.parser import (
     TheatreEvent,
@@ -27,7 +30,10 @@ from source_parsing.parser import (
     find_linked_events,
     limit_photos_for_source,
 )
-from poster_media import PosterMedia, process_media
+from poster_media import PosterMedia, is_supabase_storage_url, process_media
+from kaggle_registry import list_jobs, remove_job
+from video_announce.kaggle_client import KaggleClient
+from models import Event, EventSource
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +52,72 @@ EVENT_ADD_DELAY_SECONDS = 5  # Delay for Telegraph creation
 # TEMPORARY: Limit events for debugging (set to None to disable)
 DEBUG_MAX_EVENTS = None
 
+_SOURCE_HOST_HINTS: dict[str, tuple[str, ...]] = {
+    "dramteatr": ("dramteatr39.ru",),
+    "muzteatr": ("muzteatr39.ru",),
+    "sobor": ("sobor39.ru",),
+    "tretyakov": ("tretyakovgallery.ru",),
+    "philharmonia": ("filarmonia39.ru",),
+    "qtickets": ("qtickets.events",),
+    "pyramida": ("pyramida.info",),
+    "dom_iskusstv": ("xn--b1admiilxbaki.xn--p1ai", "домискусств.рф"),
+}
+
+
+async def _fetch_og_image_for_dramteatr(page_url: str) -> str | None:
+    """Best-effort cover extraction for dramteatr event pages.
+
+    Kaggle JSON for dramteatr sometimes lacks `photos`. For operator UX and more
+    stable Telegraph previews, try to grab `og:image` from the event page.
+    """
+    url = (page_url or "").strip()
+    if not url or "dramteatr39.ru" not in url:
+        return None
+    try:
+        import aiohttp
+
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                html = await resp.text()
+    except Exception:
+        return None
+
+    m = re.search(
+        r'(?is)<meta\\s+[^>]*(?:property|name)=(\"|\\\')(?:(?:og:image)|(?:twitter:image))\\1[^>]*content=(\"|\\\')([^\"\\\']+)\\2',
+        html,
+    )
+    if m:
+        img = (m.group(3) or "").strip()
+        if img:
+            final = urljoin(url, img)
+            if final.startswith(("http://", "https://")):
+                return final
+
+    # Fallback: dramteatr pages often embed galleries without OG tags.
+    # Prefer event gallery images under `/storage/uploads/!spektakli/...`.
+    img_srcs = re.findall(r'(?is)<img\\s+[^>]*src=(\"|\\\')([^\"\\\']+)\\1', html)
+    candidates: list[str] = []
+    for _q, src in img_srcs:
+        s = (src or "").strip()
+        if not s:
+            continue
+        s = urljoin(url, s)
+        if not s.startswith(("http://", "https://")):
+            continue
+        low = s.lower()
+        if "/storage/uploads/!spektakli/" not in low:
+            continue
+        if "/images/bimage/" in low:
+            continue
+        if not re.search(r"(?i)\\.(?:jpg|jpeg|png|webp)(?:\\?.*)?$", low):
+            continue
+        if s not in candidates:
+            candidates.append(s)
+    return candidates[0] if candidates else None
+
 
 @dataclass
 class SourceParsingStats:
@@ -56,7 +128,7 @@ class SourceParsingStats:
     ticket_updated: int = 0
     already_exists: int = 0
     failed: int = 0
-    skipped: int = 0  # Events that already existed and were updated (not new)
+    skipped: int = 0  # Explicitly skipped by Smart Update (e.g. no changes / promo filters)
     added_event_ids: list[int] = field(default_factory=list)
     updated_event_ids: list[int] = field(default_factory=list)  # For displaying Telegraph links
 
@@ -82,9 +154,17 @@ class AddedEventInfo:
     event_id: int
     title: str
     telegraph_url: str
+    ics_url: str | None
+    log_cmd: str | None
     date: str | None
     time: str | None
     source: str | None
+    source_url: str | None = None
+    fact_stats: dict[str, int] | None = None
+    source_ordinal: int | None = None
+    source_total: int | None = None
+    photo_count: int | None = None
+    added_posters: int | None = None
 
 
 @dataclass
@@ -93,10 +173,18 @@ class UpdatedEventInfo:
     event_id: int
     title: str
     telegraph_url: str
+    ics_url: str | None
+    log_cmd: str | None
     date: str | None
     time: str | None
     source: str | None
     update_type: str  # 'ticket_status', 'full_update'
+    source_url: str | None = None
+    fact_stats: dict[str, int] | None = None
+    source_ordinal: int | None = None
+    source_total: int | None = None
+    photo_count: int | None = None
+    added_posters: int | None = None
 
 
 def _event_telegraph_url(event) -> str | None:
@@ -107,6 +195,212 @@ def _event_telegraph_url(event) -> str | None:
     if path:
         return f"https://telegra.ph/{path.lstrip('/')}"
     return None
+
+
+def _normalize_source_url_for_match(url: str | None) -> str | None:
+    if not url:
+        return None
+    value = str(url).strip()
+    if not value:
+        return None
+    if value.startswith("http://") or value.startswith("https://"):
+        value = value.rstrip("/")
+    return value
+
+
+def _extract_host(url: str | None) -> str:
+    normalized = _normalize_source_url_for_match(url)
+    if not normalized:
+        return ""
+    try:
+        return (urlparse(normalized).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _host_matches_source(host: str, source_name: str | None) -> bool:
+    if not host or not source_name:
+        return False
+    hints = _SOURCE_HOST_HINTS.get(str(source_name).strip().lower(), ())
+    return any(hint in host for hint in hints)
+
+
+async def _load_latest_source_fact_stats(
+    db: Database,
+    *,
+    event_id: int,
+    source_url: str | None,
+) -> dict[str, int] | None:
+    """Return per-status fact counts for the most recent log batch for (event_id, source_url)."""
+    if not event_id or not source_url:
+        return None
+
+    from sqlalchemy import func
+    from models import EventSourceFact
+
+    normalized = _normalize_source_url_for_match(source_url) or str(source_url).strip() or None
+    if not normalized:
+        return None
+
+    async with db.get_session() as session:
+        source = (
+            await session.execute(
+                select(EventSource).where(
+                    EventSource.event_id == int(event_id),
+                    EventSource.source_url.in_(
+                        [normalized, str(source_url).strip(), normalized.rstrip("/")]
+                    ),
+                )
+            )
+        ).scalar_one_or_none()
+        if not source:
+            return None
+        ts = await session.scalar(
+            select(func.max(EventSourceFact.created_at)).where(
+                EventSourceFact.event_id == int(event_id),
+                EventSourceFact.source_id == int(source.id),
+            )
+        )
+        if not ts:
+            return None
+        rows = (
+            await session.execute(
+                select(EventSourceFact.status, func.count())
+                .where(
+                    EventSourceFact.event_id == int(event_id),
+                    EventSourceFact.source_id == int(source.id),
+                    EventSourceFact.created_at == ts,
+                )
+                .group_by(EventSourceFact.status)
+            )
+        ).all()
+
+    out: dict[str, int] = {}
+    for status, cnt in rows:
+        key = (str(status or "added")).strip().lower() or "added"
+        out[key] = int(cnt or 0)
+    return out or None
+
+
+async def _load_event_source_ordinal(
+    db: Database,
+    *,
+    event_id: int,
+    source_url: str | None,
+) -> tuple[int | None, int | None]:
+    if not event_id or not source_url:
+        return None, None
+    normalized = _normalize_source_url_for_match(source_url) or str(source_url).strip() or None
+    if not normalized:
+        return None, None
+    async with db.get_session() as session:
+        rows = (
+            await session.execute(
+                select(EventSource.id, EventSource.source_url)
+                .where(EventSource.event_id == int(event_id))
+                .order_by(EventSource.imported_at.asc(), EventSource.id.asc())
+            )
+        ).all()
+    if not rows:
+        return None, None
+    urls = [str(url or "").strip() for _sid, url in rows]
+    norm_urls = [_normalize_source_url_for_match(url) or url for url in urls]
+    total = len(rows)
+    for idx, url in enumerate(norm_urls):
+        if not url:
+            continue
+        if url == normalized or url.rstrip("/") == normalized.rstrip("/"):
+            return idx + 1, total
+    # Fallback: try raw match.
+    for idx, url in enumerate(urls):
+        if url == normalized or url.rstrip("/") == normalized.rstrip("/"):
+            return idx + 1, total
+    return None, total
+
+
+async def event_has_parser_source(
+    db: Database,
+    event_id: int,
+    source_name: str | None,
+    source_url: str | None = None,
+) -> bool:
+    """Check whether an event already has this parser source.
+
+    We treat the source as present when:
+    - event_source has matching `parser:<source_name>` source_type, or
+    - event_source/source_post_url matches the same source URL, or
+    - legacy source_post_url host belongs to this parser source.
+    """
+    if not event_id or not source_name:
+        return False
+
+    expected_type = f"parser:{str(source_name).strip().lower()}"
+    expected_url = _normalize_source_url_for_match(source_url)
+    expected_host = _extract_host(source_url)
+
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+        if not event:
+            return False
+
+        rows = (
+            await session.execute(
+                select(EventSource.source_type, EventSource.source_url).where(
+                    EventSource.event_id == event_id
+                )
+            )
+        ).all()
+
+    for source_type, row_url in rows:
+        stype = (source_type or "").strip().lower()
+        if stype == expected_type:
+            return True
+        if expected_url and _normalize_source_url_for_match(row_url) == expected_url:
+            return True
+        if expected_host and _host_matches_source(_extract_host(row_url), source_name):
+            return True
+
+    legacy_url = _normalize_source_url_for_match(getattr(event, "source_post_url", None))
+    if expected_url and legacy_url == expected_url:
+        return True
+    if _host_matches_source(_extract_host(legacy_url), source_name):
+        return True
+    return False
+
+
+def unpack_add_event_result(
+    raw: tuple[int | None, bool] | tuple[int | None, bool, str | None],
+) -> tuple[int | None, bool, str]:
+    """Normalize add_new_event_via_queue result.
+
+    Backward-compatible with older 2-field tuples used in tests/mocks.
+    """
+    if not isinstance(raw, tuple):
+        return None, False, "failed"
+    if len(raw) >= 3:
+        event_id, was_added, status = raw[0], bool(raw[1]), str(raw[2] or "")
+        return event_id, was_added, status or ("created" if was_added else "merged")
+    if len(raw) == 2:
+        event_id, was_added = raw
+        return event_id, bool(was_added), "created" if was_added else "merged"
+    return None, False, "failed"
+
+
+def classify_add_event_outcome(
+    event_id: int | None,
+    was_added: bool,
+    status: str | None,
+) -> str:
+    if was_added or status == "created":
+        return "added"
+    st = (status or "").strip().lower()
+    if st.startswith("skipped"):
+        return "skipped"
+    if event_id and st in {"merged", "updated"}:
+        return "updated"
+    if event_id and st:
+        return "updated"
+    return "failed"
 
 
 async def _ensure_telegraph_url(db: Database, event_id: int) -> str | None:
@@ -131,6 +425,8 @@ async def build_added_event_info(
     db: Database,
     event_id: int,
     source: str | None,
+    *,
+    source_url: str | None = None,
 ) -> AddedEventInfo | None:
     from models import Event
 
@@ -155,13 +451,54 @@ async def build_added_event_info(
             event_id,
         )
 
+    fact_stats = None
+    try:
+        fact_stats = await _load_latest_source_fact_stats(
+            db,
+            event_id=int(event_id),
+            source_url=source_url,
+        )
+    except Exception:
+        fact_stats = None
+
+    source_ordinal = None
+    source_total = None
+    try:
+        source_ordinal, source_total = await _load_event_source_ordinal(
+            db,
+            event_id=int(event_id),
+            source_url=source_url,
+        )
+    except Exception:
+        source_ordinal = None
+        source_total = None
+
+    photo_count = None
+    try:
+        raw = getattr(event, "photo_count", None)
+        if raw is None:
+            urls = getattr(event, "photo_urls", None)
+            if isinstance(urls, list):
+                raw = len([u for u in urls if (str(u or "").strip())])
+        if raw is not None:
+            photo_count = int(raw or 0)
+    except Exception:
+        photo_count = None
+
     return AddedEventInfo(
         event_id=event_id,
         title=event.title or "",
         telegraph_url=url or "",
+        ics_url=getattr(event, "ics_url", None),
+        log_cmd=f"/log {event_id}",
         date=getattr(event, "date", None),
         time=getattr(event, "time", None),
         source=source,
+        source_url=source_url,
+        fact_stats=fact_stats,
+        source_ordinal=source_ordinal,
+        source_total=source_total,
+        photo_count=photo_count,
     )
 
 
@@ -170,6 +507,8 @@ async def build_updated_event_info(
     event_id: int,
     source: str | None,
     update_type: str,
+    *,
+    source_url: str | None = None,
 ) -> UpdatedEventInfo | None:
     """Build UpdatedEventInfo for a modified event."""
     from models import Event
@@ -188,14 +527,55 @@ async def build_updated_event_info(
             event_id,
         )
 
+    fact_stats = None
+    try:
+        fact_stats = await _load_latest_source_fact_stats(
+            db,
+            event_id=int(event_id),
+            source_url=source_url,
+        )
+    except Exception:
+        fact_stats = None
+
+    source_ordinal = None
+    source_total = None
+    try:
+        source_ordinal, source_total = await _load_event_source_ordinal(
+            db,
+            event_id=int(event_id),
+            source_url=source_url,
+        )
+    except Exception:
+        source_ordinal = None
+        source_total = None
+
+    photo_count = None
+    try:
+        raw = getattr(event, "photo_count", None)
+        if raw is None:
+            urls = getattr(event, "photo_urls", None)
+            if isinstance(urls, list):
+                raw = len([u for u in urls if (str(u or "").strip())])
+        if raw is not None:
+            photo_count = int(raw or 0)
+    except Exception:
+        photo_count = None
+
     return UpdatedEventInfo(
         event_id=event_id,
         title=event.title or "",
         telegraph_url=url or "",
+        ics_url=getattr(event, "ics_url", None),
+        log_cmd=f"/log {event_id}",
         date=getattr(event, "date", None),
         time=getattr(event, "time", None),
         source=source,
+        source_url=source_url,
+        fact_stats=fact_stats,
         update_type=update_type,
+        source_ordinal=source_ordinal,
+        source_total=source_total,
+        photo_count=photo_count,
     )
 
 
@@ -356,36 +736,43 @@ async def update_linked_events(
         location_name: Location name for finding linked events
         title: Title for fuzzy matching
     """
-    from models import Event
-    
+    # NOTE: location_name/title are kept for backward compatibility with callers.
+    # The canonical recompute uses the stored Event fields to avoid drift.
     try:
-        linked_ids = await find_linked_events(db, location_name, title, event_id)
-        
-        if not linked_ids:
-            return
-        
-        async with db.get_session() as session:
-            # Update this event with linked IDs
-            event = await session.get(Event, event_id)
-            if event:
-                event.linked_event_ids = linked_ids
-            
-            # Update linked events to include this one
-            for linked_id in linked_ids:
-                linked_event = await session.get(Event, linked_id)
-                if linked_event:
-                    existing_links = set(linked_event.linked_event_ids or [])
-                    existing_links.add(event_id)
-                    existing_links.discard(linked_id)  # Don't link to self
-                    linked_event.linked_event_ids = list(existing_links)
-            
-            await session.commit()
-            
-        logger.info(
-            "source_parsing: linked events event_id=%d linked_count=%d",
-            event_id,
-            len(linked_ids),
-        )
+        from linked_events import recompute_linked_event_ids
+
+        res = await recompute_linked_event_ids(db, int(event_id))
+        if res.changed_event_ids:
+            logger.info(
+                "source_parsing: linked events recomputed event_id=%d group=%d changed=%d capped=%s",
+                event_id,
+                len(res.group_event_ids or []),
+                len(res.changed_event_ids or []),
+                str(bool(getattr(res, "capped", False))).lower(),
+            )
+            # Refresh linked occurrences in Telegraph so the public "Другие даты" infoblock line
+            # stays consistent across the whole group.
+            refresh_ids = [
+                int(x)
+                for x in (res.changed_event_ids or [])
+                if int(x) and int(x) != int(event_id)
+            ]
+            if refresh_ids:
+                import sys
+
+                main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+                if main_mod and hasattr(main_mod, "enqueue_job") and hasattr(main_mod, "JobTask"):
+                    try:
+                        enqueue_job = getattr(main_mod, "enqueue_job")
+                        job_task = getattr(getattr(main_mod, "JobTask"), "telegraph_build")
+                        for rid in refresh_ids[:80]:
+                            await enqueue_job(db, int(rid), job_task, depends_on=None)
+                    except Exception:
+                        logger.warning(
+                            "source_parsing: failed to enqueue linked telegraph refresh event_id=%d",
+                            event_id,
+                            exc_info=True,
+                        )
     except Exception as e:
         logger.warning(
             "source_parsing: linking failed event_id=%d error=%s",
@@ -427,7 +814,7 @@ async def add_new_event_via_queue(
     progress_current: int,
     progress_total: int,
     poster_media: Sequence[PosterMedia] | None = None,
-) -> tuple[int | None, bool]:
+) -> tuple[int | None, bool, str]:
     """Add a new event through the existing LLM queue system.
     
     Uses build_event_drafts_from_vk for consistent event creation.
@@ -440,7 +827,7 @@ async def add_new_event_via_queue(
         progress_total: Total events to process
     
     Returns:
-        New event ID or None if failed
+        Tuple: (event_id, was_added, smart_update_status)
     """
     from vk_intake import build_event_drafts_from_vk
     import main as main_mod
@@ -463,8 +850,13 @@ async def add_new_event_via_queue(
         location_name = normalize_location_name(theatre_event.location, theatre_event.scene)
         
         # Limit photos for source
+        base_photos = list(theatre_event.photos or [])
+        if not base_photos and theatre_event.url:
+            og = await _fetch_og_image_for_dramteatr(theatre_event.url)
+            if og:
+                base_photos = [og]
         photos = limit_photos_for_source(
-            theatre_event.photos,
+            base_photos,
             theatre_event.source_type,
         )
         
@@ -508,7 +900,7 @@ async def add_new_event_via_queue(
                 PARSE_EVENT_TIMEOUT_SECONDS,
                 theatre_event.title[:50],
             )
-            return None, False
+            return None, False, "llm_timeout"
         if diag_enabled:
             logger.info(
                 "source_parsing: diag LLM done title=%s drafts=%d duration=%.2fs",
@@ -522,7 +914,7 @@ async def add_new_event_via_queue(
                 "source_parsing: no drafts returned title=%s",
                 theatre_event.title,
             )
-            return None, False
+            return None, False, "llm_no_drafts"
         
         draft = drafts[0]
         
@@ -542,20 +934,18 @@ async def add_new_event_via_queue(
         draft.ticket_link = theatre_event.url
         draft.pushkin_card = theatre_event.pushkin_card
         
-        # Use lightweight bulk insert - no Telegraph rebuild, no VK posting
+        # Use smart update (no VK posting here)
         try:
             import sys
+            import hashlib
             from datetime import datetime, timezone
             from models import Event
+            from smart_event_update import EventCandidate, PosterCandidate, smart_event_update
             
             main_mod = sys.modules.get("main") or sys.modules.get("__main__")
             if main_mod is None:
                 logger.error("source_parsing: main module not found")
-                return None
-            
-            upsert_event = main_mod.upsert_event
-            upsert_event_posters = main_mod.upsert_event_posters
-            assign_event_topics = main_mod.assign_event_topics
+                return None, False, "main_module_missing"
             
             # Build final description - should come from LLM (short_description)
             # If LLM didn't return it, use title as fallback and log warning
@@ -566,54 +956,121 @@ async def add_new_event_via_queue(
                     theatre_event.title[:50],
                 )
                 final_description = draft.title
-            
-            # Build Event object
-            event = Event(
+
+            posters: list[PosterCandidate] = [
+                PosterCandidate(
+                    catbox_url=None
+                    if is_supabase_storage_url(item.catbox_url)
+                    else item.catbox_url,
+                    supabase_url=item.supabase_url
+                    or (
+                        item.catbox_url
+                        if is_supabase_storage_url(item.catbox_url)
+                        else None
+                    ),
+                    sha256=item.digest,
+                    phash=None,
+                    ocr_text=item.ocr_text,
+                    ocr_title=item.ocr_title,
+                )
+                for item in (poster_media or [])
+            ]
+            if not posters and photos:
+                posters = [
+                    PosterCandidate(
+                        catbox_url=(url if not is_supabase_storage_url(url) else None),
+                        supabase_url=(url if is_supabase_storage_url(url) else None),
+                    )
+                    for url in photos
+                ]
+
+            fallback_key = "|".join(
+                [
+                    theatre_event.source_type or "theatre",
+                    draft.title or "",
+                    str(draft.date or ""),
+                    str(draft.time or ""),
+                    location_name or "",
+                ]
+            )
+            fallback_hash = hashlib.sha256(fallback_key.encode("utf-8")).hexdigest()[:16]
+            source_url = theatre_event.url or f"parser:{theatre_event.source_type}:{fallback_hash}"
+
+            candidate = EventCandidate(
+                source_type=f"parser:{theatre_event.source_type}",
+                source_url=source_url,
+                source_text=full_description or draft.source_text or draft.title,
                 title=draft.title,
-                description=final_description,
-                festival=(draft.festival or None),
                 date=draft.date or datetime.now(timezone.utc).date().isoformat(),
                 time=draft.time or "00:00",
+                end_date=draft.end_date or None,
+                festival=(draft.festival or None),
                 location_name=draft.venue or "",
                 location_address=draft.location_address or None,
                 city=draft.city or None,
+                # Site/parser sources are canonical: in conflicts they should override
+                # lower-trust sources like Telegram.
+                trust_level="high",
                 ticket_price_min=draft.ticket_price_min,
                 ticket_price_max=draft.ticket_price_max,
                 ticket_link=theatre_event.url,  # Always use parser URL, not LLM links
                 event_type=draft.event_type or None,
                 emoji=draft.emoji or None,
-                end_date=draft.end_date or None,
                 is_free=bool(draft.is_free),
                 pushkin_card=bool(draft.pushkin_card),
-                source_text=full_description or draft.source_text or draft.title,
-                photo_urls=photos,
-                photo_count=len(photos),
-                source_post_url=theatre_event.url,
                 search_digest=draft.search_digest,
+                raw_excerpt=final_description,
+                posters=posters,
             )
-            
-            # Assign topics (LLM classification)
-            await assign_event_topics(event)
-            
-            # Save to database
-            async with db.get_session() as session:
-                saved, was_added = await upsert_event(session, event)
-                await upsert_event_posters(session, saved.id, poster_media)
-            
-            event_id = saved.id
-            
-            # Reload saved event for schedule_event_update_tasks
+
+            logger.info(
+                "source_parsing: smart_update candidate source=%s url=%s title=%s date=%s time=%s location=%s photos=%d posters=%d",
+                theatre_event.source_type,
+                source_url,
+                theatre_event.title[:80],
+                candidate.date,
+                candidate.time,
+                location_name,
+                len(photos or []),
+                len(posters),
+            )
+
+            update_result = await smart_event_update(
+                db,
+                candidate,
+                check_source_url=False,
+                schedule_tasks=False,
+            )
+            event_id = update_result.event_id
+            was_added = bool(update_result.created)
+
+            if not event_id:
+                logger.error(
+                    "source_parsing: smart_update failed title=%s status=%s reason=%s",
+                    theatre_event.title[:80],
+                    update_result.status,
+                    update_result.reason,
+                )
+                return None, False, update_result.status
+
             async with db.get_session() as session:
                 saved = await session.get(Event, event_id)
-            
-            # Create Telegraph pages and other artifacts (NO VK posting, NO nav drain - updated in batch later)
-            schedule_event_update_tasks = main_mod.schedule_event_update_tasks
-            await schedule_event_update_tasks(db, saved, drain_nav=False, skip_vk_sync=True)
+
+            if saved:
+                schedule_event_update_tasks = main_mod.schedule_event_update_tasks
+                await schedule_event_update_tasks(
+                    db,
+                    saved,
+                    drain_nav=False,
+                    skip_vk_sync=True,
+                )
             
             logger.info(
-                "source_parsing: event created event_id=%d title=%s (Telegraph only, no nav update)",
+                "source_parsing: smart_update result event_id=%d status=%s created=%s merged=%s",
                 event_id,
-                theatre_event.title[:50],
+                update_result.status,
+                int(update_result.created),
+                int(update_result.merged),
             )
             
             # Update ticket status
@@ -631,8 +1088,21 @@ async def add_new_event_via_queue(
                 location_name,
                 theatre_event.title,
             )
+
+            # Final consistency pass: force Telegraph rebuild after all parser-side
+            # mutations (smart merge + ticket/link updates + linked-event updates).
+            # This avoids serving an intermediate page revision when async jobs
+            # touched Telegraph earlier in the same flow.
+            try:
+                await _ensure_telegraph_url(db, event_id)
+            except Exception:
+                logger.warning(
+                    "source_parsing: final telegraph rebuild failed event_id=%d",
+                    event_id,
+                    exc_info=True,
+                )
             
-            return event_id, was_added
+            return event_id, was_added, update_result.status
                 
         except Exception as persist_err:
             logger.error(
@@ -641,7 +1111,7 @@ async def add_new_event_via_queue(
                 persist_err,
                 exc_info=True,
             )
-            return None, False
+            return None, False, "persist_failed"
         
     except Exception as e:
         logger.error(
@@ -650,7 +1120,7 @@ async def add_new_event_via_queue(
             e,
             exc_info=True,
         )
-        return None, False
+        return None, False, "add_failed"
 
 
 def escape_md(text: str) -> str:
@@ -705,7 +1175,12 @@ def _format_kaggle_status_message(
     return "\n".join(lines)
 
 
-def format_parsing_report(result: SourceParsingResult) -> str:
+async def format_parsing_report(
+    result: SourceParsingResult,
+    *,
+    bot_username: str | None = None,
+    db: Database | None = None,
+) -> str:
     """Format parsing result as a human-readable report.
     
     Args:
@@ -775,14 +1250,488 @@ def format_parsing_report(result: SourceParsingResult) -> str:
         lines.append("**Сохраненные файлы:**")
         for path in result.json_file_paths:
             lines.append(f"📄 {escape_md(Path(path).name)}")
+
+    # Unified per-event operator report (compact, actionable links).
+    bot_username_clean = (bot_username or "").strip().lstrip("@") or None
+    def _log_deeplink(event_id: int) -> str | None:
+        if not bot_username_clean:
+            return None
+        return f"https://t.me/{bot_username_clean}?start=log_{int(event_id)}"
+
+    def _format_facts_and_photos(item: object) -> str:
+        stats = getattr(item, "fact_stats", None) or {}
+        photo_count = getattr(item, "photo_count", None)
+        try:
+            photos = int(photo_count or 0)
+        except Exception:
+            photos = 0
+        added_posters_raw = getattr(item, "added_posters", None)
+        try:
+            added_posters = int(added_posters_raw) if added_posters_raw is not None else None
+        except Exception:
+            added_posters = None
+        if added_posters is None:
+            photos_label = f"Иллюстрации: {'⚠️0' if photos == 0 else photos}"
+        else:
+            photos_label = f"Иллюстрации: +{added_posters}, всего {'⚠️0' if photos == 0 else photos}"
+        if stats:
+            added = int(stats.get("added") or 0)
+            dup = int(stats.get("duplicate") or 0)
+            conf = int(stats.get("conflict") or 0)
+            note = int(stats.get("note") or 0)
+            return f"  Факты: ✅{added} ↩️{dup} ⚠️{conf} ℹ️{note} | {photos_label}"
+        return f"  Факты: — | {photos_label}"
+
+    added_items = list(result.added_events or [])
+    updated_items = list(result.updated_events or [])
+    ctx = None
+    if db and (added_items or updated_items):
+        try:
+            from source_parsing.smart_update_report import build_smart_update_report_context
+
+            all_items = added_items + updated_items
+            eids = [int(getattr(i, "event_id", 0) or 0) for i in all_items]
+            urls = [str(getattr(i, "source_url", "") or "").strip() for i in all_items]
+            ctx = await build_smart_update_report_context(db, event_ids=eids, source_urls=urls)
+        except Exception:
+            ctx = None
+    tz = getattr(ctx, "tz", None)
+    sources_by_eid = getattr(ctx, "sources_by_event_id", None) or {}
+    video_counts = getattr(ctx, "video_count_by_event_id", None) or {}
+    ticket_queue_by_eid = getattr(ctx, "ticket_queue_by_event_id", None) or {}
+    fest_queue_by_src = getattr(ctx, "festival_queue_by_source_url", None) or {}
+
+    def _ics_line_md(url: str | None, *, has_time: bool) -> str:
+        value = (url or "").strip()
+        if value:
+            return f"  ICS: [ics]({value})"
+        return "  ICS: ⏳" if has_time else "  ICS: —"
+
+    def _sources_lines_md(eid: int) -> list[str]:
+        rows = list(sources_by_eid.get(int(eid)) or [])
+        if not rows or not tz:
+            return []
+        from source_parsing.smart_update_report import format_dt_compact
+
+        out: list[str] = ["  Источники:"]
+        limit = 24
+        shown = rows[:limit]
+        for imported_at, url in shown:
+            stamp = format_dt_compact(imported_at, tz)
+            out.append(f"  {stamp} {escape_md(str(url))}")
+        if len(rows) > limit:
+            out.append(f"  … ещё {len(rows) - limit}")
+        return out
+
+    def _queue_lines_md(eid: int, source_url: str | None) -> list[str]:
+        out: list[str] = []
+        src = (source_url or "").strip()
+        if src:
+            fest = fest_queue_by_src.get(src)
+            if fest:
+                name = (
+                    (getattr(fest, "festival_name", None) or "")
+                    or (getattr(fest, "festival_full", None) or "")
+                ).strip()
+                ctx2 = (getattr(fest, "festival_context", None) or "").strip()
+                status = (getattr(fest, "status", None) or "").strip()
+                fid = getattr(fest, "id", None)
+                tail = name or ctx2
+                extra = f" {escape_md(tail)}" if tail else ""
+                id_part = f" (id={int(fid)})" if isinstance(fid, int) and fid > 0 else ""
+                st_part = f" {escape_md(status)}" if status else ""
+                out.append(f"  🎪 festival_queue:{st_part}{extra}{id_part}".strip())
+
+        tickets = list(ticket_queue_by_eid.get(int(eid)) or [])
+        if tickets:
+            first = tickets[0]
+            url = str(getattr(first, "url", "") or "").strip()
+            label = str(getattr(first, "site_kind", "") or "tickets").strip() or "tickets"
+            extra = f" +{len(tickets)}" if len(tickets) > 1 else ""
+            if url:
+                out.append(f"  🎟 ticket_site_queue:{extra} [{escape_md(label)}]({url})")
+            else:
+                out.append(f"  🎟 ticket_site_queue:{extra}".strip())
+        return out
+
+    def _format_facts_photos_videos_md(item: object) -> str:
+        stats = getattr(item, "fact_stats", None) or {}
+        try:
+            photos = int(getattr(item, "photo_count", None) or 0)
+        except Exception:
+            photos = 0
+        added_posters_raw = getattr(item, "added_posters", None)
+        try:
+            added_posters = int(added_posters_raw) if added_posters_raw is not None else None
+        except Exception:
+            added_posters = None
+        if added_posters is None:
+            photos_label = f"Иллюстрации: {'⚠️0' if photos == 0 else photos}"
+        else:
+            photos_label = f"Иллюстрации: +{added_posters}, всего {'⚠️0' if photos == 0 else photos}"
+        try:
+            eid2 = int(getattr(item, "event_id", 0) or 0)
+        except Exception:
+            eid2 = 0
+        try:
+            videos_total = int(video_counts.get(int(eid2), 0) or 0)
+        except Exception:
+            videos_total = 0
+        videos_label = f" | Видео: {videos_total}" if videos_total > 0 else ""
+        stats = getattr(item, "fact_stats", None) or {}
+        if stats:
+            added = int(stats.get("added") or 0)
+            dup = int(stats.get("duplicate") or 0)
+            conf = int(stats.get("conflict") or 0)
+            note = int(stats.get("note") or 0)
+            return f"  Факты: ✅{added} ↩️{dup} ⚠️{conf} ℹ️{note} | {photos_label}{videos_label}"
+        return f"  Факты: — | {photos_label}{videos_label}"
+
+    if added_items or updated_items:
+        lines.append("")
+        lines.append("**Smart Update (детали событий):**")
+        if added_items:
+            lines.append(f"✅ Созданные события: {len(added_items)}")
+            for item in added_items[:12]:
+                title = escape_md(item.title or "Без названия")
+                meta: list[str] = []
+                if item.date:
+                    meta.append(str(item.date))
+                if item.time:
+                    meta.append(str(item.time))
+                if item.telegraph_url:
+                    lines.append(
+                        f"• [{title}]({item.telegraph_url}) (id={item.event_id})"
+                        + (f" — {' '.join(meta)}" if meta else "")
+                    )
+                else:
+                    lines.append(f"• {title} (id={item.event_id})" + (f" — {' '.join(meta)}" if meta else ""))
+                if getattr(item, "source_url", None):
+                    lines.append(f"  Источник: {escape_md(str(item.source_url))}")
+                if item.log_cmd:
+                    link = _log_deeplink(int(item.event_id))
+                    if link:
+                        cmd = escape_md(item.log_cmd)
+                        lines.append(f"  Лог: [{cmd}]({link})")
+                    else:
+                        lines.append(f"  Лог: {escape_md(item.log_cmd)}")
+                try:
+                    eid_i = int(getattr(item, "event_id", 0) or 0)
+                except Exception:
+                    eid_i = 0
+                if eid_i:
+                    lines.extend(_sources_lines_md(eid_i))
+                lines.append(_ics_line_md(item.ics_url, has_time=bool((item.time or "").strip())))
+                lines.append(_format_facts_photos_videos_md(item))
+                lines.extend(_queue_lines_md(eid_i, getattr(item, "source_url", None)))
+            if len(added_items) > 12:
+                lines.append(f"... ещё {len(added_items) - 12}")
+        if updated_items:
+            lines.append(f"🔄 Обновлённые события: {len(updated_items)}")
+            for item in updated_items[:12]:
+                title = escape_md(item.title or "Без названия")
+                meta = []
+                if item.date:
+                    meta.append(str(item.date))
+                if item.time:
+                    meta.append(str(item.time))
+                if item.telegraph_url:
+                    lines.append(
+                        f"• [{title}]({item.telegraph_url}) (id={item.event_id})"
+                        + (f" — {' '.join(meta)}" if meta else "")
+                    )
+                else:
+                    lines.append(f"• {title} (id={item.event_id})" + (f" — {' '.join(meta)}" if meta else ""))
+                if getattr(item, "source_url", None):
+                    lines.append(f"  Источник: {escape_md(str(item.source_url))}")
+                if item.log_cmd:
+                    link = _log_deeplink(int(item.event_id))
+                    if link:
+                        cmd = escape_md(item.log_cmd)
+                        lines.append(f"  Лог: [{cmd}]({link})")
+                    else:
+                        lines.append(f"  Лог: {escape_md(item.log_cmd)}")
+                try:
+                    eid_i = int(getattr(item, "event_id", 0) or 0)
+                except Exception:
+                    eid_i = 0
+                if eid_i:
+                    lines.extend(_sources_lines_md(eid_i))
+                lines.append(_ics_line_md(item.ics_url, has_time=bool((item.time or "").strip())))
+                lines.append(_format_facts_photos_videos_md(item))
+                lines.extend(_queue_lines_md(eid_i, getattr(item, "source_url", None)))
+            if len(updated_items) > 12:
+                lines.append(f"... ещё {len(updated_items) - 12}")
             
     return "\n".join(lines)
+
+
+async def _process_parsing_files(
+    db: Database,
+    bot: Bot | None,
+    *,
+    chat_id: int | None,
+    theatre_files: list[str],
+    phil_files: list[str],
+    qtickets_files: list[str],
+    result: SourceParsingResult,
+    only_sources: set[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> None:
+    events_by_source: dict[str, list[TheatreEvent]] = {}
+
+    def _normalize_source_name(raw_name: str) -> str:
+        normalized = raw_name.strip().lower()
+        normalized = re.sub(r"\s*\(\d+\)\s*$", "", normalized)
+        if "dramteatr" in normalized or "драм" in normalized:
+            return "dramteatr"
+        if "muzteatr" in normalized or "муз" in normalized:
+            return "muzteatr"
+        if "sobor" in normalized or "собор" in normalized:
+            return "sobor"
+        if "tretyakov" in normalized or "трет" in normalized:
+            return "tretyakov"
+        return normalized
+
+    for file_path_str in theatre_files:
+        try:
+            file_path = Path(file_path_str)
+            source_name = _normalize_source_name(file_path.stem)
+            raw_content = file_path.read_text(encoding="utf-8")
+            events = parse_theatre_json(raw_content, source_name)
+            if events:
+                events_by_source[source_name] = events
+        except Exception as e:
+            logger.error("source_parsing: failed to parse theatre file %s: %s", file_path_str, e)
+            result.errors.append(f"File {file_path_str}: {str(e)}")
+
+    if phil_files:
+        try:
+            from source_parsing.philharmonia import parse_philharmonia_output
+            p_events = parse_philharmonia_output(phil_files)
+            if p_events:
+                events_by_source["philharmonia"] = p_events
+        except Exception as e:
+            logger.error("source_parsing: failed to parse philharmonia files: %s", e)
+            result.errors.append(f"Philharmonia parse error: {str(e)}")
+
+    if qtickets_files:
+        try:
+            from source_parsing.qtickets import parse_qtickets_output
+            q_events = parse_qtickets_output(qtickets_files)
+            if q_events:
+                events_by_source["qtickets"] = q_events
+        except Exception as e:
+            logger.error("source_parsing: failed to parse qtickets files: %s", e)
+            result.errors.append(f"Qtickets parse error: {str(e)}")
+
+    if only_sources:
+        # Keep only requested sources to reduce LLM calls during E2E / targeted runs.
+        # Note: kernels may still have produced other JSONs; we just skip processing.
+        events_by_source = {
+            src: evs
+            for src, evs in events_by_source.items()
+            if src in only_sources or "all" in only_sources or "theatres" in only_sources
+        }
+
+    if date_from or date_to:
+        def _in_range(d: str | None) -> bool:
+            if not d:
+                return False
+            try:
+                # Lexicographic compare works for ISO dates, but keep parsing defensive.
+                _ = datetime.fromisoformat(d)
+            except Exception:
+                return False
+            if date_from and d < date_from:
+                return False
+            if date_to and d > date_to:
+                return False
+            return True
+
+        filtered: dict[str, list[TheatreEvent]] = {}
+        for src, evs in events_by_source.items():
+            kept = [e for e in evs if _in_range(getattr(e, "parsed_date", None))]
+            if kept:
+                filtered[src] = kept
+        events_by_source = filtered
+
+    total_count = sum(len(ev) for ev in events_by_source.values())
+    result.total_events = total_count
+
+    current_index = 0
+    progress_message_id = None
+
+    for source, events in events_by_source.items():
+        try:
+            stats, progress_message_id = await process_source_events(
+                db,
+                bot,
+                events,
+                source,
+                current_index,
+                total_count,
+                chat_id=chat_id,
+                progress_message_id=progress_message_id,
+                added_events=result.added_events if chat_id else None,
+                updated_events=result.updated_events if chat_id else None,
+            )
+            result.stats_by_source[source] = stats
+            current_index += len(events)
+        except Exception as e:
+            logger.error(
+                "source_parsing: failed to process events from %s: %s",
+                source,
+                e,
+                exc_info=True,
+            )
+            result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
+
+    months = sorted({
+        str(event.parsed_date)[:7]
+        for events in events_by_source.values()
+        for event in events
+        if event.parsed_date
+    })
+    if months:
+        logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
+        try:
+            import sys
+            from sqlalchemy import select
+            from models import Event, JobTask
+        except Exception as e:
+            logger.error(
+                "source_parsing: failed to prepare month_pages enqueue: %s",
+                e,
+            )
+        else:
+            main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+            if main_mod is None:
+                logger.error("source_parsing: main module not found for month_pages enqueue")
+            else:
+                enqueue_job = main_mod.enqueue_job
+                mark_pages_dirty = main_mod.mark_pages_dirty
+                weekend_start_for_date = getattr(main_mod, "weekend_start_for_date", None)
+                deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+                def _coerce_date(value: object) -> date | None:
+                    if isinstance(value, date):
+                        return value
+                    try:
+                        raw = str(value or "").strip()
+                        return date.fromisoformat(raw) if raw else None
+                    except Exception:
+                        return None
+
+                month_event_ids: dict[str, int] = {}
+                weekend_event_ids: dict[str, int] = {}
+                weekend_starts: set[str] = set()
+                async with db.get_session() as session:
+                    for month in months:
+                        res = await session.execute(
+                            select(Event.id)
+                            .where(Event.date.like(f"{month}%"))
+                            .order_by(Event.id.desc())
+                            .limit(1)
+                        )
+                        event_id = res.scalar_one_or_none()
+                        if event_id:
+                            month_event_ids[month] = event_id
+                    for events in events_by_source.values():
+                        for parsed_event in events:
+                            day = _coerce_date(getattr(parsed_event, "parsed_date", None))
+                            if not day:
+                                continue
+                            weekend_start: date | None = None
+                            if callable(weekend_start_for_date):
+                                try:
+                                    weekend_start = weekend_start_for_date(day)
+                                except Exception:
+                                    weekend_start = None
+                            elif day.weekday() >= 5:
+                                weekend_start = day - timedelta(days=day.weekday() - 5)
+                            if weekend_start:
+                                weekend_starts.add(weekend_start.isoformat())
+
+                    for weekend_start in sorted(weekend_starts):
+                        sunday = _coerce_date(weekend_start)
+                        sunday_iso = (
+                            (sunday + timedelta(days=1)).isoformat() if sunday else None
+                        )
+                        event_id = None
+                        if sunday_iso:
+                            sat_res = await session.execute(
+                                select(Event.id)
+                                .where(
+                                    Event.date.like(f"{weekend_start}%")
+                                    | Event.date.like(f"{sunday_iso}%")
+                                )
+                                .order_by(Event.id.desc())
+                                .limit(1)
+                            )
+                            event_id = sat_res.scalar_one_or_none()
+                        if event_id:
+                            weekend_event_ids[weekend_start] = event_id
+
+                for month in months:
+                    event_id = month_event_ids.get(month)
+                    if not event_id:
+                        continue
+                    await enqueue_job(
+                        db,
+                        event_id,
+                        JobTask.month_pages,
+                        coalesce_key=f"month_pages:{month}",
+                        next_run_at=deferred_time,
+                    )
+                    await mark_pages_dirty(db, month)
+                for weekend_start in sorted(weekend_starts):
+                    event_id = weekend_event_ids.get(weekend_start)
+                    if not event_id:
+                        continue
+                    await enqueue_job(
+                        db,
+                        event_id,
+                        JobTask.weekend_pages,
+                        coalesce_key=f"weekend_pages:{weekend_start}",
+                        next_run_at=deferred_time,
+                    )
+                    await mark_pages_dirty(db, f"weekend:{weekend_start}")
+
+    if bot and chat_id and progress_message_id:
+        try:
+            total_new = sum(s.new_added for s in result.stats_by_source.values())
+            total_fail = sum(s.failed for s in result.stats_by_source.values())
+
+            final_text = (
+                f"✅ Обработка завершена\n"
+                f"Добавлено: {total_new}\n"
+                f"Ошибок: {total_fail}"
+            )
+            await bot.edit_message_text(
+                text=final_text,
+                chat_id=chat_id,
+                message_id=progress_message_id,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            logger.warning(
+                "source_parsing: failed final progress update",
+                exc_info=True,
+            )
 
 
 async def run_source_parsing(
     db: Database,
     bot: Bot | None = None,
     chat_id: int | None = None,
+    only_sources: Sequence[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    trigger: str = "manual",
+    operator_id: int | None = None,
+    run_id: str | None = None,
 ) -> SourceParsingResult:
     """Run full source parsing pipeline.
     
@@ -798,16 +1747,42 @@ async def run_source_parsing(
     result = SourceParsingResult(chat_id=chat_id)
     kaggle_status_message_id: int | None = None
     kaggle_kernel_ref = ""
-    run_id = uuid.uuid4().hex[:8]
+    parse_run_id = run_id or uuid.uuid4().hex[:8]
+    ops_run_id = await start_ops_run(
+        db,
+        kind="parse",
+        trigger=trigger,
+        chat_id=chat_id,
+        operator_id=operator_id,
+        details={
+            "run_id": run_id,
+            "only_sources": list(only_sources or []),
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    )
+    ops_status = "success"
+    ops_error: str | None = None
     log_handler: logging.Handler | None = None
 
     class _SourceParsingFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             return record.name.startswith("source_parsing")
 
-    log_dir = Path("/data/parse_debug")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"source_parsing_{run_id}.log"
+    debug_dir_env = (os.getenv("SOURCE_PARSING_DEBUG_DIR") or "").strip()
+    if debug_dir_env:
+        log_dir = Path(debug_dir_env)
+    else:
+        # In Fly production /data is a writable volume; in local/dev it may be protected.
+        if os.path.isdir("/data") and os.access("/data", os.W_OK):
+            log_dir = Path("/data/parse_debug")
+        else:
+            log_dir = Path("artifacts/run/parse_debug")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning("source_parsing: failed to init debug dir %s: %s", log_dir, e)
+    log_path = log_dir / f"source_parsing_{parse_run_id}.log"
     try:
         log_handler = logging.FileHandler(log_path, encoding="utf-8")
         log_handler.setLevel(logging.INFO)
@@ -846,10 +1821,12 @@ async def run_source_parsing(
                 exc_info=True,
             )
     
-    # Import Philharmonia runner
+    # Import Philharmonia and Qtickets runners
     from source_parsing.philharmonia import (
         run_philharmonia_kaggle_kernel,
-        parse_philharmonia_output,
+    )
+    from source_parsing.qtickets import (
+        run_qtickets_kaggle_kernel,
     )
 
     if DEBUG_MAX_EVENTS:
@@ -858,210 +1835,262 @@ async def run_source_parsing(
             DEBUG_MAX_EVENTS,
         )
     
-    try:
-        # 1. Run Kaggle kernels (Parallel)
-        logger.info("source_parsing: starting kernels (theatres + philharmonia)")
-        
-        # We need independent callbacks for status updates if we want to show both.
-        # But for now, let's just let generic status callback handle generic theatre kernel.
-        # Philharmonia status might overwrite or we can use a wrapper.
-        # Ideally we should show multiple status messages or a combined one.
-        # For simplicity, I'll reuse the callback but separate messages or just let them race (not ideal).
-        # Let's run them successfully.
-        
-        task_theatres = asyncio.create_task(run_kaggle_kernel(status_callback=_update_kaggle_status))
-        task_phil = asyncio.create_task(run_philharmonia_kaggle_kernel()) # No callback for now to avoid mess
+    def _norm_source(raw: str) -> str:
+        return re.sub(r"[^a-z0-9_]+", "", (raw or "").strip().lower())
 
-        results = await asyncio.gather(task_theatres, task_phil, return_exceptions=True)
-        
-        # Result 0: Theatres
-        # Result 1: Philharmonia
-        
+    only_set: set[str] | None = None
+    if only_sources:
+        only_set = {_norm_source(s) for s in only_sources if _norm_source(s)}
+        if not only_set:
+            only_set = None
+
+    theatre_sources = {"dramteatr", "muzteatr", "sobor", "tretyakov"}
+    need_theatres = True if only_set is None else bool(only_set & (theatre_sources | {"theatres", "theatre", "theater"}))
+    need_phil = True if only_set is None else ("philharmonia" in only_set)
+    need_qtickets = True if only_set is None else ("qtickets" in only_set)
+
+    try:
+        # 1. Run Kaggle kernels (Parallel). In targeted mode, skip unrelated kernels.
+        logger.info(
+            "source_parsing: starting kernels theatres=%s philharmonia=%s qtickets=%s only_sources=%s",
+            int(bool(need_theatres)),
+            int(bool(need_phil)),
+            int(bool(need_qtickets)),
+            sorted(only_set) if only_set else None,
+        )
+
+        tasks: dict[str, asyncio.Task] = {}
+        if need_theatres:
+            tasks["theatres"] = asyncio.create_task(
+                run_kaggle_kernel(status_callback=_update_kaggle_status)
+            )
+        if need_phil:
+            tasks["philharmonia"] = asyncio.create_task(run_philharmonia_kaggle_kernel())
+        if need_qtickets:
+            tasks["qtickets"] = asyncio.create_task(run_qtickets_kaggle_kernel())
+
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        by_name = dict(zip(tasks.keys(), results))
+
         # Process Theatres Result
-        res_theatres = results[0]
+        theatre_files: list[str] = []
+        res_theatres = by_name.get("theatres")
         if isinstance(res_theatres, Exception):
-             logger.error("source_parsing: theatres kernel error: %s", res_theatres)
-             result.errors.append(f"Theatres kernel error: {res_theatres}")
-             theatre_files = []
-        else:
-             status_t, files_t, dur_t = res_theatres
-             result.kernel_duration = max(result.kernel_duration, dur_t)
-             if status_t == "complete":
-                 theatre_files = [f for f in files_t if Path(f).suffix.lower() == ".json"]
-                 result.json_file_paths.extend(theatre_files)
-             else:
-                 result.errors.append(f"Theatres kernel failed: {status_t}")
-                 theatre_files = []
+            logger.error("source_parsing: theatres kernel error: %s", res_theatres)
+            result.errors.append(f"Theatres kernel error: {res_theatres}")
+        elif res_theatres is not None:
+            status_t, files_t, dur_t = res_theatres
+            result.kernel_duration = max(result.kernel_duration, dur_t)
+            if status_t == "complete":
+                theatre_files = [f for f in files_t if Path(f).suffix.lower() == ".json"]
+                result.json_file_paths.extend(theatre_files)
+            else:
+                result.errors.append(f"Theatres kernel failed: {status_t}")
 
         # Process Philharmonia Result
-        res_phil = results[1]
+        phil_files: list[str] = []
+        res_phil = by_name.get("philharmonia")
         if isinstance(res_phil, Exception):
-             logger.error("source_parsing: philharmonia kernel error: %s", res_phil)
-             result.errors.append(f"Philharmonia kernel error: {res_phil}")
-             phil_files = []
-        else:
-             status_p, files_p, dur_p = res_phil
-             result.kernel_duration = max(result.kernel_duration, dur_p)
-             if status_p == "complete":
-                 phil_files = [f for f in files_p if f.endswith("philharmonia_results.json")]
-                 # If exact name not matched, take all json from that run
-                 if not phil_files:
-                     phil_files = [f for f in files_p if Path(f).suffix.lower() == ".json"]
-                 
-                 result.json_file_paths.extend(phil_files)
-             else:
-                 result.errors.append(f"Philharmonia kernel failed: {status_p}")
-                 phil_files = []
-
-        # 2. Parse files
-        events_by_source = {}
-
-        def _normalize_source_name(raw_name: str) -> str:
-            normalized = raw_name.strip().lower()
-            normalized = re.sub(r"\s*\(\d+\)\s*$", "", normalized)
-            if "dramteatr" in normalized or "драм" in normalized:
-                return "dramteatr"
-            if "muzteatr" in normalized or "муз" in normalized:
-                return "muzteatr"
-            if "sobor" in normalized or "собор" in normalized:
-                return "sobor"
-            if "tretyakov" in normalized or "трет" in normalized:
-                return "tretyakov"
-            return normalized
-        
-        # Parse Theatres
-        for file_path_str in theatre_files:
-            try:
-                file_path = Path(file_path_str)
-                source_name = _normalize_source_name(file_path.stem)
-                raw_content = file_path.read_text(encoding="utf-8")
-                events = parse_theatre_json(raw_content, source_name)
-                if events:
-                    events_by_source[source_name] = events
-            except Exception as e:
-                logger.error("source_parsing: failed to parse theatre file %s: %s", file_path_str, e)
-                result.errors.append(f"File {file_path_str}: {str(e)}")
-
-        # Parse Philharmonia
-        if phil_files:
-            try:
-                p_events = parse_philharmonia_output(phil_files)
-                if p_events:
-                    events_by_source["philharmonia"] = p_events
-            except Exception as e:
-                logger.error("source_parsing: failed to parse philharmonia files: %s", e)
-                result.errors.append(f"Philharmonia parse error: {str(e)}")
-        
-        # 3. Process events
-        total_count = sum(len(ev) for ev in events_by_source.values())
-        result.total_events = total_count
-        
-        current_index = 0
-        progress_message_id = None
-        
-        for source, events in events_by_source.items():
-            try:
-                stats, progress_message_id = await process_source_events(
-                    db,
-                    bot,
-                    events,
-                    source,
-                    current_index,
-                    total_count,
-                    chat_id=chat_id,
-                    progress_message_id=progress_message_id,
-                    added_events=result.added_events if chat_id else None,
-                    updated_events=result.updated_events if chat_id else None,
-                )
-                result.stats_by_source[source] = stats
-                current_index += len(events)
-            except Exception as e:
-                logger.error("source_parsing: failed to process events from %s: %s", source, e, exc_info=True)
-                # Escape error text as it may contain underscores/paths
-                result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
-                
-        months = sorted({
-            str(event.parsed_date)[:7]
-            for events in events_by_source.values()
-            for event in events
-            if event.parsed_date
-        })
-        if months:
-            logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
-            try:
-                import sys
-                from sqlalchemy import select
-                from models import Event, JobTask
-            except Exception as e:
-                logger.error(
-                    "source_parsing: failed to prepare month_pages enqueue: %s",
-                    e,
-                )
+            logger.error("source_parsing: philharmonia kernel error: %s", res_phil)
+            result.errors.append(f"Philharmonia kernel error: {res_phil}")
+        elif res_phil is not None:
+            status_p, files_p, dur_p = res_phil
+            result.kernel_duration = max(result.kernel_duration, dur_p)
+            if status_p == "complete":
+                phil_files = [f for f in files_p if f.endswith("philharmonia_results.json")]
+                if not phil_files:
+                    phil_files = [f for f in files_p if Path(f).suffix.lower() == ".json"]
+                result.json_file_paths.extend(phil_files)
             else:
-                main_mod = sys.modules.get("main") or sys.modules.get("__main__")
-                if main_mod is None:
-                    logger.error("source_parsing: main module not found for month_pages enqueue")
-                else:
-                    enqueue_job = main_mod.enqueue_job
-                    mark_pages_dirty = main_mod.mark_pages_dirty
-                    month_event_ids: dict[str, int] = {}
-                    async with db.get_session() as session:
-                        for month in months:
-                            res = await session.execute(
-                                select(Event.id)
-                                .where(Event.date.like(f"{month}%"))
-                                .order_by(Event.id.desc())
-                                .limit(1)
-                            )
-                            event_id = res.scalar_one_or_none()
-                            if event_id:
-                                month_event_ids[month] = event_id
+                result.errors.append(f"Philharmonia kernel failed: {status_p}")
 
-                    for month in months:
-                        event_id = month_event_ids.get(month)
-                        if not event_id:
-                            continue
-                        await enqueue_job(
-                            db,
-                            event_id,
-                            JobTask.month_pages,
-                            coalesce_key=f"month_pages:{month}",
-                        )
-                        await mark_pages_dirty(db, month)
+        # Process Qtickets Result
+        qtickets_files: list[str] = []
+        res_qtickets = by_name.get("qtickets")
+        if isinstance(res_qtickets, Exception):
+            logger.error("source_parsing: qtickets kernel error: %s", res_qtickets)
+            result.errors.append(f"Qtickets kernel error: {res_qtickets}")
+        elif res_qtickets is not None:
+            status_q, files_q, dur_q = res_qtickets
+            result.kernel_duration = max(result.kernel_duration, dur_q)
+            if status_q == "complete":
+                qtickets_files = [f for f in files_q if f.endswith("qtickets_events.json")]
+                if not qtickets_files:
+                    qtickets_files = [f for f in files_q if Path(f).suffix.lower() == ".json"]
+                result.json_file_paths.extend(qtickets_files)
+            else:
+                result.errors.append(f"Qtickets kernel failed: {status_q}")
 
-        # Final progress update
-        if bot and chat_id and progress_message_id:
-            try:
-                total_new = sum(s.new_added for s in result.stats_by_source.values())
-                total_fail = sum(s.failed for s in result.stats_by_source.values())
-                
-                final_text = (
-                    f"✅ Обработка завершена\n"
-                    f"Добавлено: {total_new}\n"
-                    f"Ошибок: {total_fail}"
-                )
-                await bot.edit_message_text(
-                    text=final_text,
-                    chat_id=chat_id,
-                    message_id=progress_message_id,
-                )
-            except Exception as e:
-                logger.warning("source_parsing: failed to update final progress: %s", e)
+        await _process_parsing_files(
+            db,
+            bot,
+            chat_id=chat_id,
+            theatre_files=theatre_files,
+            phil_files=phil_files,
+            qtickets_files=qtickets_files,
+            result=result,
+            only_sources=only_set,
+            date_from=date_from,
+            date_to=date_to,
+        )
         
         result.processing_duration = time.time() - start_time
         
         logger.info(
             "source_parsing: complete total=%d kernel=%.1fs processing=%.1fs",
-            total_count,
+            int(getattr(result, "total_events", 0) or 0),
             result.kernel_duration,
             result.processing_duration,
         )
         
         return result
+    except Exception as exc:
+        ops_status = "error"
+        ops_error = str(exc)
+        raise
     finally:
         if log_handler:
             logging.getLogger().removeHandler(log_handler)
             log_handler.close()
+        source_details = {
+            source: {
+                "processed": int(stats.total_received),
+                "new_events": int(stats.new_added),
+                "updated_events": int(stats.ticket_updated + stats.already_exists),
+                "failed": int(stats.failed),
+                "skipped": int(stats.skipped),
+            }
+            for source, stats in (result.stats_by_source or {}).items()
+        }
+        await finish_ops_run(
+            db,
+            run_id=ops_run_id,
+            status=ops_status,
+            metrics={
+                "total_events": int(result.total_events or 0),
+                "sources_processed": int(len(result.stats_by_source or {})),
+                "events_created": int(len(result.added_events or [])),
+                "events_updated": int(len(result.updated_events or [])),
+                "errors_count": int(len(result.errors or [])),
+                "kernel_duration": round(float(result.kernel_duration or 0.0), 3),
+                "processing_duration": round(float(result.processing_duration or 0.0), 3),
+            },
+            details={
+                "run_id": run_id,
+                "log_file_path": result.log_file_path,
+                "sources": source_details,
+                "errors": list(result.errors or [])[:40],
+                "fatal_error": ops_error,
+            },
+        )
+
+
+_source_parsing_recovery_active: set[str] = set()
+
+
+async def resume_source_parsing_jobs(
+    db: Database,
+    bot: Bot | None,
+    *,
+    chat_id: int | None = None,
+) -> int:
+    jobs = await list_jobs()
+    parse_jobs = [
+        j
+        for j in jobs
+        if j.get("type") in {"parse_theatres", "parse_philharmonia"}
+    ]
+    if not parse_jobs:
+        return 0
+    notify_chat_id = chat_id
+    if notify_chat_id is None:
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if admin_chat_id:
+            try:
+                notify_chat_id = int(admin_chat_id)
+            except ValueError:
+                notify_chat_id = None
+    client = KaggleClient()
+    recovered = 0
+    for job in parse_jobs:
+        kernel_ref = str(job.get("kernel_ref") or "")
+        job_type = str(job.get("type") or "")
+        if not kernel_ref or kernel_ref in _source_parsing_recovery_active:
+            continue
+        _source_parsing_recovery_active.add(kernel_ref)
+        try:
+            meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+            owner_pid = meta.get("pid")
+            if owner_pid == os.getpid():
+                continue
+            try:
+                status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
+            except Exception:
+                logger.exception("source_parsing_recovery: status fetch failed kernel=%s", kernel_ref)
+                continue
+            state = str(status.get("status") or "").lower()
+            if state in {"error", "failed", "cancelled"}:
+                await remove_job(job_type, kernel_ref)
+                if bot and notify_chat_id:
+                    await bot.send_message(
+                        notify_chat_id,
+                        f"⚠️ parse recovery: kernel {kernel_ref} завершился ошибкой",
+                    )
+                continue
+            if state != "complete":
+                continue
+            output_dir = Path(tempfile.gettempdir()) / f"source_parsing_recovery_{abs(hash(kernel_ref))}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            files = await asyncio.to_thread(
+                client.download_kernel_output,
+                kernel_ref,
+                path=str(output_dir),
+                force=True,
+            )
+            file_paths = [str(output_dir / f) for f in files]
+            theatre_files: list[str] = []
+            phil_files: list[str] = []
+            qtickets_files: list[str] = []
+            if job_type == "parse_theatres":
+                theatre_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
+            elif job_type == "parse_philharmonia":
+                phil_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
+            elif job_type == "parse_qtickets":
+                qtickets_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
+            if not theatre_files and not phil_files and not qtickets_files:
+                logger.warning(
+                    "source_parsing_recovery: no json files kernel=%s", kernel_ref
+                )
+                continue
+            result = SourceParsingResult(chat_id=notify_chat_id)
+            result.json_file_paths.extend(theatre_files + phil_files + qtickets_files)
+            await _process_parsing_files(
+                db,
+                bot,
+                chat_id=notify_chat_id,
+                theatre_files=theatre_files,
+                phil_files=phil_files,
+                qtickets_files=qtickets_files,
+                result=result,
+            )
+            await remove_job(job_type, kernel_ref)
+            recovered += 1
+            if bot and notify_chat_id:
+                bot_username = None
+                try:
+                    me = await bot.get_me()
+                    bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
+                except Exception:
+                    bot_username = None
+                report = await format_parsing_report(result, bot_username=bot_username, db=db)
+                await bot.send_message(
+                    notify_chat_id,
+                    f"✅ parse recovery: kernel {kernel_ref} обработан\n\n{report}",
+                    parse_mode="Markdown",
+                )
+        finally:
+            _source_parsing_recovery_active.discard(kernel_ref)
+    return recovered
 
 
 
@@ -1209,7 +2238,16 @@ async def process_source_events(
                 event.title,
             )
             
+            parser_source_present = False
             if existing_id:
+                parser_source_present = await event_has_parser_source(
+                    db,
+                    existing_id,
+                    event.source_type,
+                    event.url,
+                )
+
+            if existing_id and parser_source_present:
                 event_id = existing_id
                 if needs_full_update:
                     # Update the placeholder event fully
@@ -1220,14 +2258,20 @@ async def process_source_events(
                         result_tag = "existing_full_update"
                         # Track updated event for reporting
                         if updated_events is not None:
-                            info = await build_updated_event_info(db, existing_id, source, "full_update")
+                            info = await build_updated_event_info(
+                                db,
+                                existing_id,
+                                source,
+                                "full_update",
+                                source_url=event.url,
+                            )
                             if info:
                                 updated_events.append(info)
                     else:
                         stats.failed += 1
                         result_tag = "existing_full_update_failed"
                 else:
-                    # Just update ticket status
+                    # Source already imported via parser -> cheap status/ticket sync only.
                     success = await update_event_ticket_status(
                         db,
                         existing_id,
@@ -1240,17 +2284,31 @@ async def process_source_events(
                         result_tag = "existing_ticket_update"
                         # Track updated event for reporting
                         if updated_events is not None:
-                            info = await build_updated_event_info(db, existing_id, source, "ticket_status")
+                            info = await build_updated_event_info(
+                                db,
+                                existing_id,
+                                source,
+                                "ticket_status",
+                                source_url=event.url,
+                            )
                             if info:
                                 updated_events.append(info)
                     else:
                         stats.already_exists += 1
                         result_tag = "existing_ticket_update_failed"
-                
+
                 # Always update linked events
                 await update_linked_events(db, existing_id, location_name, event.title)
             else:
-                if diag_enabled:
+                mode_prefix = "existing_source_missing" if existing_id else "new"
+                if existing_id and diag_enabled:
+                    logger.info(
+                        "source_parsing: diag parser_source_missing source=%s event_id=%s title=%s",
+                        event.source_type,
+                        existing_id,
+                        event.title[:120],
+                    )
+                if diag_enabled and not existing_id:
                     logger.info(
                         "source_parsing: diag no existing match title=%s",
                         event.title[:120],
@@ -1263,6 +2321,12 @@ async def process_source_events(
                     event.photos,
                     event.source_type,
                 )
+                if (not target_photos) and event.url and event.source_type == "dramteatr":
+                    # Kaggle output for dramteatr can miss `photos`. Pull at least one
+                    # gallery/cover image so Smart Update can log/apply posters.
+                    cover = await _fetch_og_image_for_dramteatr(event.url)
+                    if cover:
+                        target_photos = [cover]
 
                 if event.source_type in SOURCE_PARSING_DISABLE_OCR_SOURCES:
                     if diag_enabled:
@@ -1280,20 +2344,45 @@ async def process_source_events(
                                 event.title[:120],
                                 len(target_photos),
                             )
+                        if event.source_type == "dramteatr" and len(target_photos) > 3:
+                            # Dramteatr pages can have large galleries; we only need a few
+                            # posters for Smart Update and operator logs.
+                            target_photos = target_photos[:3]
                         raw_images = await asyncio.wait_for(
                             download_images(target_photos),
                             timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
                         )
                         
                         if raw_images:
-                            poster_media_list, _ = await asyncio.wait_for(
-                                process_media(
-                                    raw_images,
-                                    need_catbox=True,
-                                    need_ocr=True,
-                                ),
-                                timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
-                            )
+                            # Catbox can be flaky for consumers (Telegram preview, local runtime TLS issues).
+                            # For dramteatr, keep original URLs but still run OCR and store hashes.
+                            need_catbox = event.source_type != "dramteatr"
+                            # OCR is optional for source-parsed galleries; we must not drop posters
+                            # just because OCR timed out or a provider was unavailable.
+                            need_ocr = bool(need_catbox) and (event.source_type not in SOURCE_PARSING_DISABLE_OCR_SOURCES)
+                            try:
+                                poster_media_list, _ = await asyncio.wait_for(
+                                    process_media(
+                                        raw_images,
+                                        need_catbox=need_catbox,
+                                        need_ocr=need_ocr,
+                                    ),
+                                    timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                                )
+                            except asyncio.TimeoutError:
+                                # Preserve poster hashes/URLs even if OCR is too slow.
+                                poster_media_list, _ = await asyncio.wait_for(
+                                    process_media(
+                                        raw_images,
+                                        need_catbox=need_catbox,
+                                        need_ocr=False,
+                                    ),
+                                    timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                                )
+                            if not need_catbox:
+                                for poster, url in zip(poster_media_list, target_photos):
+                                    if not poster.catbox_url:
+                                        poster.catbox_url = url
                         if diag_enabled:
                             logger.info(
                                 "source_parsing: diag ocr done title=%s raw=%d posters=%d",
@@ -1310,39 +2399,65 @@ async def process_source_events(
                     except Exception as e:
                         logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
 
-                # Add new event
+                # Add/merge event through Smart Update.
                 llm_used = True
-                new_id, was_added = await add_new_event_via_queue(
-                    db,
-                    bot,
-                    event,
-                    current_progress,
-                    total_count,
-                    poster_media=poster_media_list,
+                new_id, was_added, status = unpack_add_event_result(
+                    await add_new_event_via_queue(
+                        db,
+                        bot,
+                        event,
+                        current_progress,
+                        total_count,
+                        poster_media=poster_media_list,
+                    )
                 )
-                
+
                 if new_id:
                     event_id = new_id
-                    if was_added:
+
+                outcome = classify_add_event_outcome(new_id, was_added, status)
+                if outcome == "added":
+                    if new_id:
                         stats.new_added += 1
                         if added_events is not None:
-                            info = await build_added_event_info(db, new_id, source)
+                            info = await build_added_event_info(
+                                db,
+                                new_id,
+                                source,
+                                source_url=event.url,
+                            )
                             if info:
                                 added_events.append(info)
-                        result_tag = "new_added"
-                    else:
-                        stats.skipped += 1  # Event existed, was updated but not new
-                        result_tag = "new_updated"
-                    # Delay between additions
+                    result_tag = f"{mode_prefix}_added"
+                elif outcome == "updated":
+                    if new_id:
+                        stats.ticket_updated += 1
+                        if updated_events is not None:
+                            info = await build_updated_event_info(
+                                db,
+                                new_id,
+                                source,
+                                "smart_merge",
+                                source_url=event.url,
+                            )
+                            if info:
+                                updated_events.append(info)
+                    result_tag = f"{mode_prefix}_updated"
+                elif outcome == "skipped":
+                    stats.skipped += 1
+                    result_tag = f"{mode_prefix}_skipped"
+                else:
+                    stats.failed += 1
+                    result_tag = f"{mode_prefix}_failed"
+
+                if new_id and outcome in {"added", "updated"}:
+                    # Delay between smart-update writes to reduce rebuild pressure.
                     await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
-                    
+
                     # DEBUG: Stop after max events
                     if DEBUG_MAX_EVENTS and stats.new_added >= DEBUG_MAX_EVENTS:
                         logger.info("source_parsing: DEBUG limit reached (%d events)", DEBUG_MAX_EVENTS)
                         break
-                else:
-                    stats.failed += 1
-                    result_tag = "new_failed"
         except Exception:
             stats.failed += 1
             result_tag = "exception"

@@ -5,6 +5,7 @@
 | `/start` | - | Register the first user as superadmin or display status. |
 | `/register` | - | Request moderator access if slots (<10) are free. |
 | `/help` | - | Show commands available for your role. |
+| `/assist (/a) <описание>` | required text | Суперадмин: описать действие простыми словами, Gemma подбирает подходящую команду, бот показывает план и просит подтверждение (✅/❌). |
 | `/requests` | - | Superadmin sees pending registrations with approve/reject buttons. |
 | `/tz <±HH:MM>` | required offset | Set timezone offset (superadmin only). |
 | `/addevent <text>` | event description | Parse text with model 4o and store one or several events. Poster images are uploaded to Catbox once, recognized via OCR, cached, and the extracted text is passed to 4o together with a token usage report for the operator. Forwarded messages from moderators are processed the same way. |
@@ -14,6 +15,8 @@
 | `/vkgroup <id|off>` | required id or `off` | Set or disable VK group for daily announcements. |
 | `/vktime today|added <HH:MM>` | required type and time | Change VK posting times (default 08:00/20:00). |
 | `/vkphotos` | - | Toggle sending images to VK posts. |
+| `/vk_auto_import [N|all] [--include-skipped]` | optional limit flags | Суперадмин: авторазбор очереди VK (таблица `vk_inbox`) через Smart Update. По умолчанию без аргументов обрабатывает всю активную очередь; `N` ограничивает количество постов. Показывает прогресс `X/Y`, унифицированный отчёт с фактами и количеством добавленных иллюстраций, ссылки на Telegraph и `/log`. |
+| `/vk_auto_import_stop` | - | Суперадмин: запросить остановку текущего прогона `/vk_auto_import` (остановка после завершения текущего поста). |
 | `/imp_groups_30d` | - | Суперадмин. Показать агрегированную статистику импорта за 30 дней по группам из Supabase-вьюха `vk_import_by_group`. Пример ответа:<br>`Импорт из VK по группам за последние 30 дн.:`<br>`1. club123: Импорт: 12, Отклонено: 4`. |
 | `/imp_daily_14d` | - | Суперадмин. Сводка импорта по дням за последние 14 дней из `vk_import_daily`. Пример:<br>`Импорт из VK по дням за последние 14 дн.:`<br>`2024-05-17: Импорт: 6, Отклонено: 1`. |
 | `/vk_misses [N]` | optional limit (default 10) | Суперадмин выгружает свежие пропуски из Supabase (`vk_misses_sample`), бот показывает карточки с текстом, ссылкой и причинами фильтрации, прикладывает до 10 изображений и добавляет кнопки «Отклонено верно»/«На доработку». Кнопка доработки записывает Markdown в `VK_MISS_REVIEW_FILE` (по умолчанию `/data/vk_miss_review.md`). |
@@ -26,6 +29,7 @@
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/ocrtest` | - | Сравнить распознавание афиш между gpt-4o-mini и gpt-4o (только супер-админ). |
 | `/kaggletest` | - | Суперадмин: проверка авторизации Kaggle (возвращает заголовок тестовой записи или ошибку API). |
+| `/tg` | - | Суперадмин: управление источниками Telegram Monitoring (добавить/удалить источник, ручной запуск). |
 | `/parse [check]` | optional `check` | Суперадмин: запуск парсинга источников (театры/собор/Третьяковка) через Kaggle. `check` — диагностический режим без сохранения в БД. См. `docs/features/source-parsing/sources/theatres/README.md`. |
 | `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete, edit and VK rewrite buttons. The rewrite control launches the shortpost flow; it shows `✂️` when the event has no VK repost yet and `✅` once the saved `vk_repost_url` confirms publication. Ticket links appear as vk.cc short URLs, and each card includes a `Статистика VK: https://vk.com/cc?act=stats&key=…` line when a short key is available. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |
@@ -38,10 +42,17 @@
 | `/backfill_topics [days]` | optional integer horizon | Superadmin only. Re-run the topic classifier for events dated from today up to `days` ahead (default 90). Sends a summary `processed=... updated=... skipped=...`; manual topics are skipped. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 | `/fest [archive] [page]` | optional `archive` flag and page number | List festivals with edit/delete options. Ten rows are shown per page with navigation buttons. Use `archive` to view finished festivals that no longer have upcoming events; omit it to see active ones. |
+| `/fest_queue [--info|-i] [--limit=N] [--source=vk|tg|url]` | optional filters | Суперадмин: ручной запуск фестивальной очереди. `--info/-i` показывает состояние очереди без разбора (счётчики, pending список). Без `--info` — запускает обработку; показывает прогресс/статус, даёт ссылки на страницу фестиваля и общую страницу «Фестивали». |
+| `/ticket_sites_queue [--info|-i] [--limit=N] [--source=pyramida|dom_iskusstv|qtickets] [--url=...]` | optional filters | Суперадмин: очередь мониторинга ticket-sites. Находится в Telegram Monitoring постах (pyramida.info / домискусств.рф / qtickets) и по расписанию (или вручную) запускает Kaggle-парсинг URL и Smart Update для обогащения событий (фото/цены/описание/статус билетов). `--info/-i` показывает состояние очереди. `--url=...` обрабатывает один конкретный URL. |
 
 
 
 | `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Includes the festivals landing page and stats for upcoming or recently ended (within a week) festivals. The footer now fetches daily OpenAI token totals from Supabase (`token_usage_daily`, falling back to live `token_usage` or the legacy snapshot on errors). Use `events` to list event page stats. |
+| `/telegraph_cache_stats [kind]` | optional kind (`event|festival|month|weekend|festivals_index`) | Superadmin only. Show Telegram web preview health for Telegraph pages: whether the page has `cached_page` (Instant View) and `photo` (preview image). |
+| `/telegraph_cache_sanitize [--limit=N] [--no-enqueue] ...` | optional flags | Superadmin only. Run Telegraph cache sanitizer (Kaggle/Telethon): warms + probes web preview for key pages and enqueues rebuild tasks for persistently failing pages. |
+| `/general_stats` | - | Superadmin only. Daily operational system report for the previous 24 hours (scheduled at 07:30 Europe/Kaliningrad). |
+| `/popular_posts [N]` | optional integer limit (default 10) | Суперадмин: статистика “социальной популярности” постов, которые создали события (TG/VK). Показывает ТОП постов, где `views` и `likes` выше медиан внутри своего канала/сообщества: (1) окно 3 суток (снапшоты `age_day=2`), (2) окно 24 часа (снапшоты `age_day=0`). В каждой строке: ссылка на исходник, список созданных событий (Telegraph + `id`), медианы канала и метрики поста, маркеры `⭐/👍`. В конце блока — диагностика: размер выборки (посты/источники; метрики vs импорт), счётчики `skip(...)`, и сколько постов выше медианы по `views/likes/оба` (после фильтров). |
+| `/rebuild_event <event_id> [--regen-desc]` | required id, optional flag | Суперадмин: принудительно пересобрать пайплайн события (Telegraph + зависимые страницы). С `--regen-desc` дополнительно перегенерирует описание в режиме fact-first из сохранённых фактов перед пересборкой. |
 | `/dumpdb` | - | Superadmin only. Download a SQL dump and `telegraph_token.txt` plus restore instructions. |
 | `/restore` | attach file | Superadmin only. Replace current database with the uploaded dump. |
 | `/tourist_export [period]` | optional `period=ГГГГ[-ММ[-ДД..ГГГГ-ММ-ДД]]` | Выгрузка событий в формате JSONL с полями `tourist_*`. Только для неблокированных модераторов и администраторов (включая суперадминов), уважается фильтр по диапазону дат. |
@@ -52,7 +63,7 @@ Use `/addevent` to let model 4o extract fields. `/addevent_raw` lets you
 input simple data separated by `|` pipes.
 
 Poster OCR reuses cached recognitions and shares a 10 000 000-token daily budget; once the limit is exhausted new posters wait
-until the next reset at UTC midnight.
+until the next reset at UTC midnight. If cached OCR is available when the limit is hit, `/addevent` includes a short cached OCR preview in its reply.
 
 ### VK review inline story creation
 

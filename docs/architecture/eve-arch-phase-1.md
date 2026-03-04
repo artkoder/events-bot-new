@@ -6,7 +6,7 @@
 
 ### 1.1. LLM в основном боте (`main.py`)
 
-- Основной боевой LLM-пайплайн в `main.py` сейчас использует **OpenAI Chat Completions** (модель `"gpt-4o"`) для парсинга событий и вспомогательных задач (например, `parse_event_via_4o`, `ask_4o`).
+- Основной боевой LLM-пайплайн в `main.py` сейчас использует **OpenAI Chat Completions** (модель `"gpt-4o"`) для парсинга событий и вспомогательных задач (например, `parse_event_via_llm`, `ask_4o`).
 - Учёт расхода токенов уже реализован: `main.py` содержит `log_token_usage(...)`, который пишет в Supabase таблицу `token_usage`.
   - Вставка делается через `client.table("token_usage").insert(row).execute()` (Supabase python client).
   - Время `at` формируется на стороне сервиса: `datetime.now(timezone.utc).isoformat()` (не “время БД”).

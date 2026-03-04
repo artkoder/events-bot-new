@@ -11,6 +11,18 @@ try:
 except ImportError:
     Fernet = None
 
+def _load_static_key() -> Optional[bytes]:
+    key_raw = (os.getenv("TG_MONITORING_FERNET_KEY") or "").strip()
+    if key_raw:
+        return key_raw.encode("utf-8")
+    key_path = (os.getenv("TG_MONITORING_FERNET_KEY_PATH") or "").strip()
+    if key_path:
+        path = Path(key_path)
+        if path.exists():
+            return path.read_bytes().strip()
+    return None
+
+
 def encrypt_secret(secret: str) -> Tuple[bytes, bytes]:
     """
     Encrypt a secret using Fernet (symmetric encryption).
@@ -24,7 +36,7 @@ def encrypt_secret(secret: str) -> Tuple[bytes, bytes]:
     if not secret:
         return b"", b""
         
-    key = Fernet.generate_key()
+    key = _load_static_key() or Fernet.generate_key()
     f = Fernet(key)
     encrypted_data = f.encrypt(secret.encode("utf-8"))
     

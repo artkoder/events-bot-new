@@ -24,7 +24,7 @@ async def test_add_events_from_text_autofills_program_url(tmp_path: Path, monkey
     async def fake_sync_vk(db, name, bot, strict=False):
         return None
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
     monkeypatch.setattr(main, "upload_images", fake_upload)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)

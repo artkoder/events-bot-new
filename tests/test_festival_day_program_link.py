@@ -21,6 +21,21 @@ def _p_has_content(node):
     return False
 
 
+def _node_text(node) -> str:
+    children = node.get("children") or []
+    parts: list[str] = []
+    for ch in children:
+        if isinstance(ch, str):
+            parts.append(ch)
+            continue
+        if isinstance(ch, dict):
+            nested = ch.get("children") or []
+            for sub in nested:
+                if isinstance(sub, str):
+                    parts.append(sub)
+    return "".join(parts)
+
+
 def test_event_to_nodes_autoday_no_program():
     fest = Festival(name="Fest")
     e = Event(
@@ -33,7 +48,9 @@ def test_event_to_nodes_autoday_no_program():
         festival="Fest",
     )
     nodes = main.event_to_nodes(e, festival=fest, show_festival=False)
-    assert len(nodes) == 3
+    assert len(nodes) == 4
+    assert any(n.get("tag") == "p" and "📅" in _node_text(n) for n in nodes)
+    assert any(n.get("tag") == "p" and "📍" in _node_text(n) for n in nodes)
     assert _p_has_content(nodes[1])
 
 
@@ -49,7 +66,7 @@ def test_event_to_nodes_autoday_program_link():
         festival="Fest",
     )
     nodes = main.event_to_nodes(e, festival=fest, show_festival=False)
-    assert len(nodes) == 4
+    assert len(nodes) == 5
     assert nodes[1] == {
         "tag": "p",
         "children": [
@@ -60,6 +77,8 @@ def test_event_to_nodes_autoday_program_link():
             }
         ],
     }
+    assert any(n.get("tag") == "p" and "📅" in _node_text(n) for n in nodes)
+    assert any(n.get("tag") == "p" and "📍" in _node_text(n) for n in nodes)
     assert _p_has_content(nodes[2])
 
 
@@ -98,6 +117,68 @@ def test_event_title_uses_source_post_without_telegraph():
     nodes = main.event_to_nodes(e, festival=fest, show_festival=False)
     link = nodes[0]["children"][0]
     assert link["attrs"]["href"] == "https://t.me/post"
+
+
+def test_event_to_nodes_invalid_html_fallback_preserves_detail_lines(monkeypatch):
+    def _raise_invalid(_html):
+        raise ValueError("invalid")
+
+    monkeypatch.setattr("telegraph.utils.html_to_nodes", _raise_invalid)
+
+    e = Event(
+        title="Fallback test",
+        description="Полный текст описания.",
+        source_text="s",
+        date="2030-01-01",
+        time="10:00",
+        location_name="Loc",
+        location_address="Street 1",
+        city="Kaliningrad",
+        telegraph_url="https://telegra.ph/test",
+        ics_url="https://example.com/test.ics",
+        festival="Fest",
+        search_digest="Короткий дайджест события.",
+    )
+    nodes = main.event_to_nodes(e, show_festival=False)
+
+    p_texts: list[str] = []
+    for node in nodes:
+        if node.get("tag") != "p":
+            continue
+        children = node.get("children") or []
+        parts: list[str] = []
+        for ch in children:
+            if isinstance(ch, str):
+                parts.append(ch)
+            elif isinstance(ch, dict):
+                nested = ch.get("children") or []
+                for sub in nested:
+                    if isinstance(sub, str):
+                        parts.append(sub)
+        txt = "".join(parts).strip()
+        if txt:
+            p_texts.append(txt)
+
+    assert any(t.startswith("📅 ") for t in p_texts)
+    assert any(t.startswith("📍 ") for t in p_texts)
+    assert any("подробнее" in t for t in p_texts)
+    digest_line = next((t for t in p_texts if "дайджест" in t.lower()), "")
+    assert digest_line
+    assert "📅" not in digest_line
+    assert "📍" not in digest_line
+
+    links: list[tuple[str, str]] = []
+    for node in nodes:
+        if node.get("tag") != "p":
+            continue
+        for ch in node.get("children") or []:
+            if not isinstance(ch, dict) or ch.get("tag") != "a":
+                continue
+            href = str((ch.get("attrs") or {}).get("href") or "").strip()
+            label = "".join([s for s in (ch.get("children") or []) if isinstance(s, str)]).strip()
+            links.append((label, href))
+    assert any("подробнее" in label.lower() and href == "https://telegra.ph/test" for label, href in links)
+    assert any("добавить в календарь" in label.lower() and href == "https://example.com/test.ics" for label, href in links)
 
 
 @pytest.mark.asyncio
@@ -149,7 +230,8 @@ async def test_build_festival_page_content_autoday_no_program(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_build_festival_page_content_event_gallery_order(tmp_path: Path):
+async def test_build_festival_page_content_event_gallery_order(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("FESTIVALS_UPCOMING_HORIZON_DAYS", "3650")
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -192,4 +274,3 @@ async def test_build_festival_page_content_event_gallery_order(tmp_path: Path):
     gallery_idx = html.index("https://example.com/gallery.jpg")
     nav_idx = html.index("Ближайшие фестивали")
     assert cover_idx < events_idx < gallery_idx < nav_idx
-

@@ -3,11 +3,13 @@ __pycache__/
 .db
 .env
 .pytest_cache/
+.vscode/
 
 # Production database snapshots and WAL files
 db_prod_snapshot.sqlite
 db_prod_snapshot.sqlite-shm
 db_prod_snapshot.sqlite-wal
+*.downloaded_at
 
 # Local database WAL files
 db.sqlite-shm
@@ -26,6 +28,8 @@ test_output.txt
 # Secrets - NEVER commit!
 telegraph_token.txt
 telegraph_token_prod.txt
+id_rsa_fly
+id_rsa_fly-cert.pub
 
 # Backups and test data
 backups/
@@ -51,6 +55,8 @@ artifacts/*
 
 # Run outputs
 *.pid
+*.session
+*.session-journal
 bot_logs.txt
 bot_output*.txt
 captured_logs.txt

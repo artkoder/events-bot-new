@@ -2,6 +2,7 @@ import os, sys
 import os, sys
 import os, sys
 from datetime import datetime as real_datetime, timezone
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,53 @@ import main
 import vk_review
 import vk_intake
 from db import Database
+
+
+def _patch_raw_conn_commit_locked_once(monkeypatch, db: Database):
+    original_raw_conn = db.raw_conn
+    commit_calls = 0
+    rollback_calls = 0
+
+    class LockingConnWrapper:
+        def __init__(self, conn):
+            self._conn = conn
+
+        async def execute(self, *args, **kwargs):
+            return await self._conn.execute(*args, **kwargs)
+
+        async def executemany(self, *args, **kwargs):
+            return await self._conn.executemany(*args, **kwargs)
+
+        async def commit(self):
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return await self._conn.commit()
+
+        async def rollback(self):
+            nonlocal rollback_calls
+            rollback_calls += 1
+            return await self._conn.rollback()
+
+        def __getattr__(self, item):
+            return getattr(self._conn, item)
+
+    def locking_raw_conn():
+        context = original_raw_conn()
+
+        class _Ctx:
+            async def __aenter__(self_nonlocal):
+                conn = await context.__aenter__()
+                return LockingConnWrapper(conn)
+
+            async def __aexit__(self_nonlocal, exc_type, exc, tb):
+                return await context.__aexit__(exc_type, exc, tb)
+
+        return _Ctx()
+
+    monkeypatch.setattr(db, "raw_conn", locking_raw_conn)
+    return lambda: (commit_calls, rollback_calls)
 
 
 @pytest.mark.asyncio
@@ -44,6 +92,81 @@ async def test_pick_next_and_skip(tmp_path):
     await vk_review.mark_rejected(db, post2.id)
     post3 = await vk_review.pick_next(db, 10, "batch1")
     assert post3 and post3.post_id == 2
+
+
+@pytest.mark.asyncio
+async def test_pick_next_prefer_oldest_orders_by_publish_date(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        future_ts = int(_time.time()) + 10_000
+        rows = [
+            (1, 1, 100, "Событие 25.12.2099", "k", 1, future_ts, "pending"),
+            (1, 2, 200, "Событие 26.12.2099", "k", 1, future_ts, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+    post = await vk_review.pick_next(db, 10, "batch1", prefer_oldest=True)
+    assert post and post.post_id == 1  # oldest by date
+
+
+@pytest.mark.asyncio
+async def test_pick_next_strict_chronological_bypasses_weighted_buckets(tmp_path, monkeypatch):
+    vk_review._FAR_BUCKET_HISTORY.clear()
+    monkeypatch.setenv("VK_REVIEW_W_SOON", "0")
+    monkeypatch.setenv("VK_REVIEW_W_LONG", "0")
+    monkeypatch.setenv("VK_REVIEW_W_FAR", "10")
+    monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "2")
+    fixed_now = 1_760_000_000
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
+    monkeypatch.setattr(
+        vk_review,
+        "extract_event_ts_hint",
+        lambda text, default_time=None, *, tz=None, publish_ts=None: int(str(text).split(":", 1)[1]),
+    )
+
+    urgent_cutoff = fixed_now + int(48 * 3600)
+    long_cutoff = fixed_now + int(30 * 86400)
+    soon_hint = urgent_cutoff + 3600
+    far_hint = long_cutoff + 3600
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        rows = [
+            # Older candidate (must be selected first in strict mode).
+            (1, 101, 100, f"TS:{soon_hint}", "k", 1, soon_hint, "pending"),
+            # FAR bucket candidate (would dominate in weighted mode with W_FAR=10).
+            (1, 202, 200, f"TS:{far_hint}", "k", 1, far_hint, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(
+        db,
+        42,
+        "batch-strict",
+        prefer_oldest=True,
+        strict_chronological=True,
+    )
+    assert post is not None
+    assert post.post_id == 101
+
+
+@pytest.mark.asyncio
+async def test_pick_next_returns_none_when_no_pending_and_no_skipped(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    post = await vk_review.pick_next(db, 7, "batch-empty", requeue_skipped=True)
+    assert post is None
 
 
 @pytest.mark.asyncio
@@ -530,9 +653,10 @@ async def test_refresh_hints_after_timezone_change(tmp_path, monkeypatch):
         )
         assert heading in lines
         heading_index = lines.index(heading)
-        assert (
-            lines[heading_index + 1]
-            == "Совпадающее событие — https://telegra.ph/test"
+        # _vkrev_show_next uses HTML message formatting and renders matched events as links.
+        assert lines[heading_index + 1] in (
+            "Совпадающее событие — https://telegra.ph/test",
+            '<a href="https://telegra.ph/test">Совпадающее событие</a>',
         )
     finally:
         main.LOCAL_TZ = original_tz
@@ -673,6 +797,85 @@ async def test_mark_imported_creates_batch_when_missing(tmp_path):
     assert operator_id == 42
     assert months_csv == "2025-10"
     assert finished_at is None
+
+
+@pytest.mark.asyncio
+async def test_mark_imported_retries_on_locked_commit(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
+            ("batch-lock", 7, ""),
+        )
+        future_ts = int(_time.time()) + 10_000
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (1, 77, 300, "Концерт 11.11.2099", "k", 1, future_ts, "pending"),
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 7, "batch-lock")
+    assert post is not None
+
+    lock_stats = _patch_raw_conn_commit_locked_once(monkeypatch, db)
+
+    await vk_review.mark_imported(db, post.id, "batch-lock", 7, 501, "2026-03-11")
+
+    commit_calls, rollback_calls = lock_stats()
+    assert commit_calls >= 2
+    assert rollback_calls >= 1
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, imported_event_id, review_batch FROM vk_inbox WHERE id=?",
+            (post.id,),
+        )
+        status, imported_event_id, review_batch = await cur.fetchone()
+        cur = await conn.execute(
+            "SELECT months_csv FROM vk_review_batch WHERE batch_id=?",
+            ("batch-lock",),
+        )
+        months_csv = (await cur.fetchone())[0]
+
+    assert status == "imported"
+    assert imported_event_id == 501
+    assert review_batch == "batch-lock"
+    assert months_csv == "2026-03"
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_retries_on_locked_commit(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    future_ts = int(_time.time()) + 10_000
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (1, 88, 400, "Лекция 12.11.2099", "k", 1, future_ts, "pending"),
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 9, "batch-fail")
+    assert post is not None
+    lock_stats = _patch_raw_conn_commit_locked_once(monkeypatch, db)
+
+    await vk_review.mark_failed(db, post.id)
+
+    commit_calls, rollback_calls = lock_stats()
+    assert commit_calls >= 2
+    assert rollback_calls >= 1
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, locked_by, locked_at FROM vk_inbox WHERE id=?",
+            (post.id,),
+        )
+        status, locked_by, locked_at = await cur.fetchone()
+
+    assert status == "failed"
+    assert locked_by is None
+    assert locked_at is None
 
 
 @pytest.mark.asyncio

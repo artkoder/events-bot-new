@@ -12,14 +12,21 @@ sections:
     commands: docs/operations/commands.md
     cron: docs/operations/cron.md
     e2e_testing: docs/operations/e2e-testing.md
+    e2e_scenarios: docs/operations/e2e-scenarios.md
+    release_smoke_smart_update: docs/operations/release-smoke-smart-update.md
+    kaggle_secrets: docs/operations/kaggle-secrets.md
     prod_data: docs/operations/prod-data.md
+    sqlite_db_init: docs/operations/sqlite-db-init.md
     vk_metrics: docs/operations/vk-metrics.md
+    supabase_storage: docs/operations/supabase-storage.md
   llm:
     prompts: docs/llm/prompts.md
+    admin_actions: docs/llm/admin-actions.md
     request_guide: docs/llm/request-guide.md
     topics: docs/llm/topics.md
   reference:
     locations: docs/reference/locations.md
+    location_flags: docs/reference/location-flags.md
     holidays: docs/reference/holidays.md
     recurring_events: docs/reference/recurring-events.md
     month_page_template: docs/reference/month-page-template.md
@@ -31,7 +38,13 @@ sections:
     tretyakov_parser: docs/features/source-parsing/sources/tretyakov/README.md
     festival_parser: docs/features/source-parsing/sources/festival-parser/README.md
   backlog:
-    index: docs/backlog/
+    index: docs/backlog/README.md
+    features:
+      telegram_monitoring: docs/backlog/features/telegram-monitoring/README.md
+      telegram_monitoring_videos: docs/backlog/features/telegram-monitoring-videos/README.md
+      smart_event_update: docs/backlog/features/smart-event-update/README.md
+      event_scoring: docs/backlog/features/event-scoring/README.md
+      movie_showtimes: docs/backlog/features/movie-showtimes/README.md
     linear:
       - docs/backlog/linear/EVE-11-llm-rate-limits.md
       - docs/backlog/linear/EVE-54-kaggle-secrets.md
@@ -67,6 +80,108 @@ features:
     docs: docs/features/tourist-label/README.md
     entrypoints:
       - main.py
+      - db.py
+  llm_gateway:
+    status: implemented
+    docs: docs/features/llm-gateway/README.md
+    entrypoints:
+      - google_ai/client.py
+      - google_ai/exceptions.py
+      - google_ai/secrets.py
+  admin_action_assistant:
+    status: implemented
+    docs: docs/features/admin-action-assistant/README.md
+    entrypoints:
+      - handlers/admin_assist_cmd.py
+      - main.py
+      - main_part2.py
+  telegram_monitoring:
+    status: implemented
+    docs: docs/features/telegram-monitoring/README.md
+    entrypoints:
+      - source_parsing/telegram/commands.py
+      - source_parsing/telegram/service.py
+      - source_parsing/telegram/handlers.py
+      - smart_event_update.py
+      - scheduling.py
+  ticket_sites_queue:
+    status: implemented
+    docs: docs/features/ticket-sites-queue/README.md
+    entrypoints:
+      - ticket_sites_queue.py
+      - source_parsing/telegram/handlers.py
+      - scheduling.py
+      - main_part2.py
+  post_metrics:
+    status: implemented
+    docs: docs/features/post-metrics/README.md
+    entrypoints:
+      - source_parsing/post_metrics.py
+      - db.py
+  smart_event_update:
+    status: implemented
+    docs: docs/features/smart-event-update/README.md
+    entrypoints:
+      - smart_event_update.py
+      - models.py
+      - db.py
+  linked_events:
+    status: implemented
+    docs: docs/features/linked-events/README.md
+    entrypoints:
+      - linked_events.py
+      - smart_event_update.py
+      - source_parsing/handlers.py
+      - main.py
+      - main_part2.py
+  vk_auto_queue:
+    status: implemented
+    docs: docs/features/vk-auto-queue/README.md
+    entrypoints:
+      - vk_auto_queue.py
+      - scheduling.py
+      - main_part2.py
+      - vk_review.py
+      - vk_intake.py
+  general_stats:
+    status: in_progress
+    docs: docs/features/general-stats/README.md
+    entrypoints:
+      - scheduling.py
+      - main.py
+      - main_part2.py
+      - general_stats.py
+  geo_region_filter:
+    status: implemented
+    docs: docs/features/geo-region-filter/README.md
+    entrypoints:
+      - geo_region.py
+      - smart_event_update.py
+  exhibitions_smart_update:
+    status: implemented
+    docs: docs/features/exhibitions-smart-update/README.md
+    entrypoints:
+      - smart_event_update.py
+      - source_parsing/telegram/handlers.py
+      - source_parsing/handlers.py
+      - vk_intake.py
+      - main.py
+  festivals:
+    status: in_progress
+    docs: docs/features/festivals/README.md
+    entrypoints:
+      - main.py
+      - main_part2.py
+      - source_parsing/festival_parser.py
+      - smart_event_update.py
+  telegraph_cache_sanitizer:
+    status: implemented
+    docs: docs/features/telegraph-cache-sanitizer/README.md
+    entrypoints:
+      - telegraph_cache_sanitizer.py
+      - handlers/telegraph_cache_cmd.py
+      - scheduling.py
+      - kaggle/TelegraphCacheProbe/telegraph_cache_probe.py
       - db.py
 
 artifacts:

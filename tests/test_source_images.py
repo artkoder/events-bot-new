@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import main
+from datetime import date, timedelta
 
 
 @pytest.mark.asyncio
@@ -112,12 +113,49 @@ async def test_build_source_page_content_ics_with_cover():
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_prefers_non_webp_cover_when_available():
+    html, _, uploaded = await main.build_source_page_content(
+        "T",
+        "text",
+        None,
+        None,
+        None,
+        None,
+        None,
+        catbox_urls=["http://cat/1.webp", "http://cat/2.jpg"],
+    )
+    assert uploaded == 2
+    assert html.startswith('<figure><img src="http://cat/2.jpg"/></figure>')
+    assert '<img src="http://cat/1.webp"/>' in html
+
+
+@pytest.mark.asyncio
 async def test_build_source_page_content_ics_no_cover():
     html, _, _ = await main.build_source_page_content(
         "T", "text", None, None, None, "http://ics", None
     )
     assert html.startswith('<p>📅 <a href="http://ics">Добавить в календарь</a></p>')
     assert html.index('http://ics') < html.index('<p>text</p>')
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_preserves_hashtags_in_body_and_digest():
+    body = ("Описание #Фигаро #театр. " * 40).strip()
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        body,
+        None,
+        None,
+        None,
+        None,
+        None,
+        search_digest="Кратко #анонс #театр",
+    )
+    assert "#Фигаро" in html
+    assert "#театр" in html
+    assert "#анонс" in html
+    assert "Описание" in html
+    assert "Кратко" in html
 
 
 @pytest.mark.asyncio
@@ -138,10 +176,48 @@ async def test_build_source_page_content_summary_block_with_ics():
         event_summary=summary,
     )
     assert (
-        '🗓 1 июня ⏰ 18:30 📅 <a href="http://ics">Добавить в календарь</a>'
+        '🗓 1 июня в 18:30<br/>📅 <a href="http://ics">Добавить в календарь</a>'
         in html
     )
     assert '<br/>📍 Место' in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_dedup_address_city():
+    summary = main.SourcePageEventSummary(
+        date="2026-02-20",
+        time="20:00",
+        location_name="Бастион (арт-клуб)",
+        location_address="Дзержинского 31В, Калининград",
+        city="Калининград",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "Body",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    assert "Дзержинского 31В, Калининград, Калининград" not in html
+    assert "Дзержинского 31В, Калининград" in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_unwraps_overlong_blockquote():
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "",
+        None,
+        ">\u00abРоссия стала для меня вторым домом\u00bb — говорит Kevin.\n"
+        ">Билеты можно приобрести по телефону 000.\n",
+        None,
+        None,
+        None,
+    )
+    assert "<blockquote>" not in html
 
 
 @pytest.mark.asyncio
@@ -340,7 +416,7 @@ async def test_build_source_page_content_summary_block(monkeypatch):
         event_summary=summary,
     )
     assert (
-        '<p>🗓 1 мая ⏰ 19:00<br/>📍 Дом, Улица, Калининград<br/>🎟 '
+        '<p>🗓 1 мая в 19:00<br/>📍 Дом, Улица, Калининград<br/>🎟 '
         '<a href="https://tickets.example.com/show">Билеты</a> '
         "от 500 до 1000 руб.</p>" in html
     )
@@ -394,6 +470,104 @@ async def test_build_source_page_content_summary_block_missing_fields():
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_exhibition_ongoing():
+    start = date.today() - timedelta(days=2)
+    end = date.today() + timedelta(days=40)
+    summary = main.SourcePageEventSummary(
+        date=start.isoformat(),
+        end_date=end.isoformat(),
+        event_type="выставка",
+        location_name="Третьяковская галерея",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body text",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    end_month = main.MONTHS[end.month - 1]
+    assert f"<p>🗓 по {end.day} {end_month}<br/>📍 Третьяковская галерея</p>" in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_exhibition_range():
+    start = date.today() + timedelta(days=30)
+    end = date.today() + timedelta(days=48)
+    summary = main.SourcePageEventSummary(
+        date=start.isoformat(),
+        end_date=end.isoformat(),
+        event_type="выставка",
+        time="10:00 - 17:00",
+        location_name="Локация",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body text",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    if start.year == end.year and start.month == end.month:
+        month_name = main.MONTHS[start.month - 1]
+        expected = f"<p>🗓 {start.day}-{end.day} {month_name} 10:00 - 17:00<br/>📍 Локация</p>"
+    else:
+        start_text = f"{start.day} {main.MONTHS[start.month - 1]}"
+        end_text = f"{end.day} {main.MONTHS[end.month - 1]}"
+        if start.year != end.year:
+            start_text += f" {start.year}"
+            end_text += f" {end.year}"
+        expected = f"<p>🗓 с {start_text} по {end_text} 10:00 - 17:00<br/>📍 Локация</p>"
+    assert expected in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_location_alias_canonicalization():
+    summary = main.SourcePageEventSummary(
+        date="2026-03-01",
+        location_name="Ворота",
+        location_address="Литовский вал, 61",
+        city="Калининград",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body text",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    assert "📍 Закхаймские ворота, Литовский Вал 61, Калининград" in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_does_not_add_spacer_before_heading():
+    summary = main.SourcePageEventSummary(
+        date="2026-03-01",
+        location_name="Локация",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "### Подзаголовок\n\nТекст абзаца",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    assert "<p>🗓 1 марта<br/>📍 Локация</p><h3>Подзаголовок</h3>" in html
+
+
+@pytest.mark.asyncio
 async def test_build_source_page_content_history_strips_vk_links():
     source = "https://vk.com/source"
     text = (
@@ -433,6 +607,19 @@ async def test_build_source_page_content_editor_blocks():
         '<p>Второй с <a href="https://example.com">https://example.com</a></p>'
         in html
     )
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_heading_keeps_paragraph_breaks_but_not_heading_gap():
+    html, _, _ = await main.build_source_page_content(
+        "Заголовок",
+        "Исходный текст",
+        None,
+        "### Анонс\n\nПервый абзац.\n\nВторой абзац.",
+        display_link=False,
+    )
+    assert "<h3>Анонс</h3><p>Первый абзац.</p>" in html
+    assert "<p>Первый абзац.</p><p>&#8203;</p><p>Второй абзац.</p>" in html
 
 
 @pytest.mark.asyncio

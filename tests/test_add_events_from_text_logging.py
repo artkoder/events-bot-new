@@ -26,7 +26,7 @@ async def test_add_events_from_text_logs_timeout(tmp_path: Path, monkeypatch, ca
         )
         raise exc
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     with caplog.at_level(logging.ERROR):
         results = await main.add_events_from_text(db, "text", None, None, None)
@@ -65,7 +65,7 @@ async def test_add_events_from_text_logs_other_exception(
         )
         raise exc
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     with caplog.at_level(logging.ERROR):
         results = await main.add_events_from_text(db, "text", None, None, None)

@@ -2,6 +2,12 @@ import re
 import html
 from datetime import datetime, timezone, timedelta, time, date
 from models import Event, Festival
+from digest_helper import (
+    clean_search_digest,
+    clean_short_description,
+    fallback_one_sentence,
+    is_short_description_acceptable,
+)
 
 # Kaliningrad timezone (UTC+2)
 LOCAL_TZ = timezone(timedelta(hours=2))
@@ -51,7 +57,7 @@ def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     return start_local.astimezone(timezone.utc)
 
 def is_recent(e: Event, tz: timezone | None = None, now: datetime | None = None) -> bool:
-    if e.added_at is None or e.silent:
+    if e.added_at is None or e.silent or getattr(e, "lifecycle_status", "active") != "active":
         return False
     if tz is None:
         tz = LOCAL_TZ
@@ -79,7 +85,11 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     addr = address.strip()
     if addr.lower().endswith(city_clean):
         addr = re.sub(r",?\s*#?%s$" % re.escape(city_clean), "", addr, flags=re.IGNORECASE)
+    # Compact common Russian address noise: "ул." prefix and comma separators.
     addr = addr.rstrip(", ")
+    addr = re.sub(r"\s*,\s*", " ", addr)
+    addr = re.sub(r"(?i)^\s*(?:ул\.?|улица)\s+", "", addr).strip()
+    addr = re.sub(r"\s{2,}", " ", addr).strip()
     return addr
 
 def format_event_md(
@@ -100,7 +110,19 @@ def format_event_md(
             lines.append(f"[{festival.name}]({link})")
         else:
             lines.append(festival.name)
-    lines.append(e.description.strip())
+    digest = clean_short_description(getattr(e, "short_description", None))
+    if digest and not is_short_description_acceptable(digest, min_words=12, max_words=16):
+        digest = fallback_one_sentence(digest, max_words=16)
+    if not digest:
+        digest = clean_search_digest(getattr(e, "search_digest", None))
+        if digest:
+            digest = fallback_one_sentence(digest, max_words=16)
+    if not digest:
+        digest = fallback_one_sentence(getattr(e, "description", None), max_words=16)
+    if not digest:
+        digest = str(getattr(e, "description", "") or "").strip()
+    if digest:
+        lines.append(digest)
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
     if getattr(e, "ticket_status", None) == "sold_out":
@@ -168,11 +190,9 @@ def format_event_md(
     if e.time and e.time != "00:00":
         time_part = f" {e.time}"
 
-    if day and loc:
-        lines.append(f"_{day}{time_part}, {loc}_")
-    elif day:
-        lines.append(f"_{day}{time_part}_")
-    elif loc:
-        lines.append(f"_{loc}_")
+    if day:
+        lines.append(f"\U0001f4c5 {day}{time_part}".strip())
+    if loc:
+        lines.append(f"\U0001f4cd {loc}".strip())
     
     return "\n".join(lines)

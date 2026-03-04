@@ -100,7 +100,7 @@ async def test_llm_on_event(db_path: str, event_id: int):
         
         # Здесь можно добавить вызов LLM для тестирования
         print("💡 Для тестирования LLM добавьте код вызова нужной функции")
-        print("   Например: parse_event_via_4o, compose_story_pitch_via_4o и т.д.")
+        print("   Например: parse_event_via_llm, compose_story_pitch_via_4o и т.д.")
 
 
 async def test_vk_review(db_path: str):

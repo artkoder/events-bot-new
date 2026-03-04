@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 import time
 import shutil
@@ -16,12 +17,16 @@ from video_announce.kaggle_client import (
     KaggleClient,
     KERNELS_ROOT_PATH,
 )
+from kaggle_registry import register_job, remove_job
 from source_parsing.parser import TheatreEvent, parse_date_raw
 from source_parsing.handlers import (
     SourceParsingStats,
     add_new_event_via_queue,
     update_event_ticket_status,
     update_linked_events,
+    event_has_parser_source,
+    unpack_add_event_result,
+    classify_add_event_outcome,
     find_existing_event,
     normalize_location_name,
     EVENT_ADD_DELAY_SECONDS,
@@ -56,6 +61,7 @@ async def run_philharmonia_kaggle_kernel(
     client = KaggleClient()
     kernel_path = KERNELS_ROOT_PATH / PHILHARMONIA_KERNEL_FOLDER
     kernel_ref = f"zigomaro/parse-philharmonia"  # Default
+    registered = False
 
     async def _notify(phase: str, status: dict | None = None) -> None:
         if not status_callback:
@@ -113,6 +119,15 @@ async def run_philharmonia_kaggle_kernel(
             return "push_failed", [], time.time() - start_time
         
         await _notify("pushed")
+        try:
+            await register_job(
+                "parse_philharmonia",
+                kernel_ref,
+                meta={"kernel_folder": PHILHARMONIA_KERNEL_FOLDER, "pid": os.getpid()},
+            )
+            registered = True
+        except Exception:
+            logger.warning("philharmonia_kaggle: failed to register recovery job", exc_info=True)
 
         # Wait for Kaggle to start
         await asyncio.sleep(10)
@@ -170,6 +185,8 @@ async def run_philharmonia_kaggle_kernel(
                 final_status,
                 duration,
             )
+            if registered:
+                await remove_job("parse_philharmonia", kernel_ref)
             return final_status, [], duration
         
         # Download output files
@@ -181,6 +198,8 @@ async def run_philharmonia_kaggle_kernel(
             
         if final_status == "failed":
             logger.error("philharmonia_kaggle: kernel checked as failed, retrieved %d files", len(output_files))
+            if registered:
+                await remove_job("parse_philharmonia", kernel_ref)
             return "failed", output_files, duration
         
         logger.info(
@@ -188,7 +207,8 @@ async def run_philharmonia_kaggle_kernel(
             duration,
             len(output_files),
         )
-        
+        if registered:
+            await remove_job("parse_philharmonia", kernel_ref)
         return final_status, output_files, duration
         
     finally:
@@ -337,7 +357,16 @@ async def process_philharmonia_events(
             db, location_name, event.parsed_date, event.parsed_time or "00:00", event.title
         )
         
+        parser_source_present = False
         if existing_id:
+            parser_source_present = await event_has_parser_source(
+                db,
+                existing_id,
+                event.source_type,
+                event.url,
+            )
+
+        if existing_id and parser_source_present:
             success = await update_event_ticket_status(
                 db, existing_id, event.ticket_status, event.url
             )
@@ -359,15 +388,24 @@ async def process_philharmonia_events(
                 if images:
                     poster_media_list, _ = await process_media(images, need_catbox=True, need_ocr=True)
             
-            new_id, was_added = await add_new_event_via_queue(
-                db, bot, event, current_progress, len(events), poster_media=poster_media_list
+            new_id, was_added, status = unpack_add_event_result(
+                await add_new_event_via_queue(
+                    db, bot, event, current_progress, len(events), poster_media=poster_media_list
+                )
             )
-            
-            if new_id and was_added:
+
+            outcome = classify_add_event_outcome(new_id, was_added, status)
+            if outcome == "added" and new_id:
                 stats.new_added += 1
-                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
-            else:
+            elif outcome == "updated" and new_id:
+                stats.ticket_updated += 1
+            elif outcome == "skipped":
                 stats.skipped += 1
+            else:
+                stats.failed += 1
+
+            if new_id and outcome in {"added", "updated"}:
+                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
                 
     logger.info("philharmonia_process: done added=%d updated=%d", stats.new_added, stats.ticket_updated)
     return stats

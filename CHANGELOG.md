@@ -1,5 +1,300 @@
 # Changelog
 
+## [Unreleased]
+
+## [1.12.0] - 2026-03-04
+### Highlights
+- **Smart Update (feature bundle)**: unified create/merge pipeline for VK/TG/`/parse` with source logs, Telegraph consistency, festival-context routing, and out-of-region filtering safeguards.
+- **LLM Rate-Limit Control Framework (feature bundle)**: Supabase limiter + resilient fallback/retry/defer behavior across Smart Update, event parsing, Telegram monitoring, and VK auto queue.
+- **Gemma Migration (feature bundle)**: transition to Gemma-first processing for event parsing and Smart Update (4o remains fallback/override where explicitly configured).
+- **Telegram Monitoring (feature bundle)**: `/tg` operational flow (source management, trust/festival settings, Kaggle processing, Smart Update import, scheduled runs, and operator-facing reports).
+- **VK Auto Queue Import (feature bundle)**: automatic VK inbox processing (`/vk_auto_import` + scheduler), including progress/reporting, prefetch pipeline, cancellation/defer handling, and Smart Update integration.
+
+### Added
+- **Locations**: Added `Центр культуры и досуга, Калининградской ш. 4А, Гурьевск` to the canonical venue list in `docs/reference/locations.md`.
+- **General Stats**: Added `/general_stats` superadmin command with a 24-hour rolling report window (`[start_utc, end_utc)`) and explicit Kaliningrad period boundaries in the message.
+- **General Stats**: Added scheduled daily report job (`ENABLE_GENERAL_STATS`, `GENERAL_STATS_TIME_LOCAL`, `GENERAL_STATS_TZ`) with delivery to both `OPERATOR_CHAT_ID` and `ADMIN_CHAT_ID` when configured.
+- **Post Metrics**: Added `/popular_posts` superadmin command to find TG/VK posts that created events and performed above per-channel medians (3-day and 24-hour windows), including source + Telegraph links and `⭐/👍` markers.
+- **Admin Action Assistant**: Added `/assist` (alias: `/a`) and menu button `🧠 Описать действие` to map an admin’s natural-language request to an existing bot command via Gemma, show a preview + confirmation, and execute only after approval.
+- **Supabase Storage**: Added bucket usage guard helper (`supabase_storage.check_bucket_usage_limit*`) to keep media buckets below a safe limit (default `490MB`, configurable via ENV wrapper).
+- **Ops Run Log**: Introduced unified `ops_run` SQLite table (`kind/trigger/chat_id/operator_id/started_at/finished_at/status/metrics_json/details_json`) with indexes for operational run tracking.
+- **Festivals Queue**: Added unified `festival_queue` pipeline (`/fest_queue`) with manual processing, status mode (`-i/--info`), source filters (`--source=vk|tg|url`), and scheduler hooks.
+- **Ticket Sites Queue**: Added recurring `ticket_site_queue` pipeline (`/ticket_sites_queue`) that auto-enqueues ticket links discovered during Smart Event Update (any source: Telegram/VK/manual) (pyramida.info / домискусств.рф / qtickets) and enriches events via Kaggle parsing + Smart Update.
+- **Festivals Metadata**: Added `festival_source/festival_series` support for Telegram and VK sources (including Alembic migration + seed of known festival Telegram channels).
+- **Holidays**: Added псевдо‑фестивали «Масленица» (подвижный, `movable:maslenitsa`) и «8 Марта» в `docs/reference/holidays.md`.
+- **Geo Region Filter**: Added deterministic Kaliningrad-only guard (allowlist + SQLite cache + Wikidata check + Gemma fallback) for Smart Update imports.
+- **Testing**: Added unit tests for `collect_general_stats` on temporary SQLite (`tests/test_general_stats.py`) including half-open window boundary checks.
+- **E2E/Smoke**: Added release smoke scenarios (`release_smoke_smart_update`, `release_multisource_control`, `festival_queue`, `smoke_vk_access`) and expanded live-E2E checks.
+- **E2E/Smoke**: Added automated smoke check that `/start` → «➕ Добавить событие» creates/updates events via Smart Update (bot source-log + poster fact).
+- **Ops Scripts**: Added `scripts/preflight_release_smoke.py`, `scripts/run_bot_dev.sh`, and `scripts/seed_dev_superadmin.py` for local/live validation workflows.
+- **Ops Scripts**: Added `scripts/inspect/dedup_event_duplicates.py` to find and merge high-confidence duplicate events in SQLite (creates a backup under `artifacts/db/` before applying).
+- **Ops Scripts**: Added `scripts/inspect/audit_media_dedup.py` to audit Supabase media deduplication over the last N hours (DB scan + optional Storage HEAD checks).
+- **Telegram Monitor**: `/tg` now shows live Kaggle kernel status (polling) and sends a detailed per-event report with Telegram + Telegraph links.
+- **Telegram Monitor**: Source list now includes per-channel stats (last scan/message, counts) and supports delete.
+- **Telegram Monitor**: `/tg` → source list now shows per-channel median `views/likes` and days covered within the `POST_POPULARITY_HORIZON_DAYS` window (operator baseline for ⭐/👍).
+- **Telegram Sources**: Added canonical Telegram monitoring source catalog (`docs/features/telegram-monitoring/sources.yml`) with trust/defaults/filters + idempotent seeding (`scripts/seed_telegram_sources.py` and `/tg` → «🧩 Синхронизировать источники»).
+- **E2E Telegram Sources**: Added UI scenario verifying canonical Telegram sources + pagination (`tests/e2e/features/telegram_sources_seed.feature`).
+- **Telegram Monitor (Kaggle)**: Supabase poster uploads use short object keys (configurable prefix `TG_MONITORING_POSTERS_PREFIX`, default `p`) to minimize public URL length.
+- **Telegram Monitor (Kaggle)**: Added message-level video export/upload to Supabase (`messages[].videos[]` + `video_status`) with max file size `TG_MONITORING_VIDEO_MAX_MB=10` and a stricter video bucket safe-guard `TG_MONITORING_VIDEO_BUCKET_SAFE_MB=430`.
+- **Telegram Monitor (Kaggle)**: Added source-level metadata export in `telegram_results.json` (`schema_version=2`, top-level `sources_meta[]` with `title/about/about_links/meta_hash/fetched_at`) plus best-effort LLM suggestions for `festival_series`/`website_url`.
+- **Telegram Monitor UI**: Added `/tg` debug button `♻️ Импорт из JSON` to rerun server import from one of the recent local `telegram_results.json` outputs (default: last 4) without waiting for a new Kaggle run.
+- **Telegram Monitor UI (DEV)**: Added `/tg` mode `DEV: Recreate + Reimport` (only when `DEV_MODE=1`) with confirm preview; it deterministically deletes matching telegram events (`event_source.source_url`), clears `joboutbox` for affected `event_id`, clears `telegram_scanned_message` marks for `(source,message_id)` pairs from the selected JSON, then reruns import.
+
+### Changed
+- **Event Parse / Locations**: Unknown venues are no longer canonicalized to a known entry from `docs/reference/locations.md` by generic tokens like `школа`; when the post contains an explicit conflicting address, raw `location_name/location_address/city` are preserved instead of building a hybrid location line.
+- **LLM Gateway / Gemma**: Prompt TPM reservation is now more conservative for long Cyrillic/OCR-heavy inputs, reducing cases where Supabase `reserve` passed but Google AI still returned provider-side `429 tpm`.
+- **VK Auto Queue**: Removed redundant Telegraph wait from the hot path when inline Telegraph jobs are enabled, and added automatic slow-row stage timing logs for long VK imports.
+- **LLM Gateway / Gemma**: Provider-side `429` is now fail-fast in `GoogleAIClient` (no internal multi-minute retry loop); waiting/defer logic remains in higher-level workflows like event parse and VK auto queue.
+- **LLM Gateway / Supabase**: `google_ai_mark_sent` and `google_ai_finalize` now retry transient RPC/network failures before giving up, reducing accumulation of stuck `google_ai_requests.status='reserved'`.
+- **LLM Gateway / Supabase**: Added stale-reservation recovery SQL (`migrations/003_google_ai_sweep_stale.sql`) and inspect helper `scripts/inspect/sweep_google_ai_stale.py` to safely sweep old `reserved` rows with `sent_at is null`.
+- **Run Instrumentation**: Added `ops_run` logging for `vk_auto_import`, `/parse` (manual + scheduled + if-changed skip), `/3di` (manual + scheduler), `festival_queue` (manual + scheduler), and `tg_monitoring` runs, including successful zero-result runs.
+- **/3di (Preview3D)**: Preview images are now uploaded to Supabase Storage (`SUPABASE_MEDIA_BUCKET`, prefix `p3d/event/<event_id>.webp`) instead of Catbox; added manual cleanup scripts for test Storage.
+- **General Stats**: Daily `/general_stats` now includes per-run durations (`took=...`) for ops-run instrumented jobs.
+- **General Stats**: `/general_stats` now shows VK queue state (`vk_queue_added_period`, `vk_queue_parsed_period`, `vk_queue_unresolved_now`) so operators can see daily inflow, processed volume, and current unresolved backlog.
+- **Scheduler**: Added optional heavy-job serialization (`SCHED_SERIALIZE_HEAVY_JOBS=1`) to avoid overlapping multi-hour jobs (Telegram monitoring, VK auto-import, `/parse`, `/3di`, etc.).
+- **Schema**: Added `festival.updated_at` (with migration/backfill and update trigger) for daily updated-festival metrics.
+- **Schema**: Added immutable `geo_city_region_cache.created_at` (with migration/backfill) for first-seen city reporting in general stats.
+- **Schema**: Added `telegram_post_metric` and `vk_post_metric` tables to store daily `views/likes` snapshots per post (for popularity analytics).
+- **Geo Cache Upsert**: Updated city-region cache writes to preserve `created_at` on conflict updates.
+- **Help**: Added `/general_stats` to `HELP_COMMANDS` with `superadmin` access.
+- **Event Parse Backend**: `parse_event_via_llm` now defaults to Gemma for VK/TG draft extraction (4o remains optional fallback/override).
+- **VK Auto Queue**: Added N/N+1 prefetch pipeline (`VK_AUTO_IMPORT_PREFETCH`) and optional inline post-import jobs (`VK_AUTO_IMPORT_INLINE_JOBS`, `VK_AUTO_IMPORT_INLINE_INCLUDE_ICS`) to speed up and stabilize operator runs.
+- **VK Auto Queue**: Unified Smart Update report now can include `views/likes` + multi-level popularity markers (e.g. `⭐⭐` / `👍👍`) for the source post when metrics are available (baseline is per-group and excludes non-event posts).
+- **VK Auto Queue**: Auto-import queue picking now runs in strict chronological order (oldest→newest globally, including cross-community rows) to avoid newer event facts being overwritten by older posts processed later.
+- **E2E/Smoke**: Release smoke scenario set now includes псевдо‑фестиваль «Масленица» из holidays (VK → Smart Update → фестивальная страница/индекс).
+- **Telegram Sources UI**: `/tg` source management now supports `festival_series` editing from inline controls (`🎪 Фестиваль`).
+- **Telegram Sources UI**: `/tg` list supports pagination and normalizes added usernames (lowercase, `@`/URL/post-id safe) to avoid duplicates.
+- **Telegram Sources UI**: `/tg` list now shows suggested festival series/site from source metadata and provides `✅ Принять подсказку` (applies only when manual `festival_series` is empty).
+- **Telegram Monitor**: Import stage now streams per-post progress in `/tg` (Telegram post `X/Y`, Smart Update counters, `event_ids`, illustrations delta, `took_sec`) and sends per-post `Smart Update (детали событий)` right after each post is processed.
+- **Telegram Monitor**: Server import now persists message-level videos into `event_media_asset` when a post maps to exactly one imported event; multi-event posts skip video attachment (`skipped:multi_event_message`) and `/tg` shows explicit video media status (`supabase`/`skipped:*`).
+- **Smart Update (UI)**: Operator reports now show when items were enqueued into `festival_queue` / `ticket_site_queue` (so missing lines are a quick signal that URL/context extraction needs fixing).
+- **Ticket Sites Queue / Smart Update**: Enqueue is now fully centralized in Smart Update for any caller (VK/TG/manual/`/parse`); all detected ticket-site URLs from `source_text`/`source_url`/`ticket_link`/`links_payload` are queued with the current `event_id`, while Telegram Monitoring only forwards hidden links via `candidate.links_payload`.
+- **Smart Event Update Text Quality**: Added normalization for jammed inline bullets and minimal heading injection (`### ...`) for long multi-paragraph descriptions.
+- **Smart Event Update Text Quality**: Added optional light emoji accents in `event.description` for readability (enabled by default; controlled via `SMART_UPDATE_DESCRIPTION_EMOJI_MODE`).
+- **Fact-first Smart Update (Research)**: Refined Gemma-only dryrun pipeline (sources → facts → text) with strict coverage/forbidden checks, plus derived `short_description` and `search_digest`; documented the contract in `docs/features/smart-event-update/fact-first.md`.
+- **Smart Event Update**: Public `description` is now generated fact-first (sources → facts → text, variant C+D) strictly from extracted facts, controlled by `SMART_UPDATE_FACT_FIRST` (default: enabled; rollback: set to `0`).
+- **Docs (Smoke)**: Release smoke checklist now includes `/general_stats` verification on both test and prod (manual + scheduled delivery checks).
+- **Smart Event Update**: Incoming hashtags are stripped from titles/descriptions/source text before saving and Telegraph rendering.
+- **Linked Events / Telegraph**: Event pages now show `🗓 Другие даты` in the infoblock for linked occurrences; linked-event groups are recomputed symmetrically across Smart Update, source parsing, and manual edits, and linked pages are refreshed via `telegraph_build`.
+- **Telegram Monitor (Kaggle)**: Extraction/ OCR now use message date context and infer missing event years relative to the message date.
+- **Docs (Backlog)**: Added design spec for multi-provider movie metadata + cinema showtimes feature, including Kinopoisk Unofficial API notes (`docs/backlog/features/movie-showtimes/README.md`).
+- **Smart Update (UI)**: Unified per-event reports are now more compact and actionable: the Telegraph link is embedded into the event title (no duplicated `Telegraph:` line when URL exists), `ICS` is shown as a short link label, the report includes the full source history list, and it shows video counts alongside illustrations.
+- **Post Metrics / Popular Posts**: `/popular_posts` now renders created event IDs alongside Telegraph links and always shows explicit sample sizes (posts/sources; metrics vs imported events) plus an “above median” breakdown (views/likes/both) to make sparse-result windows easier to audit.
+- **Ops / Rebuild**: `/rebuild_event` now supports `--regen-desc` to regenerate fact-first descriptions from stored facts before enqueuing rebuild jobs.
+
+### Fixed
+- **Telegraph Pages**: Removed the extra visual blank line between description subheadings (`h3/h4`) and the first text block on event/source Telegraph pages, while keeping normal paragraph spacing intact.
+- **Smart Update (fact-first)**: Improved facts-extraction prompt so short program lists (e.g., film lineups) are returned as individual facts and can appear in the generated `description`.
+- **VK Auto Queue / SQLite**: Queue state writes (`imported/failed/rejected/pending/skipped`) now retry transient `database is locked` commit failures, so local VK auto-import is less likely to fail after a successful Smart Update.
+- **Event Parse Prompt**: `parse_event_via_llm` now loads only the parser-specific `MASTER-PROMPT` block from `docs/llm/prompts.md` instead of unrelated digest/classifier/metadata prompt sections, substantially reducing Gemma TPM usage for VK/TG draft extraction.
+- **VK Auto Queue / Event Parse**: Long VK posts now apply an OCR prompt budget before `event_parse`: poster OCR is skipped for already-detailed posts and capped for short posts, reducing oversized Gemma requests that could hit provider-side `429 TPM` in auto queue.
+- **VK Auto Queue / Event Parse**: Festival normalisation context is now passed only for sources marked `vk_source.festival_source=1`, avoiding unnecessary prompt bloat for regular VK posts while preserving festival-specific parsing routes.
+- **Exhibitions / Telegraph**: Synthetic `end_date = start + 1 month` remains available for listings and merge logic, but Telegraph event infoblocks now hide it until a source confirms the real closing date; inferred fallback also no longer overwrites an already confirmed `end_date`.
+- **Telegraph (Infoblock)**: Event pages now show `✅ Пушкинская карта` in the quick-facts infoblock when `pushkin_card=true` (line omitted otherwise).
+- **Smart Update (Exhibitions)**: Prevented catastrophic merges of unrelated exhibitions: long-running events are no longer auto-matched solely by venue + date-range overlap when titles are unrelated; Smart Update falls back to LLM match/create (or creates a new event when LLM is disabled).
+- **Smart Update (Matching)**: Prevented VK/TG duplicates when `match_or_create` returns `create` due to a weak `candidate.title`: Smart Update now does a deterministic rescue-match via grounded `bundle.title` against the shortlist before creating a new event.
+- **Smart Update (Title)**: Generic fallback titles like "`<event_type> — <venue>`" can now be replaced by a grounded proper event name from source text/OCR (prevents meaningless titles like "Концерт — Янтарь холл" when "ЕвроДэнс'90" is present).
+- **Post Metrics / Popular Posts**: Fixed `/popular_posts` report rendering in Telegram HTML mode by escaping the debug counter label `skip(&lt;=median)` (prevented `can't parse entities: Unclosed start tag` failures when a section has no items).
+- **Telegram Monitoring (UI report links)**: `Smart Update (детали событий)` now renders Telegram source-post links with preview-friendly `?single` in `href` (display text and canonical stored `source_url` remain unchanged).
+- **Telegram Monitoring (media fallback)**: Public `t.me/s/...` fallback for posters/full text in single-event posts is no longer gated by `bot is not None`; importer now logs fallback results (`tg_monitor.poster_fallback ... posters=N`) and debug-errors for failed fallback attempts.
+- **Telegram Monitoring (media fallback)**: When poster fallback can extract image URLs from public `t.me/s/...` HTML but media upload (`process_media`) fails, importer now keeps direct Telegram CDN image URLs as a hard fallback so events are not imported without illustrations.
+- **Telegram Monitoring (linked sources)**: `linked_source_urls` now enrich event media during import: posters are pulled from linked Telegram posts (payload-first, then `t.me/s/...` fallback) and merged into the single-event candidate before Smart Update.
+- **Telegram Monitoring (linked sources)**: Linked Telegram posts are now best-effort scanned for text and processed via an extra Smart Update pass so their facts appear in the source log (instead of “без извлечённых фактов”).
+- **Smart Update (Fact-first)**: Legacy events with only an old `description` are now backfilled into source facts so fact-first description regeneration preserves pre-existing details.
+- **Smart Update (Fact-first)**: Fact-first descriptions now allow Yandex Music playlist links (`music.yandex.ru/users/.../playlists/...`) and keep participant chat mentions while stripping chat URLs; plus scaled description/coverage budgets to reduce truncation and missing facts in Telegraph pages.
+- **VK Intake (Locations)**: Fixed venue resolution when a known-but-wrong library is selected while the post contains an explicit address; address now disambiguates to a single known venue, and source logs no longer duplicate address/city when `location_name` is a full canonical line.
+- **General Stats**: `/general_stats` now reports `gemma_requests_count` from Supabase `google_ai_requests` (with `google_ai_usage_counters` fallback, and `token_usage` fallback when Google AI tables are unavailable).
+- **Scheduler**: Scheduled heavy jobs now skip (with admin-chat notification) when another heavy operation is already running, preventing parallel long imports/monitoring (`/tg`, `/vk_auto_import`, `/parse`, `/3di`). Config: `SCHED_HEAVY_GUARD_MODE`, `SCHED_HEAVY_TRY_TIMEOUT_SEC`.
+- **JobOutbox / Telegram Monitor**: Job handlers now have a hard max runtime, preventing a stuck outbox task from freezing `/tg` imports; inline drain is time-bounded via `TG_MONITORING_INLINE_DRAIN_TIMEOUT_SEC`.
+- **Smart Update (Posters)**: Poster ordering now prefers images whose OCR matches the event `title/date/time`, preventing unrelated posters from becoming the first Telegraph cover.
+- **Telegraph Rendering**: Overlong paragraph-like headings (e.g. `### ...` on one line) are now demoted to normal paragraphs during HTML build, preventing “giant heading” event descriptions.
+- **Telegraph Rendering / Smart Update**: Inline/bold `Facts:`/`Факты:` markers are stripped from public descriptions; short `###` headings are preserved more reliably.
+- **Telegraph Rendering / Markdown**: Fixed HTML tag balancing so Markdown lists (`- ...`) render as proper `<ul>/<li>` blocks (instead of broken paragraphs with `&#8203;` spacers between items).
+- **Smart Event Update**: Orphan `###` headings without a body (e.g. empty `### Подробности` followed by another same-level heading) are now dropped during description normalization, preventing empty sections on Telegraph pages.
+- **VK Auto Queue / Smart Update**: Venue status-update posts (closure/eviction/lease deadlines, petitions/fundraising) are now skipped as `skipped_non_event:venue_status_update` to prevent false events.
+- **Smart Event Update**: Work-schedule notices (режим/график работы учреждений, включая «праздничные дни» и «расширенный график») are now skipped more reliably as `skipped_non_event:work_schedule` for VK/TG auto-ingest, preventing pseudo-events from timetable updates.
+- **Smart Event Update**: Service/package promos (e.g. “Выпускные 2026 … бронирование открыто”) are now skipped as `skipped_non_event:service_promo` when the post has no concrete date/time, preventing pseudo-events from venue advertising.
+- **Locations**: Added `Дизайн-резиденция Gumbinnen, Ленина 29, Гусев` to `docs/reference/locations.md` to prevent venue normalization to the wrong city (e.g. “…, Калининград”).
+- **Event Parse (Gemma/4o prompt)**: Added an explicit non-event rule for institution working-hours notices (`график/режим/часы работы`, `праздничные/выходные дни`, `санитарный день`, `расширенный график`) so such posts return no events unless they contain an explicit attendable event announcement.
+- **VK Intake**: Drafts with a parsed date but no date/time signals in the source are rejected early (prevents “today” hallucinations on non-event VK posts).
+- **Topics**: Topic classification cache key no longer relies on `short_description`, improving reuse for multi-day expansions.
+- **Telegram Monitor / Smart Update**: For Telegram sources with `default_location`, conflicting extracted cities are now disambiguated via a short LLM check before region filtering (prevents false rejects on context mentions like “(г. Москва)” while still rejecting truly out-of-region posts).
+- **Telegram Monitor (Kaggle)**: Poster uploads now default to Supabase (`TG_MONITORING_POSTERS_SUPABASE_MODE=always`) and skip Catbox when Supabase Storage is available, improving Telegraph/Telegram preview stability.
+- **Telegram Monitor (Kaggle)**: Poster uploads to Supabase now convert to WebP (no JPEG objects in Storage) to reduce bucket usage and enable cross-env deduplication.
+- **Telegram Monitor (Kaggle)**: Video uploads now default to Supabase (`TG_MONITORING_VIDEOS_SUPABASE_MODE=always`), enabling automatic attachment when videos are under size/bucket guards.
+- **Telegram Monitor (Server)**: Message videos are now attached even when Smart Update ends with `skipped_nochange` (single-event posts), and `telegraph_build` is re-queued after new video attachment to ensure Telegraph pages reflect video embeds/links.
+- **Telegraph Event Pages**: Poster render selection now prefers Supabase URLs by default when both Supabase and Catbox variants exist (override via `TELEGRAPH_PREFER_SUPABASE=0`).
+- **Telegraph Event Pages**: Attached Supabase videos (`event_media_asset`) are now rendered on the event page as embedded video previews for direct files (`.mp4/.webm/.mov`), with a link fallback for other URLs.
+- **Telegraph Event Pages**: Non-selected poster variants are excluded from tail image rendering, reducing “foreign poster” leaks in multi-poster albums.
+- **Telegraph Event Pages**: Image URL reachability probes no longer strip the last remaining illustration on transient failures (prevents “no cover” pages).
+- **VK Intake / Smart Update**: `vk_source.default_time` is now treated as a low-priority time fallback: it is saved as `event.time` with `event.time_is_default=1` and does not act as a strict matching anchor, so explicit time from other sources can override it (prevents phantom showtimes and duplicate theatre events).
+- **Smart Event Update**: Matching now converges more reliably on existing events during reprocessing (including flows with `check_source_url=False`) by using safe source anchors (`event_source.source_url` / `(source_message_id,source_url)`) and deterministic exact-title anchor matching before LLM, reducing duplicate creation.
+- **Fact-first Smart Update**: Tightened `facts_text_clean` filtering to keep anchors/logistics out of narratives (including free-form date/time and venue-marker phrases like `зал/этаж/аудитория`); generation loop is more resilient and includes a last‑mile cleanup for forbidden `посвящ…` phrasing.
+- **Fact-first Smart Update**: Description generation now prefers 2–3 informative `###` headings and avoids “micro-sections” (single-sentence blocks), grouping same-type topics into lists when appropriate.
+- **Fact-first Smart Update**: Description generation now runs a single coverage-check pass and at most 2 revise passes (bounded to 2–4 Gemma calls) and allows larger `description_budget_chars` for rich fact sets.
+- **Fact-first Smart Update**: `facts_before` now includes `duplicate` facts to keep canonical fact sets stable across re-processing the same source URL.
+- **VK Auto Queue**: Cancellation notice detection no longer false-positives on phrases like “перенесут вас…”, and cancellation source logging now reuses existing `(event_id, source_url)` rows to avoid unique-constraint failures.
+- **Smart Event Update**: Dedup matching now uses a soft city filter (`candidate.city` also matches legacy rows with empty `event.city`) to prevent duplicate creation when the first import missed city and the next source resolves it; LLM match prompts were also tightened for placeholder time (`00:00`/`time_is_default`) and “same event, different title phrasing” cases.
+- **Event Parse (Gemma/4o prompt)**: Draft extraction now avoids producing multiple events with identical anchors (same date/time/location) by merging program-item lists (speakers/bands/topics) into a single umbrella event.
+- **Database**: `Database.init()` now backfills missing `event_source` rows from legacy `event.source_post_url` / `event.source_vk_post_url` to improve Smart Update idempotency (opt-out: `DB_INIT_SKIP_EVENT_SOURCE_BACKFILL=1`).
+- **Source Parsing**: Theatre site upserts now treat empty `time` as a placeholder and can update it when a canonical schedule provides an exact start time.
+- **Source Parsing**: `/parse` safeguard enqueue now keeps deferred semantics for navigation rebuilds: fallback `month_pages` and `weekend_pages` jobs are queued with `next_run_at=now+15m` (no immediate Telegraph month/weekend rebuild after batch import).
+- **Admin Action Assistant**: Requests about “общая статистика / авторазбор VK+TG / Gemma” now prefer `/general_stats` (instead of `/stats`).
+- **Telegram Monitor**: `database is locked` during long SQLite imports now triggers automatic import retries (with operator-visible progress notice) instead of immediate run failure; SQLite PRAGMAs are also applied on every ORM connection to reduce lock contention (`DB_TIMEOUT_SEC` default increased to `30s`).
+- **Telegram Monitor**: Poster-bridge (forwarded poster in the next message) is now stricter: it is gated by a short caption + small time delta and attaches posters only when OCR matches the target event (`title/date/time`), preventing unrelated posters from leaking into video-only posts.
+- **Telegram Monitor**: When `message.text` looks truncated (ends with `…`/`...`), import can fetch the full post body from public `t.me/s/...` HTML and use it as Smart Update `source_text` to avoid missing performer/support lines.
+- **Telegram Monitor**: Single-event posts can now correct extracted date/time from a single clear poster OCR date/time pair when the extracted date is clearly too far in the past vs the message date.
+- **Telegram Monitor**: More import-side SQLite commits now retry on `database is locked` (source meta/title updates, force-message cleanup, linked sources, video assets) to reduce flakiness on long runs.
+- **Telegram Monitor**: auth bundle selection is now explicit and safe by default (`TELEGRAM_AUTH_BUNDLE_S22` for Kaggle, optional override via `TG_MONITORING_AUTH_BUNDLE_ENV`), and `/tg` now returns an explicit operator hint when Kaggle fails with `AuthKeyDuplicatedError`.
+- **E2E**: `behave` now skips malformed `db_prod_snapshot.sqlite` when auto-picking a default `DB_PATH`, falling back to the newest healthy `db_prod_snapshot_*.sqlite` snapshot.
+- **E2E**: Live runs now isolate any `*snapshot*.sqlite` DB into a per-run copy (not only `db_prod_snapshot*.sqlite`), keeping E2E repeatable even when using snapshots under `artifacts/`.
+- **E2E**: `.env` loader now replaces obviously invalid/placeholder Supabase keys (very short `SUPABASE_KEY`/`SUPABASE_SERVICE_KEY`) with values from repo `.env`, preventing Storage RLS failures in media-related E2E checks.
+- **Festivals (Telegraph)**: Festival pages and festivals index now self-heal `PAGE_ACCESS_DENIED` by creating new pages under the current `TELEGRAPH_TOKEN` (useful for DEV/E2E snapshots).
+- **Festivals (Telegraph)**: Festival gallery enrichment no longer skips when `festival.photo_url` already exists; it can still populate `festival.photo_urls` from program/event pages to satisfy “cover + images”.
+- **Festivals (Telegraph)**: Festival pages now fall back to showing all festival events when there are no upcoming ones (prevents empty festival programs for ongoing/past-only festivals in snapshots).
+- **E2E (Telegram Sources)**: Destructive step “очистить список источников Telegram через UI” now requires explicit opt-in and a DB-isolated run; festival queue E2E no longer clears Telegram sources by default.
+- **Festivals Queue (UI)**: `/fest_queue` now streams operator-visible progress (including TG queue items via Telegram Monitoring progress messages).
+- **Festivals Queue**: Festival queue runner now auto-recovers stale `festival_queue.status=running` items back to `pending` after a timeout (`FESTIVAL_QUEUE_STALE_RUNNING_MINUTES`, default `60`).
+- **Festivals Queue (TG)**: When forced Telegram monitoring fails (e.g. transient Kaggle kernel error), queue processing now falls back to `ensure_festival` from queue item metadata (`festival_name`/`source_text`) and still builds festival/index pages instead of failing with `festival page not created`.
+- **Smart Update / Festival & Daily snippets**: `short_description` is now generated/refreshed via LLM as one complete 12–16 word sentence (no `...`/`…` tails); list rendering no longer degrades valid snippets into visually broken ellipsis fragments.
+- **Media Uploads**: `upload_images()` now uses Supabase Storage when Catbox uploads are disabled (and falls back to Supabase when Catbox uploads fail), improving reliability of event posters/covers.
+- **Media Uploads**: `upload_images()` now defaults to `UPLOAD_IMAGES_SUPABASE_MODE=prefer` (Supabase first, Catbox fallback); Telegraph upload fallback was removed (`telegra.ph/upload` deprecated/unavailable).
+- **Media Uploads**: Supabase public URLs returned by `upload_images()` now strip the trailing `?` for stable poster dedupe/rendering.
+- **Media Uploads**: Supabase poster uploads are now stored as WebP and keyed by a perceptual hash (dHash16) to deduplicate visually identical images across sources and between PROD/TEST (even when resolutions differ).
+- **Smart Update Inputs**: `/addevent`, VK auto import and source parsers now map Supabase-hosted poster URLs into `PosterCandidate.supabase_url` (instead of leaking them into `catbox_url` only), improving downstream rendering/cleanup consistency.
+- **Telegram Monitor (Kaggle)**: Poster uploads now target `SUPABASE_MEDIA_BUCKET` explicitly (instead of legacy `SUPABASE_BUCKET`) to keep media separated from ICS storage.
+- **Cleanup**: Supabase Storage deletions are now persisted in `supabase_delete_queue` and retried on the next cleanup run, preventing orphaned objects when Supabase is temporarily unavailable.
+- **Cleanup**: `cleanup_old_events` now avoids deleting Supabase media objects still referenced by other events (dedup-safe) and supports disabling media deletes in shared buckets via `SUPABASE_MEDIA_DELETE_ENABLED=0`.
+- **Smart Update**: Manual bot ingests (`source_type=bot`) no longer get blocked by the deterministic region filter when `city` is missing, and keep operator-provided `title` (no LLM renaming).
+- **Smart Update**: Matching is now more robust for time/location anchors: `00:00` is treated as a placeholder (unknown) during matching, placeholder times can be filled from matched TG/VK sources, and location matching tolerates punctuation/dash variants (e.g. `Янтарь-холл` vs `Янтарь холл, Ленина 11`), reducing duplicate events.
+- **Daily Announcements**: Daily posts now render the short one-liner from `Event.search_digest` (with a safe fallback) instead of the full `Event.description`, preventing long LLM Markdown blocks from flooding `/daily` announcements.
+- **Festivals (Telegraph)**: Festival pages now render event summaries from `Event.search_digest` (1 sentence, short digest) instead of full `Event.description`, keeping festival programs readable and consistent with `/daily`.
+- **Festivals (Telegraph)**: Festival/event digest rendering now hard-limits visible snippets to `<=16` words (same guardrail for festival cards and `/daily`) to prevent long paragraphs in list-style UIs.
+- **Festivals (Telegraph)**: Festival/month/weekend event cards now show date/time and location as explicit `📅`/`📍` lines (same template across pages).
+- **Festivals (Telegraph)**: Service markers for the “near festivals” block no longer render as visible `<!-- ... -->` text; pages are updated idempotently using invisible anchor markers.
+- **Festivals (Telegraph)**: Fallback rendering in `event_to_nodes` now preserves clickable service links (`подробнее`, `добавить в календарь`) instead of degrading them to plain text when strict `html_to_nodes` parsing fails.
+- **Festivals (Telegraph)**: Festival page media now prefers preview-friendly images and excludes Catbox URLs from page cover/gallery; when needed, a safe fallback cover is used so Telegram cached preview remains available.
+- **Festivals (Telegraph)**: When a festival has only legacy Catbox illustrations in DB snapshots, the page now keeps a preview-friendly cover fallback and still renders the legacy gallery (instead of becoming cover-only).
+- **Festivals (Telegraph)**: Public festival pages no longer render `пост-источник` links; Telegram channel links that duplicate the source-post channel are hidden unless explicitly confirmed in `telegram_source` as a festival source for that series.
+- **Festivals (Telegraph)**: Festival pages now render a source counter (`📚 Источников: N`) based on unique festival/event source links used for the assembled page.
+- **Festivals Queue**: For `День <...>` sources, queue processing now re-grounds festival name against explicit source wording (quotes/`День рождения ...`) when parser-provided name is not present in source text, reducing false merges between unrelated festival series.
+- **Festivals (Telegraph)**: `telegra.ph/file`/`graph.org/file` URLs are no longer treated as preview-friendly targets for festival/index covers (upload endpoint is deprecated); safe fallback now relies on Supabase/public HTTPS sources.
+- **Festivals Index (Telegraph)**: When no preview-friendly cover is available, the festivals index auto-generates and hosts a safe cover (Supabase) so Telegram can cache/preview the page reliably.
+- **Festivals Index (Telegraph)**: `sync_festivals_index_page` now builds from the same “current + near-upcoming” set as rebuild flow (window `FESTIVALS_UPCOMING_HORIZON_DAYS`, default `120`), so the page no longer fills with distant/archive-like festivals.
+- **Festivals Index (Telegraph)**: Supabase public cover URLs are normalized (trailing `?` stripped) for more stable Telegram preview caching behavior.
+- **Festivals Index (Telegraph)**: Unsafe stored index covers are now auto-replaced with preview-friendly covers (generated/uploaded fallback or explicit `FESTIVALS_INDEX_FALLBACK_COVER_URL`), and Catbox images are excluded from index-card image rendering to prevent broken Telegram cache/preview.
+- **Festivals Index (Telegraph)**: Upcoming ordering now anchors to the nearest not-ended festival event (not stale historic `start_date`), and card images are best-effort rehosted to preview-friendly URLs for missing illustrations.
+- **E2E (Festival Queue)**: Fixed Telegraph assertions for `og:image` and festival digest parsing (`<br>`/whitespace regexes), eliminating false failures in live checks.
+- **E2E (Festival Queue)**: Festival index link assertion now accepts both absolute (`https://telegra.ph/...`) and relative (`/path`) Telegraph URLs.
+- **E2E (Festival Queue Prefilled)**: TG scenario now explicitly re-arms canonical sources to `pending` and runs with `--limit=2` to stay deterministic when extra TG items exist in `festival_queue`.
+- **Daily Announcements**: Daily post titles now link to the event Telegraph page (`telegraph_url`/`telegraph_path`) instead of Telegram/VK source links.
+- **Telegraph**: Fixed occasional `telegraph_build` failures (`'b' tag closed instead of 'i'`) by balancing mis-nested inline tags produced by the lightweight Markdown renderer before `html_to_nodes`.
+- **Telegraph (Telegram preview)**: Added optional Telegram preview warm-up after event page publish (`TELEGRAPH_PREVIEW_WARMUP=1`) to trigger `cached_page`/Instant View generation without bloating operator reports.
+- **Telegraph (Telegram preview)**: Added Telegraph cache sanitizer (Kaggle/Telethon): new `/telegraph_cache_stats` and `/telegraph_cache_sanitize` commands + scheduler job to probe/warm `cached_page`/preview `photo`, store results in SQLite (`telegraph_preview_probe`), and enqueue rebuilds for persistently failing pages (skips past pages: ended events / past weekends / past months). Manual `/telegraph_cache_sanitize` now shows a Kaggle kernel status message that updates while polling (like `/tg`).
+- **Telegraph (Telegram preview)**: Cache sanitizer event target selection now rotates by last probe time (and prioritizes persistent failures) instead of always probing the earliest upcoming events, so pages outside the first LIMIT window get covered over multiple runs.
+- **Smart Update**: Added deterministic merge by `date + explicit time + location + related title` before LLM, reducing duplicates from variant titles like `Гегель` vs `Гегель: философия истории` during parser/VK/TG re-imports.
+- **Telegraph (Telegram preview)**: Cache sanitizer now treats `webpage.cached_page` (Instant View) as the primary OK signal; missing `webpage.photo` is reported as a warning and no longer triggers regeneration by itself.
+- **Telegraph (Telegram preview)**: Kaggle probe now waits for `cached_page` after preview attachment and best-effort refreshes the WebPage via `messages.getWebPage` before reporting `no_cached_page` (reduces false negatives on slow previews).
+- **Telegraph (Telegram preview)**: When a Telegraph page cover is only available as WEBP, the builder best-effort creates a JPEG mirror in Supabase Storage (prefix `SUPABASE_TELEGRAPH_COVER_PREFIX`, default `tgcover`) so Telegram Instant View caching is more reliable for event/month/weekend pages.
+- **Telegraph Event Pages**: Tiny avatar-like illustrations are now dropped when a real poster-sized image exists (prevents channel avatars/icons from showing up on event pages).
+- **Telegram Monitor**: Multi-day posters (several explicit date/time pairs in OCR for one title) are now expanded into separate events when the extractor collapsed them into one date/time.
+- **Telegram Monitor**: Poster-only forwarded follow-ups (text post + next-message poster) are now bridged to attach the poster to the previous imported event (best-effort, tight time/id window).
+- **Telegram Monitor**: Missing event times are now additionally inferred from poster OCR when the post text lacks explicit time (reduces “date-only” events with missing ICS).
+- **Telegram Monitor**: Message-date year rollover correction now applies only to “~1 year drift” cases to avoid rolling genuine near-past dates into the next year.
+- **Telegram Monitor**: Multi-event poster matching now prefers returning no posters (instead of wrong posters) when OCR/title/date/time signals are inconclusive.
+- **Telegram Monitor**: Public `t.me/s/...` poster fallback no longer captures channel avatars or neighboring-post images; it extracts only photo media from the target post.
+- **Telegram Monitor**: For sources with `default_location`, extracted `city` is now derived from the default location (prevents false `rejected_out_of_region` when the post mentions other cities as context, e.g. “(г. Москва)” in speaker bios).
+- **Telegram Monitor**: Per-post `/tg` details now wait briefly for `telegraph_build` to materialize the Telegraph link before rendering the operator report (reduces `Telegraph: ⏳ running` cases).
+- **Telegram Monitor**: Per-post `/tg` details now also try a direct Telegraph build fallback when the outbox drain doesn’t produce a link quickly (reduces `Telegraph: ⏳ pending` cases).
+- **Telegram Monitor (Kaggle)**: Video uploads now use content-addressed keys (`v/sha256/<first2>/<sha256>.<ext>`) with a Supabase Storage existence check to avoid re-uploading duplicates; a legacy fast-path can reuse an existing `v/tg/<document.id>.<ext>` object without re-downloading.
+- **Telegram Monitor**: Import now enforces chronological post processing (`message_date` ascending, old→new) before Smart Update to prevent stale posts from overwriting fresher event data in the same run.
+- **Telegram Monitor**: Per-post Smart Update reporting now (best-effort) drains JobOutbox tasks (`ics_publish` + `telegraph_build`) for the touched `event_id` before sending details, so Telegraph/ICS links are up-to-date immediately (and DEV snapshots can recreate Telegraph pages on `PAGE_ACCESS_DENIED`).
+- **Telegram Monitor**: Import now ignores new Kaggle messages with `events=[]` (unless forced/previously scanned) to reduce noise and avoid polluting popularity baselines; baselines are computed only from posts known to contain events.
+- **Locations**: Address display/normalization now strips `ул.`/`улица` and collapses comma-separated fragments (e.g. `ул. Тельмана, 28` → `Тельмана 28`) for a more compact canonical format.
+- **Smart Update**: "Фото дня" rubric posts from VK/TG are now treated as non-event content unless strong event signals are present (time/period/invite/tickets/registration).
+- **Telegram Monitor**: Popularity markers ⭐/👍 now compare against per-channel medians by default (works even with fresh metrics: one monitoring run is enough); markers also support multi-level outliers (e.g. `⭐⭐⭐`) and baseline lookups are no longer cached in a way that freezes the sample at zero during the run.
+- **Smart Event Update**: Псевдо‑фестивали из `docs/reference/holidays.md` теперь применяются внутри Smart Update (не зависит от источника вызова: VK/TG/ручной ввод).
+- **Festivals Queue**: Smart Update now recognizes TelegramMonitor outputs with boolean `festival: true` (or `event_type: festival`) and enqueues them into `festival_queue` using the extracted `title` as the festival name when missing.
+- **Telegram Monitor (Kaggle)**: Auth now supports `TELEGRAM_AUTH_BUNDLE_S22` (bundle with device params); `TG_SESSION` remains a fallback.
+- **Telegram Monitor (Kaggle)**: Ticket giveaways are no longer auto-skipped; text is kept intact and LLM is instructed to ignore giveaway mechanics while preserving event facts when present.
+- **Telegram Monitor (Kaggle)**: Fixed hidden link extraction for text-url entities/buttons: links are now exported at message-level (`messages[].links`) and per-event ticket-link mapping no longer breaks due to offset drift; links are no longer accidentally stored inside `posters[].links`.
+- **Telegram Monitor (Kaggle)**: Poster/media download no longer relies on date/time heuristics and also supports rich preview images (`webpage.photo`), reducing “Telegraph page without photos” cases; schedule fast-path extraction is conservative (requires 2+ matched lines) to avoid false titles like `", четверг"`. Default `TG_MONITORING_MEDIA_MAX_PER_SOURCE` increased to `12`.
+- **Telegram Monitor (Kaggle)**: Open calls / «конкурсный отбор» / «приём заявок» no longer produce events, and event dates are no longer defaulted to the message publish date unless there is an explicit date anchor or an explicit `end_date` for exhibition/fair context (prevents “no date in post → event created for today”).
+- **Telegraph**: Event pages force `preview_3d_url` to be the cover image when available.
+- **Telegraph**: Event pages render merged `event.description` (not a single legacy `source_text`) so newly merged facts show up on the page.
+- **Smart Event Update**: New-text detection prefers full source text (not only excerpts) and records a more “new-facts” snippet in source logs.
+- **Smart Event Update**: Clears `preview_3d_url` when the illustration set changes so `/3di` scheduled runs can regenerate 3D previews.
+- **Telegraph**: Event page rebuild commits before Telegraph API edit/create calls to avoid holding long SQLite write locks during network operations (reduces `database is locked` contention under concurrent imports/workers).
+- **Smart Event Update**: Telegram short-source descriptions are now kept close to the total source volume (post text + poster OCR): create-bundle prompts include a strict `description_budget_chars`, and Smart Update runs an LLM-only `shrink_desc` pass when the model over-expands short sources; also strips neural clichés like «это создаёт ...».
+- **Smart Event Update**: Prevented leaking internal headings like `Facts/Added Facts` / `Факты` into public Telegraph descriptions (also strips paragraph-leading `Facts:` and drops internal `Факты для лога источников` blocks); inline quotes in «...» are now promoted to blockquotes for better Telegraph formatting.
+- **Smart Event Update**: Added deterministic skip for open-call/application posts (VK/TG) to avoid creating pseudo-events even if upstream extractors misclassify them.
+- **Smart Event Update**: Disabled deterministic promo/giveaway/channel-promo/schedule stripping (LLM-only policy) and stopped filtering posters by OCR relevance (keep all posters; OCR is used for ordering/priority only) to avoid events ending up without images.
+- **VK Auto Queue**: Auto-import now skips VK posts that are deleted/unavailable at import time (marks inbox rows as `rejected`) and does not create events from stale `vk_inbox.text` when `wall.getById` fails (marks as `failed`, opt-in fallback via `VK_AUTO_IMPORT_ALLOW_STALE_INBOX_TEXT_ON_FETCH_FAIL=1`).
+- **VK Intake**: For standup/comedy sources, VK intake now injects an explicit hint into the LLM parse input to make the format visible in the title (e.g. `Стендап: …`) without deterministic post-parse renames.
+- **VK Intake**: Fixed a common VK parse bug where a date token like `21.02` (DD.MM) was misread as a time `21:02` (HH:MM); such false-positive times are now stripped when the source contains no real time.
+- **VK Intake**: Program/schedule posts (single umbrella event with a time-based program) no longer create multiple duplicate events for each time slot; the importer collapses them into one event with a `time` range.
+- **Smart Update**: Sanitizer now demotes overlong Markdown headings back to normal paragraphs and strips inline `Facts:`/`Факты:` prefixes that leaked into public Telegraph pages.
+- **Telegram Monitor / Smart Update**: Prevented duplicate events created from a single Telegram post by (1) de-duplicating extracted `events[]` within the message payload and (2) forcing Smart Update match by the source-post anchor when the same message is imported twice in one run (e.g. linked-post enrichment).
+- **Telegram Monitor (Kaggle)**: Export now includes message-level `links` extracted from entities and URL-buttons (e.g. “More info”, “билеты”), and best-effort maps them into per-event `ticket_link` when the URL is hidden behind text.
+- **Smart Event Update**: Municipal notices (utility outages / road closures) are now deterministically skipped as `skipped_non_event:utility_outage` / `skipped_non_event:road_closure` (not “events to attend”).
+- **Telegraph**: Hardened event page rendering against malformed inline HTML (auto-balances common tags and falls back to plain-text body if `html_to_nodes` fails), preventing Telegraph job failures like `'p' tag closed instead of 'i'`.
+- **Smart Event Update**: Added additional deterministic skips for auto-ingest sources: `skipped_non_event:book_review`, `skipped_non_event:too_soon`, `skipped_non_event:online_event`.
+- **Telegram Monitor**: Import now keeps posters for multi-event posts when poster OCR is empty so extracted events don't end up without illustrations.
+- **Telegram Monitor**: Import skips poster-only “events” without any date/time signals on the poster itself (avoids creating events from artwork titles).
+- **Telegram Monitor**: Ticket contact patterns like “Билеты у @username” are now converted into `ticket_link=https://t.me/username` and rendered on Telegraph pages.
+- **Telegram Monitor**: Ticket links without scheme (e.g. `clck.ru/...`) are now coerced to `https://...` so they render as clickable links.
+- **Telegram Monitor**: Per-post progress UI now marks video-only posts (`Медиа: 🎬 видео (фото=0)`) to explain missing illustrations.
+- **Telegram Monitor (Kaggle)**: Fallback to local rate limiting when Supabase RPC is missing (PGRST202), so extraction keeps working in dev/test.
+- **Telegram Monitor**: Import now infers missing `location_name`/`ticket_link`/bad titles from the message text and (when available) Kaggle-exported message links (best-effort) and the report breaks down skipped/invalid/rejected/nochange counts to explain “extracted vs created” gaps; operator also receives a per-post list of skipped/partial imports with links and reasons.
+- **JobOutbox**: Error statuses now record a non-empty `last_error` even for exceptions with empty `str(exc)` (e.g. timeouts); Telegram monitor reports also show proper JobStatus values (so `error` is not displayed as `jobstatus.error`).
+- **Telegram Monitor**: Re-scanned posts (same `message_id`) are no longer reprocessed through Smart Update; they update `views/likes` snapshots only and show up as `Посты только для метрик` (with optional popularity markers ⭐/👍).
+- **Telegram Monitor**: Interactive `/tg` imports no longer repeat the full “created/updated events” list in the final report (per-post Smart Update details remain; final report keeps popular/skipped blocks). Override with `TG_MONITORING_FINAL_EVENT_LIST=1`.
+- **Telegram Monitor (Kaggle)**: Kaggle status polling now tolerates transient network/SSL errors (e.g. `UNEXPECTED_EOF_WHILE_READING`) and keeps the run alive until `COMPLETE/FAILED` or timeout; UI shows a temporary “network error” phase instead of aborting the run.
+- **LLM Gateway**: `google_ai_reserve` now retries transient network/SSL failures (`timeout`/`disconnect`/`EOF`) before switching to local limiter fallback, reducing noisy `reserve_rpc_error_fallback` incidents during long imports.
+- **Telegram Monitor**: Kaggle polling timeout now scales with the number of configured Telegram sources to avoid false `timeout` failures on large source lists.
+- **DB Maintenance**: Added retention cleanup for `telegram_post_metric`/`vk_post_metric` (default 90 days) to bound DB growth.
+- **Telegram Sources UI**: Stores and displays Telegram channel title (from Kaggle/Telethon results) next to `@username` to make source lists and reports more readable.
+- **Telegram Monitor**: Import now accepts both `schema_version=1` and `schema_version=2`, prefers `sources_meta[].title`, updates `telegram_source.title` when it changes, and persists source metadata/suggestions (`about/links/hash/fetched_at` + `suggested_*`) without auto-overwriting manual `festival_series`.
+- **Telegram Monitor**: Added cross-process global lock for monitoring/import (including DEV `Recreate + Reimport`) to prevent duplicate UI progress spam and reduce SQLite `database is locked` incidents when multiple bot instances run concurrently; progress upserts now tolerate no-op edits and de-duplicate duplicate `done` updates.
+- **Smart Update**: Prevented erroneous poster pruning when `poster_scope_hashes` is provided but poster selection is empty (common when OCR matching fails); Telegram monitoring now keeps at least one poster for single-event posts more often, so events don’t lose illustrations unexpectedly.
+- **Telegraph**: Infoblock-logistics stripping no longer removes sentence-ending punctuation, fixing “text without dots” on Telegraph event pages after Smart Update.
+- **Smart Update / Telegraph**: Removed regex-based infoblock-logistics cutting; when duplicates are detected, cleanup is now done via an LLM editor pass (best-effort), otherwise the original text is preserved.
+- **Telegram Monitor**: Single-event posts now keep all attached photos (dedupe by sha256); OCR is used for ordering/prioritization, not for dropping posters.
+- **E2E Telegram Monitoring**: Added dedicated feature file and more robust step handling for async bot updates.
+- **Docs (Locations)**: Restored canonical `docs/reference/locations.md` (fixes redirect-loop) and updated runtime lookup to use it.
+- **Event Parse (Gemma)**: Added retry/wait handling on provider rate limits during draft extraction.
+- **Telegraph**: Prevented month navigation footer anchoring from truncating event body text when the description contains Markdown/HTML `<hr>` dividers (now treated as internal body dividers).
+- **Telegraph**: Fixed BODY_DIVIDER marker detection in footer anchoring (regression: internal dividers were treated as footer `<hr>`, truncating the main event text on some pages).
+- **Telegram Monitor**: “🔥 Популярные посты” block now includes Telegraph links when the post is already associated with one or more events.
+- **/log**: Source log now lists extra `event_source` rows that have no extracted facts yet (e.g. linked “more info” Telegram posts), so all attached sources are visible to the operator.
+- **Telegraph**: Event pages now render `search_digest` even for short bodies and avoid extra blank spacer paragraphs around internal body dividers (`---`/`<hr>`), so dividers don’t create “пустые строки”.
+- **Telegraph**: Event page rebuild now filters/replaces broken Catbox/Supabase image URLs before publishing; this prevents Telegram web preview from missing `cached_page` (Instant View) due to `<img>` 404s.
+- **Smart Event Update**: Normalized Telegram bullet markers (`·`/`•` → Markdown list) and added a safety-net that re-attaches short source lists when the rewrite drops them, so Telegraph pages don’t lose factual пункты.
+- **Smart Event Update**: Prevented create-time over-compression when sources are rich (including poster OCR): if the initial description is too short, Smart Update performs a second-pass full rewrite so Telegraph pages keep a meaningful main text (VK/TG imports).
+- **Smart Event Update**: Create-time fallback no longer publishes full `source_text` verbatim when LLM rewrite/bundle is unavailable; it uses `raw_excerpt`/short digest instead and enforces a stricter non-verbatim guard.
+- **Smart Event Update**: Legacy pre-Smart description snapshots no longer enter `facts_before` (prevents service phrases leaking into Telegraph text) but are still preserved as a legacy source baseline (`event.source_texts` / `event_source`).
+- **Smart Event Update**: Removed “facts for source log” wording from description prompts and explicitly forbids “facts sections” inside `description`, preventing service-like “Факты …” blocks from leaking into public Telegraph pages.
+- **Smart Event Update / Telegraph**: Unescaped backslash-escaped quotes (e.g. `\\\"...\\\"`) in event page body rendering to avoid broken-looking quotation marks on Telegraph pages.
+- **Smart Event Update**: Create-time LLM bundle can now return an improved `title` using poster OCR headings (`poster_titles`), preventing generic or overlong titles and preserving key semantic markers (e.g. “Масленица”).
+- **/log**: Source log no longer labels the source URL as “Telegraph” when the event Telegraph page has not been built yet (shows Telegraph only when available).
+- **Telegraph**: Added a hard safety cap for overlong/broken `event.title` when creating/editing Telegraph pages to prevent stuck `TITLE_TOO_LONG` joboutbox failures.
+- **Smart Event Update**: One-day “Акция” posts (“билет действует только на указанную дату/только сегодня/завтра”) no longer get a default 1‑month `end_date` even if misclassified as an exhibition.
+- **VK intake**: Stopped defaulting missing draft date/time to “today/00:00” (prevents pseudo-events when the parser returns a non-event notice).
+- **Event Parse**: Clarified prompt rules to ignore deadline-based notices (“до <date>”) and skip government-service/courses promo posts as non-events.
+- **Cleanup**: Supabase Storage deletion now groups objects per bucket by parsing stored public URLs (supports split buckets and avoids leaking media objects when buckets diverge).
+- **VK Auto Queue**: Rate-limited rows are now safely deferred back to `pending` (instead of hard-failing), with explicit `inbox_deferred` accounting.
+- **VK Intake**: Improved title grounding (fallback for hallucinated/garbled tokens), recap/year-rollover handling, and rejection of stale past-only recap items.
+- **Classification**: Normalized board-game meetup misclassification (`мастер-класс` → `встреча` where appropriate).
+- **E2E Runtime**: Fail-fast on bot UI messages like `Результат: ошибка ...`; improved manual-tag handling and DB isolation defaults for live runs.
+- **Source Log**: Avoids showing duplicate poster URL facts when `Афиша в источнике` equals `Добавлена афиша`.
+- **VK**: VK source-post updates track their own hash (`vk_source_hash`) instead of reusing Telegraph `content_hash`, preventing redundant repost/edit churn.
+- **Bot (local/dev)**: Running `python main.py` without `WEBHOOK_URL` now defaults to polling (prevents “bot is silent” runs); added `FORCE_POLLING=1` override.
+
+## [1.11.1] - 2026-01-27
+### Changed
+- **CrumpleVideo**: Updated test mode configuration to use multiple scenes (Kaliningrad, Chernyakhovsk) and extended date range (2 days) for better verification.
+- **Testing**: Improvements in `execute_crumple_test.py` and `crumple_video.ipynb` to support multi-city intro testing.
+
 ## [1.11.0] - 2026-01-25
 ### Added
 - **Telegram Monitor**: Full release of the Intelligent Monitoring System.
@@ -32,8 +327,6 @@
 ## [1.10.1] - 2026-01-24
 ### Fixed
 - Fixed `TypeError` in parsing results summary when using date objects (Philharmonia parser).
-
-## [Unreleased]
 
 ## [1.10.0] - 2026-01-24
 ### Added
@@ -757,7 +1050,7 @@ This release ships the updates that were previously listed under “Unreleased.�
 
 - Forwarded messages include the Telegram channel title in 4o requests so the
   model can infer the venue.
-- `parse_event_via_4o` also accepts the legacy `channel_title` argument for
+- `parse_event_via_llm` also accepts the legacy `channel_title` argument for
   compatibility.
 
 ## v0.3.16 - Festival pages

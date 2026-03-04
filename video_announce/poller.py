@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _status_messages: dict[int, tuple[int, int]] = {}
 _status_locks: dict[int, asyncio.Lock] = {}
+_poller_tasks: dict[int, asyncio.Task] = {}
 
 
 def _read_positive_int(env_key: str, default: int) -> int:
@@ -81,6 +82,59 @@ def _get_status_lock(session_id: int) -> asyncio.Lock:
     return lock
 
 
+def _track_poller_task(session_id: int, task: asyncio.Task) -> None:
+    _poller_tasks[session_id] = task
+
+    def _cleanup(_task: asyncio.Task) -> None:
+        _poller_tasks.pop(session_id, None)
+
+    task.add_done_callback(_cleanup)
+
+
+def _poller_active(session_id: int) -> bool:
+    task = _poller_tasks.get(session_id)
+    return bool(task and not task.done())
+
+
+def start_kernel_poller_task(
+    db: Database,
+    client: KaggleClient,
+    session_obj: VideoAnnounceSession,
+    *,
+    bot,
+    notify_chat_id: int,
+    test_chat_id: int | None,
+    main_chat_id: int | None,
+    status_chat_id: int | None = None,
+    status_message_id: int | None = None,
+    poll_interval: int = 60,
+    timeout_minutes: int = VIDEO_KAGGLE_TIMEOUT_MINUTES,
+    download_dir: Path | None = None,
+    dataset_slug: str | None = None,
+) -> asyncio.Task:
+    if _poller_active(session_obj.id):
+        return _poller_tasks[session_obj.id]
+    task = asyncio.create_task(
+        run_kernel_poller(
+            db,
+            client,
+            session_obj,
+            bot=bot,
+            notify_chat_id=notify_chat_id,
+            test_chat_id=test_chat_id,
+            main_chat_id=main_chat_id,
+            status_chat_id=status_chat_id,
+            status_message_id=status_message_id,
+            poll_interval=poll_interval,
+            timeout_minutes=timeout_minutes,
+            download_dir=download_dir,
+            dataset_slug=dataset_slug,
+        )
+    )
+    _track_poller_task(session_obj.id, task)
+    return task
+
+
 def _parse_positive_int(value: object) -> int | None:
     try:
         parsed = int(value)
@@ -106,6 +160,19 @@ def _selection_render_limit(session_obj: VideoAnnounceSession) -> int | None:
         else {}
     )
     return _parse_positive_int(params.get("render_scene_limit"))
+
+
+def _resolve_notify_chat_id(session_obj: VideoAnnounceSession) -> int | None:
+    params = (
+        session_obj.selection_params
+        if isinstance(session_obj.selection_params, dict)
+        else {}
+    )
+    raw = params.get("notify_chat_id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _fallback_target_date_label(session_obj: VideoAnnounceSession) -> str | None:
@@ -834,6 +901,50 @@ async def run_kernel_poller(
         )
     finally:
         await _cleanup_dataset(client, dataset_slug)
+
+
+async def resume_rendering_sessions(db: Database, bot, *, chat_id: int | None = None) -> int:
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(VideoAnnounceSession).where(
+                VideoAnnounceSession.status == VideoAnnounceSessionStatus.RENDERING
+            )
+        )
+        sessions = res.scalars().all()
+    if not sessions:
+        return 0
+    recovered = 0
+    admin_chat_id = None
+    if chat_id is None:
+        raw_admin = os.getenv("ADMIN_CHAT_ID")
+        if raw_admin:
+            try:
+                admin_chat_id = int(raw_admin)
+            except (TypeError, ValueError):
+                admin_chat_id = None
+    client = KaggleClient()
+    for sess in sessions:
+        if not sess.kaggle_kernel_ref:
+            continue
+        if _poller_active(sess.id):
+            continue
+        notify_chat_id = _resolve_notify_chat_id(sess) or chat_id or admin_chat_id or sess.test_chat_id or sess.main_chat_id
+        if not notify_chat_id:
+            continue
+        start_kernel_poller_task(
+            db,
+            client,
+            sess,
+            bot=bot,
+            notify_chat_id=notify_chat_id,
+            test_chat_id=sess.test_chat_id,
+            main_chat_id=sess.main_chat_id,
+            poll_interval=60,
+            timeout_minutes=VIDEO_KAGGLE_TIMEOUT_MINUTES,
+            dataset_slug=sess.kaggle_dataset,
+        )
+        recovered += 1
+    return recovered
 
 
 async def reset_stuck_sessions(db: Database, *, max_age_minutes: int = 30) -> int:

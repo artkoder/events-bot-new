@@ -390,10 +390,10 @@ async def find_existing_event(
     Returns:
         Tuple of (event_id, needs_full_update):
         - event_id: ID of existing event or None if not found
-        - needs_full_update: True if event has 00:00 time and should be fully updated
+        - needs_full_update: True if event has placeholder time (00:00/empty) and should be fully updated
     """
     from models import Event
-    from sqlalchemy import select
+    from sqlalchemy import select, or_
     from difflib import SequenceMatcher
     
     logger.debug(
@@ -453,7 +453,7 @@ async def find_existing_event(
         if event_time != "00:00":
             stmt_placeholder = select(Event).where(
                 Event.date == event_date,
-                Event.time == "00:00",
+                or_(Event.time == "00:00", Event.time == ""),
             )
             result = await session.execute(stmt_placeholder)
             placeholders = result.scalars().all()
@@ -481,7 +481,7 @@ async def find_existing_event(
         for ev in loc_candidates:
             if fuzzy_title_match(title, ev.title):
                 # Different time for same event?
-                if ev.time == "00:00" and event_time != "00:00":
+                if (ev.time or "") in {"", "00:00"} and event_time != "00:00":
                     logger.info(
                         "find_existing_event: MATCHED by loc+title placeholder event_id=%d",
                         ev.id,

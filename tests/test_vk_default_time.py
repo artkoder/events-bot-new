@@ -412,7 +412,7 @@ async def test_vk_default_location_message_updates_db(tmp_path):
         (location_val,) = await cur.fetchone()
     assert location_val is None
 @pytest.mark.asyncio
-async def test_build_event_payload_includes_default_time(monkeypatch):
+async def test_build_event_payload_fills_default_time_without_leaking_it_into_prompt(monkeypatch):
     captured = {}
 
     async def fake_parse(text, **kwargs):
@@ -420,15 +420,16 @@ async def test_build_event_payload_includes_default_time(monkeypatch):
         captured["festival_names"] = kwargs.get("festival_names")
         return [{"title": "T", "date": "2099-01-01"}]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "text", default_time="19:00"
     )
 
-    assert "19:00" in captured["text"]
+    assert "19:00" not in captured["text"]
     assert captured["festival_names"] is None
     assert draft.time == "19:00"
+    assert draft.time_is_default is True
     assert festival_payload is None
 
 
@@ -440,7 +441,7 @@ async def test_build_event_payload_uses_default_ticket_link(monkeypatch):
         captured["text"] = text
         return [{"title": "T", "date": "2099-01-01"}]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "text", default_ticket_link="https://tickets.example"
@@ -465,7 +466,7 @@ async def test_build_event_payload_preserves_llm_ticket_link(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "parse_event_via_llm", fake_parse)
 
     draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "text", default_ticket_link="https://tickets.example"

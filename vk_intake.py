@@ -19,6 +19,7 @@ from poster_media import (
     apply_ocr_results_to_media,
     build_poster_summary,
     collect_poster_texts,
+    is_supabase_storage_url,
     process_media,
 )
 import poster_ocr
@@ -46,6 +47,88 @@ VK_USE_PYMORPHY = os.getenv("VK_USE_PYMORPHY", "false").lower() == "true"
 OCR_PENDING_SENTINEL = "__ocr_pending__"
 
 HISTORY_MATCHED_KEYWORD = "history"
+
+
+def _read_int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _normalize_prompt_ocr_block(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = normalized.replace("\xa0", " ")
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_line in normalized.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _truncate_prompt_block(text: str, limit: int) -> str:
+    if limit <= 0 or len(text) <= limit:
+        return text
+    if limit <= 80:
+        return text[:limit].rstrip()
+    head = max(1, int(limit * 0.65))
+    tail = max(0, limit - head - 5)
+    if tail <= 0:
+        return text[:limit].rstrip()
+    return f"{text[:head].rstrip()}\n...\n{text[-tail:].lstrip()}".strip()
+
+
+def _budget_vk_parse_poster_texts(post_text: str, poster_texts: Sequence[str]) -> list[str]:
+    cleaned = [
+        block
+        for block in (_normalize_prompt_ocr_block(text) for text in poster_texts)
+        if block
+    ]
+    if not cleaned:
+        return []
+
+    main_text_len = len((post_text or "").strip())
+    skip_main_text_chars = max(0, _read_int_env("VK_PARSE_POSTER_TEXT_SKIP_MAIN_TEXT_CHARS", 1600))
+    if skip_main_text_chars and main_text_len >= skip_main_text_chars:
+        logger.info(
+            "vk.parse budget: skip poster OCR for long post text_len=%s posters=%s",
+            main_text_len,
+            len(cleaned),
+        )
+        return []
+
+    max_blocks = max(1, _read_int_env("VK_PARSE_POSTER_TEXT_MAX_BLOCKS", 3))
+    max_block_chars = max(80, _read_int_env("VK_PARSE_POSTER_TEXT_MAX_BLOCK_CHARS", 500))
+    max_total_chars = max(max_block_chars, _read_int_env("VK_PARSE_POSTER_TEXT_MAX_TOTAL_CHARS", 1200))
+
+    selected: list[str] = []
+    remaining = max_total_chars
+    for block in cleaned:
+        if len(selected) >= max_blocks or remaining <= 0:
+            break
+        limit = min(max_block_chars, remaining)
+        trimmed = _truncate_prompt_block(block, limit).strip()
+        if not trimmed:
+            continue
+        selected.append(trimmed)
+        remaining -= len(trimmed)
+
+    if len(selected) != len(cleaned):
+        logger.info(
+            "vk.parse budget: poster OCR reduced blocks=%s->%s total_chars=%s->%s",
+            len(cleaned),
+            len(selected),
+            sum(len(block) for block in cleaned),
+            sum(len(block) for block in selected),
+        )
+    return selected
 
 
 def _normalize_group_title(value: str | None) -> str | None:
@@ -737,16 +820,22 @@ def extract_event_ts_hint(
             month = int(m.group(3))
             date_span = m.span()
         else:
-            m = MONTH_NAME_RE.search(text_low)
-            if m:
-                day = int(m.group(1))
-                mon_word = m.group(2).rstrip(".")
-                month = MONTHS_RU.get(mon_word)
-                y = re.search(r"\b20\d{2}\b", text_low[m.end():])
+            # MONTH_NAME_RE is intentionally broad (number + word) to catch
+            # "13 февраля", but it also matches unrelated fragments like
+            # "3 этаж" or "2 зал". Pick the first match that is a real month.
+            for cand in MONTH_NAME_RE.finditer(text_low):
+                mon_word = cand.group(2).rstrip(".")
+                mon_num = MONTHS_RU.get(mon_word)
+                if mon_num is None:
+                    continue
+                m = cand
+                day = int(cand.group(1))
+                month = int(mon_num)
+                y = re.search(r"\b20\d{2}\b", text_low[cand.end() :])
                 if y:
                     year = int(y.group(0))
-                if month is not None:
-                    date_span = m.span()
+                date_span = cand.span()
+                break
 
     if day is None or month is None:
         if "сегодня" in text_low:
@@ -916,6 +1005,7 @@ class EventDraft:
     title: str
     date: str | None = None
     time: str | None = None
+    time_is_default: bool = False
     venue: str | None = None
     description: str | None = None
     festival: str | None = None
@@ -936,6 +1026,7 @@ class EventDraft:
     ocr_tokens_remaining: int | None = None
     ocr_limit_notice: str | None = None
     search_digest: str | None = None
+    reject_reason: str | None = None
 
 
 @dataclass
@@ -949,6 +1040,11 @@ class PersistResult:
     event_time: str
     event_type: str | None
     is_free: bool
+    # Smart Update outcome (for unified operator report)
+    smart_status: str | None = None
+    smart_created: bool = False
+    smart_merged: bool = False
+    smart_added_posters: int = 0
 
 
 async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
@@ -1069,6 +1165,50 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
     return results
 
 
+async def vk_intake_parse_llm(
+    prompt_text: str,
+    *,
+    source_name: str | None = None,
+    festival_names: Sequence[str] | None = None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None = None,
+    poster_media: Sequence[PosterMedia] | None = None,
+    rate_limit_max_wait_sec: float | int | str | None = None,
+) -> Any:
+    """Parse a VK post text into structured events using the universal LLM parser.
+
+    Default backend is Gemma; set `EVENT_PARSE_LLM=4o` to force the legacy OpenAI parser.
+    """
+    parse_event_via_llm = require_main_attr("parse_event_via_llm")
+
+    extra: dict[str, str] = {}
+    if source_name:
+        # ``parse_event_via_llm`` accepts ``channel_title`` for context.
+        extra["channel_title"] = source_name
+
+    parse_kwargs: dict[str, Any] = {}
+    poster_items = list(poster_media or [])
+    poster_texts = _budget_vk_parse_poster_texts(
+        prompt_text,
+        collect_poster_texts(poster_items),
+    )
+    poster_summary = build_poster_summary(poster_items)
+    if poster_texts:
+        parse_kwargs["poster_texts"] = poster_texts
+    if poster_summary:
+        parse_kwargs["poster_summary"] = poster_summary
+    if festival_alias_pairs:
+        parse_kwargs["festival_alias_pairs"] = festival_alias_pairs
+    if rate_limit_max_wait_sec is not None:
+        parse_kwargs["rate_limit_max_wait_sec"] = str(rate_limit_max_wait_sec)
+
+    return await parse_event_via_llm(
+        prompt_text,
+        festival_names=festival_names,
+        **extra,
+        **parse_kwargs,
+    )
+
+
 async def build_event_drafts_from_vk(
     text: str,
     *,
@@ -1085,6 +1225,7 @@ async def build_event_drafts_from_vk(
     poster_media: Sequence[PosterMedia] | None = None,
     ocr_tokens_spent: int = 0,
     ocr_tokens_remaining: int | None = None,
+    rate_limit_max_wait_sec: float | int | str | None = None,
 ) -> tuple[list[EventDraft], dict[str, Any] | None]:
     """Return normalised event drafts extracted from a VK post.
 
@@ -1092,17 +1233,21 @@ async def build_event_drafts_from_vk(
     forwarded posts.  When ``operator_extra`` is supplied it takes precedence
     over conflicting fragments of the original text.  ``source_name`` and
     ``location_hint`` are passed to the extractor for additional context and
-    ``default_time`` is used when the post does not mention a time explicitly.
-    The extractor is also instructed to apply ``default_time`` when no time is
-    present in the post.
+    ``default_time`` (if set for the VK source) is used as a low-priority
+    fallback when the post has no explicit time. Such time is marked with
+    ``draft.time_is_default=True`` so Smart Update treats it as a weak anchor
+    and can override it when explicit time arrives from other sources.
 
     The resulting :class:`EventDraft` contains normalised event attributes such
     as title, schedule, venue, ticket details and other metadata needed by the
     import pipeline.  The function returns a tuple ``(drafts, festival_payload)``
     where ``festival_payload`` is the raw festival structure, if any, provided
-    by :func:`main.parse_event_via_4o`.
+    by :func:`main.parse_event_via_llm`.
     """
-    parse_event_via_4o = require_main_attr("parse_event_via_4o")
+    timings_on = (os.getenv("PIPELINE_TIMINGS") or "").strip().lower() in {"1", "true", "yes", "on"}
+    poster_items = list(poster_media or [])
+    poster_texts = collect_poster_texts(poster_items)
+    poster_summary = build_poster_summary(poster_items)
 
     fallback_ticket_link = (
         default_ticket_link.strip()
@@ -1115,13 +1260,37 @@ async def build_event_drafts_from_vk(
     llm_text = text
     if operator_extra:
         llm_text = f"{llm_text}\n{operator_extra}"
-    if default_time:
-        llm_text = f"{llm_text}\nЕсли время не указано, предположи начало в {default_time}."
+
+    # LLM-first hinting: if the source explicitly says it's a standup/comedy show,
+    # nudge the parser to make the format visible in the title (without hardcoding
+    # deterministic renames after parsing).
+    try:
+        hint_parts: list[str] = [text or ""]
+        if poster_texts:
+            hint_parts.extend([p for p in poster_texts if isinstance(p, str) and p.strip()])
+        hint_norm = unicodedata.normalize("NFKC", "\n".join(hint_parts)).casefold().replace("ё", "е")
+        if re.search(r"\b(?:стендап|стенд-?ап|stand\s*-?up|комик\w*|юмор\w*)\b", hint_norm, flags=re.IGNORECASE):
+            llm_text += (
+                "\nЕсли это стендап/комедия, сделай это явно в title (например «Стендап: …»), "
+                "даже если оригинальное название звучит как «медитация». Не выдумывай детали."
+            )
+    except Exception:
+        pass
+    if location_hint:
+        hint_clean = str(location_hint).strip()
+        if hint_clean:
+            llm_text = (
+                f"{llm_text}\n"
+                "Хинт по локации (используй ТОЛЬКО если пост действительно описывает посещаемое событие, "
+                f"но место не указано явно): {hint_clean}. "
+                "Не создавай событие только из-за этого хинта. Если пост не про событие — верни `[]`."
+            )
     if fallback_ticket_link:
         llm_text = (
             f"{llm_text}\n"
-            f"Если в посте нет ссылки на билеты или регистрацию, используй {fallback_ticket_link} как ссылку по умолчанию. "
-            "Не заменяй ссылки, которые уже указаны."
+            "Хинт по ссылке: если и только если это событие и в посте нет ссылки на билеты/регистрацию, "
+            f"используй {fallback_ticket_link} как ссылку по умолчанию. "
+            "Не заменяй ссылки, которые уже указаны. Если пост не про событие — верни `[]`."
         )
     if festival_hint:
         llm_text = (
@@ -1130,30 +1299,32 @@ async def build_event_drafts_from_vk(
             "Сопоставь с существующими фестивалями (JSON ниже) или создай новый."
         )
 
-    poster_items = list(poster_media or [])
-    poster_texts = collect_poster_texts(poster_items)
-    poster_summary = build_poster_summary(poster_items)
-
-    extra: dict[str, str] = {}
-    if source_name:
-        # ``parse_event_via_4o`` accepts ``channel_title`` for context
-        extra["channel_title"] = source_name
-
-    parse_kwargs: dict[str, Any] = {}
-    if poster_texts:
-        parse_kwargs["poster_texts"] = poster_texts
-    if poster_summary:
-        parse_kwargs["poster_summary"] = poster_summary
-    if festival_alias_pairs:
-        parse_kwargs["festival_alias_pairs"] = festival_alias_pairs
-
-    parsed = await parse_event_via_4o(
-        llm_text, festival_names=festival_names, **extra, **parse_kwargs
+    t0 = time.monotonic()
+    parsed = await vk_intake_parse_llm(
+        llm_text,
+        source_name=source_name,
+        festival_names=festival_names,
+        festival_alias_pairs=festival_alias_pairs,
+        poster_media=poster_media,
+        rate_limit_max_wait_sec=rate_limit_max_wait_sec,
     )
+    if timings_on:
+        try:
+            logger.info(
+                "timing vk_intake_parse_llm events_hint=%s posters=%s took_sec=%.3f",
+                "unknown",
+                len(list(poster_media or [])),
+                float(time.monotonic() - t0),
+            )
+        except Exception:
+            pass
     festival_payload = getattr(parsed, "festival", None)
     parsed_events = list(parsed or [])
     if not parsed_events and not festival_payload:
-        raise RuntimeError("LLM returned no event")
+        # For VK auto-import we treat "no events extracted" as a valid outcome (0 drafts),
+        # not a technical failure. Callers that require an event (manual flows) can
+        # enforce that at a higher level (see build_event_draft/build_event_payload_from_vk).
+        return [], None
 
     combined_text = text or ""
     extra_clean = (operator_extra or "").strip()
@@ -1174,7 +1345,7 @@ async def build_event_drafts_from_vk(
     if operator_extra or effective_ts_hint is None:
         computed = extract_event_ts_hint(
             combined_text,
-            default_time,
+            default_time=None,
             publish_ts=publish_ts,
             allow_past=False,
             tz=tzinfo
@@ -1237,7 +1408,239 @@ async def build_event_drafts_from_vk(
         except (TypeError, ValueError):
             return bool(value)
 
+    # Title grounding: prevent hallucinated/garbled short tokens in titles from leaking into UI.
+    ground_parts: list[str] = []
+    if isinstance(text, str) and text.strip():
+        ground_parts.append(text)
+    if poster_texts:
+        ground_parts.extend([p for p in poster_texts if isinstance(p, str) and p.strip()])
+    ground_norm = unicodedata.normalize("NFKC", "\n".join(ground_parts)).casefold().replace("ё", "е")
+
+    _title_word_re = re.compile(r"[а-яё]{3,}", re.IGNORECASE)
+    _title_prefix_re = re.compile(r"^([^a-zа-я0-9]+\\s+)", re.IGNORECASE)
+
+    def _token_in_ground(token: str) -> bool:
+        tok = token.casefold().replace("ё", "е").strip()
+        if not tok:
+            return True
+        if tok in ground_norm:
+            return True
+        # Best-effort: allow simple inflection differences.
+        if len(tok) >= 5 and tok[:-1] in ground_norm:
+            return True
+        if len(tok) >= 6 and tok[:-2] in ground_norm:
+            return True
+        return False
+
+    def _missing_title_tokens(title: str) -> list[str]:
+        words = [w for w in _title_word_re.findall(title or "") if w]
+        missing: list[str] = []
+        for w in words:
+            if _token_in_ground(w):
+                continue
+            missing.append(w)
+        return missing
+
+    def _fallback_title(title: str, *, event_type: str | None, venue: str | None) -> str:
+        prefix = ""
+        m = _title_prefix_re.match(title or "")
+        if m:
+            prefix = m.group(1)
+        et = (event_type or "").strip().casefold()
+        if any(k in et for k in ("выстав", "экспоз")):
+            base = "Интерактивная экспозиция"
+        elif et:
+            base = (event_type or "").strip().capitalize()
+        else:
+            base = "Событие"
+        venue_short = (venue or "").split(",", 1)[0].strip()
+        core = f"{base} — {venue_short}" if venue_short else base
+        return (prefix + core).strip()
+
     drafts: list[EventDraft] = []
+
+    def _source_norm_text() -> str:
+        parts = [combined_text]
+        if poster_texts:
+            parts.extend([p for p in poster_texts if isinstance(p, str) and p.strip()])
+        s = unicodedata.normalize("NFKC", "\n".join([p for p in parts if p]))
+        s = s.replace("\xa0", " ")
+        return s.casefold().replace("ё", "е")
+
+    source_norm = _source_norm_text()
+
+    def _sanitize_false_time_from_date(
+        *,
+        draft_date: str | None,
+        draft_time: str | None,
+    ) -> str | None:
+        """Fix common LLM confusion: date token DD.MM -> time HH:MM.
+
+        Example: source mentions "21.02" (Feb 21), but model outputs time "21:02".
+        We treat this as a correctness fix (not an editorial rewrite) and only apply
+        it when date and time numerals match exactly.
+        """
+        t_raw = (draft_time or "").strip()
+        if not t_raw:
+            return draft_time
+        m = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*$", t_raw)
+        if not m:
+            return draft_time
+        try:
+            hh = int(m.group(1))
+            mm = int(m.group(2))
+        except Exception:
+            return draft_time
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            return draft_time
+        d_raw = (draft_date or "").strip()
+        if not d_raw:
+            return draft_time
+        try:
+            d_obj = date.fromisoformat(d_raw.split("..", 1)[0].strip())
+        except Exception:
+            return draft_time
+        # Strong signal: time numerals equal the event date day/month.
+        if (d_obj.day, d_obj.month) != (hh, mm):
+            return draft_time
+
+        date_dot = f"{d_obj.day}.{d_obj.month:02d}"
+        date_dot2 = f"{d_obj.day:02d}.{d_obj.month:02d}"
+        time_colon = f"{hh:02d}:{mm:02d}"
+        # Source contains DD.MM, but not HH:MM -> likely date, not time.
+        if (date_dot in source_norm or date_dot2 in source_norm) and (time_colon not in source_norm):
+            # If there is any other explicit time token in the source, do not touch.
+            # (We only fix the "time copied from date" case when the source otherwise has no time.)
+            other_times = re.findall(r"\b\d{1,2}[:.]\d{2}\b", source_norm)
+            # Filter out the date-like token itself.
+            other_times = [x for x in other_times if x.replace(".", ":") != time_colon]
+            if not other_times:
+                return None
+        return draft_time
+
+    def _looks_like_program_schedule_source() -> bool:
+        if not source_norm:
+            return False
+        if not re.search(r"\b(?:программ\w*|расписан\w*|тайминг|тайм-?инг|в\s+программ\w*)\b", source_norm):
+            return False
+        times = re.findall(r"\b\d{1,2}[:.]\d{2}\b", source_norm)
+        # Require 2+ time tokens to treat it as a schedule/program.
+        return len(times) >= 2
+
+    def _maybe_collapse_program_schedule_drafts(drafts_in: list[EventDraft]) -> list[EventDraft]:
+        """Collapse duplicate drafts produced from a single program/schedule post.
+
+        Applies only when the source clearly looks like one umbrella event with a program.
+        Guardrails are intentionally strict to avoid collapsing theatre multi-show posts.
+        """
+        if len(drafts_in) < 2:
+            return drafts_in
+        if not _looks_like_program_schedule_source():
+            return drafts_in
+
+        def _norm_title(value: str | None) -> str:
+            t = unicodedata.normalize("NFKC", (value or "")).strip()
+            t = re.sub(r"^[^a-zа-яё0-9]+", "", t, flags=re.IGNORECASE).strip()
+            t = re.sub(r"[^a-zа-яё0-9]+", " ", t, flags=re.IGNORECASE).strip()
+            return t.casefold().replace("ё", "е")
+
+        def _parse_hhmm(value: str | None) -> tuple[int, int] | None:
+            s = (value or "").strip()
+            if not s:
+                return None
+            s = s.split("..", 1)[0].strip()
+            m2 = re.match(r"^(\d{1,2})[:.](\d{2})$", s)
+            if not m2:
+                return None
+            try:
+                hh2 = int(m2.group(1))
+                mm2 = int(m2.group(2))
+            except Exception:
+                return None
+            if not (0 <= hh2 <= 23 and 0 <= mm2 <= 59):
+                return None
+            return hh2, mm2
+
+        def _fmt(hh2: int, mm2: int) -> str:
+            return f"{hh2:02d}:{mm2:02d}"
+
+        # Use times from source, not from drafts, to get the full range.
+        src_times: list[tuple[int, int]] = []
+        for tok in re.findall(r"\b\d{1,2}[:.]\d{2}\b", source_norm):
+            m2 = re.match(r"^(\d{1,2})[:.](\d{2})$", tok)
+            if not m2:
+                continue
+            try:
+                hh2 = int(m2.group(1))
+                mm2 = int(m2.group(2))
+            except Exception:
+                continue
+            if 0 <= hh2 <= 23 and 0 <= mm2 <= 59:
+                src_times.append((hh2, mm2))
+        src_times = sorted(set(src_times))
+        if len(src_times) < 2:
+            return drafts_in
+        start_hh, start_mm = src_times[0]
+        end_hh, end_mm = src_times[-1]
+        if (end_hh, end_mm) <= (start_hh, start_mm):
+            return drafts_in
+        merged_time = f"{_fmt(start_hh, start_mm)}..{_fmt(end_hh, end_mm)}"
+
+        # Group by date + venue + normalized title; collapse only within a single clear group.
+        groups: dict[tuple[str, str, str], list[EventDraft]] = {}
+        for d in drafts_in:
+            d_date = (d.date or "").strip()
+            d_venue = (d.venue or "").strip()
+            key = (d_date, d_venue, _norm_title(d.title))
+            groups.setdefault(key, []).append(d)
+
+        # Pick the largest eligible group.
+        best_key = None
+        best_group: list[EventDraft] = []
+        for key, grp in groups.items():
+            if len(grp) < 2:
+                continue
+            # Skip theatre shows: multi-time theatre posts should remain separate.
+            et = (grp[0].event_type or "").strip().casefold()
+            if et == "спектакль":
+                continue
+            # All titles should match after normalization.
+            if len({_norm_title(x.title) for x in grp}) != 1:
+                continue
+            # All must have the same date and venue already by key.
+            if not key[0] or not key[1] or not key[2]:
+                continue
+            # Require that drafts appear to differ mainly by time.
+            parsed_times = [_parse_hhmm(x.time) for x in grp]
+            if not all(pt is not None for pt in parsed_times):
+                continue
+            # Prefer collapsing when there are 3+ time mentions (typical "program").
+            if len(src_times) < 3:
+                continue
+            if len(grp) > len(best_group):
+                best_key = key
+                best_group = grp
+
+        if not best_group or best_key is None:
+            return drafts_in
+
+        # Keep one draft (stable choice: earliest time among group), override its time with the range.
+        best_group_sorted = sorted(
+            best_group,
+            key=lambda d: _parse_hhmm(d.time) or (99, 99),
+        )
+        keep = best_group_sorted[0]
+        keep.time = merged_time
+        out: list[EventDraft] = []
+        for d in drafts_in:
+            if d is keep:
+                out.append(d)
+                continue
+            if d in best_group:
+                continue
+            out.append(d)
+        return out
+
     for data in parsed_events:
         ticket_price_min = clean_int(data.get("ticket_price_min"))
         ticket_price_max = clean_int(data.get("ticket_price_max"))
@@ -1251,47 +1654,59 @@ async def build_event_drafts_from_vk(
             links = None
 
         raw_date = clean_str(data.get("date"))
-        raw_time = clean_str(data.get("time")) or default_time
+        raw_time = clean_str(data.get("time"))
         final_date = raw_date
         final_time = raw_time
+        time_is_default = False
 
         if raw_date and not has_explicit_year_in_text:
-            try:
-                d = date.fromisoformat(raw_date)
-                if d < anchor_dt.date():
-                    candidate = d
-                    for _ in range(5):
-                        if candidate >= anchor_dt.date():
-                            break
-                        new_year = candidate.year + 1
-                        new_d = _safe_construct_date(new_year, candidate.month, candidate.day)
-                        if not new_d:
-                            try:
-                                new_d = date(new_year, 3, 1)
-                            except ValueError:
-                                break
-                        candidate = new_d
-                    if candidate >= anchor_dt.date():
-                        final_date = candidate.isoformat()
+            final_date = _maybe_rollover_llm_iso_date(
+                raw_date,
+                anchor_date=anchor_dt.date(),
+                has_explicit_year_in_text=has_explicit_year_in_text,
+            )
+            if hint_dt:
+                try:
+                    d_check = date.fromisoformat((final_date or raw_date).split("..", 1)[0].strip())
+                    if (d_check.month, d_check.day) == (hint_dt.month, hint_dt.day):
+                        if d_check.year != hint_dt.year:
+                            final_date = hint_dt.date().isoformat()
+                        if not final_time and hint_dt.strftime("%H:%M") != "00:00":
+                            final_time = hint_dt.strftime("%H:%M")
+                except ValueError:
+                    pass
 
-                if hint_dt:
-                    try:
-                        d_check = date.fromisoformat(final_date or raw_date)
-                        if (d_check.month, d_check.day) == (hint_dt.month, hint_dt.day):
-                            if d_check.year != hint_dt.year:
-                                final_date = hint_dt.date().isoformat()
-                            if not final_time:
-                                final_time = hint_dt.strftime("%H:%M")
-                    except ValueError:
-                        pass
-            except ValueError:
-                pass
+        final_time = _sanitize_false_time_from_date(draft_date=final_date, draft_time=final_time)
+        if final_date and (not final_time) and default_time:
+            final_time = default_time
+            time_is_default = True
+
+        title_raw = clean_str(data.get("title")) or ""
+        event_type_val = clean_str(data.get("event_type"))
+        missing_tokens = _missing_title_tokens(title_raw)
+        # Heuristic: if the title contains any Cyrillic word (3+ chars) absent from the source
+        # text/OCR, it's likely a hallucination/typo (e.g. "Утя"). Prefer a safe fallback.
+        if missing_tokens:
+            venue_val = clean_str(data.get("location_name")) or source_name or ""
+            fallback = _fallback_title(
+                title_raw,
+                event_type=event_type_val,
+                venue=venue_val,
+            )
+            logger.warning(
+                "vk_intake suspicious_title replaced title=%r missing=%s fallback=%r",
+                title_raw,
+                ",".join(missing_tokens[:4]),
+                fallback,
+            )
+            title_raw = fallback
 
         drafts.append(
             EventDraft(
-                title=data.get("title", ""),
+                title=title_raw,
                 date=final_date,
                 time=final_time,
+                time_is_default=time_is_default,
                 venue=data.get("location_name"),
                 description=data.get("short_description"),
                 festival=clean_str(data.get("festival")),
@@ -1299,20 +1714,217 @@ async def build_event_drafts_from_vk(
                 city=clean_str(data.get("city")),
                 ticket_price_min=ticket_price_min,
                 ticket_price_max=ticket_price_max,
-                event_type=clean_str(data.get("event_type")),
+                event_type=event_type_val,
                 emoji=clean_str(data.get("emoji")),
                 end_date=clean_str(data.get("end_date")),
                 is_free=clean_bool(data.get("is_free")),
                 pushkin_card=clean_bool(data.get("pushkin_card")),
                 links=links,
                 source_text=combined_text,
-                poster_media=poster_items,
+                poster_media=list(poster_items),
                 poster_summary=poster_summary,
                 ocr_tokens_spent=ocr_tokens_spent,
                 ocr_tokens_remaining=ocr_tokens_remaining,
                 search_digest=clean_str(data.get("search_digest")),
             )
         )
+
+    # If a single VK post describes multiple events, do not blindly attach the whole
+    # poster gallery to every event: this often results in the wrong cover/poster
+    # on Telegraph pages. Instead, try to assign posters to drafts by OCR relevance
+    # and drop ambiguous matches.
+    if len(drafts) > 1 and poster_items:
+        try:
+            month_words: dict[int, set[str]] = {}
+            for word, num in MONTHS_RU.items():
+                try:
+                    num_i = int(num)
+                except Exception:
+                    continue
+                month_words.setdefault(num_i, set()).add(str(word).casefold())
+
+            stop_tokens = {
+                "афиша",
+                "вход",
+                "билет",
+                "билеты",
+                "руб",
+                "рублей",
+                "цена",
+                "стоимость",
+                "начало",
+                "начнется",
+                "начнётся",
+                "сбор",
+                "регистрация",
+            }
+
+            def _norm_text(value: str | None) -> str:
+                text_val = (value or "").strip().casefold().replace("ё", "е")
+                text_val = unicodedata.normalize("NFKC", text_val)
+                text_val = text_val.replace("\xa0", " ")
+                return text_val
+
+            def _tokens(value: str | None) -> set[str]:
+                raw = _norm_text(value)
+                if not raw:
+                    return set()
+                found = re.findall(r"[a-zа-я0-9]{3,}", raw, flags=re.IGNORECASE)
+                return {t for t in found if t and t not in stop_tokens}
+
+            def _date_bonus(draft: EventDraft, ocr_raw: str) -> float:
+                d_raw = (draft.date or "").strip()
+                if not d_raw:
+                    return 0.0
+                try:
+                    d_obj = date.fromisoformat(d_raw.split("..", 1)[0].strip())
+                except Exception:
+                    return 0.0
+                day = d_obj.day
+                month = d_obj.month
+                # Numeric formats: 14.02, 14/02, 14-02, allow 1-digit month/day.
+                if re.search(rf"\\b0?{day}[./-]0?{month}\\b", ocr_raw):
+                    return 3.0
+                # Text month formats: "14 февраля"
+                words = month_words.get(month) or set()
+                if words:
+                    if any(w in ocr_raw for w in words) and re.search(rf"\\b{day}\\b", ocr_raw):
+                        return 2.0
+                return 0.0
+
+            def _time_bonus(draft: EventDraft, ocr_raw: str) -> float:
+                t = (draft.time or "").strip()
+                if not t or t == "00:00":
+                    return 0.0
+                hhmm = re.sub(r"\\s+", "", t)
+                if not re.match(r"^\\d{1,2}:\\d{2}$", hhmm):
+                    return 0.0
+                hh, mm = hhmm.split(":", 1)
+                hh = hh.zfill(2)
+                needle1 = f"{hh}:{mm}"
+                needle2 = f"{hh}.{mm}"
+                if needle1 in ocr_raw or needle2 in ocr_raw:
+                    return 1.5
+                return 0.0
+
+            def _poster_score(draft: EventDraft, poster: PosterMedia) -> float:
+                ocr_combined = " ".join(
+                    x
+                    for x in [
+                        (poster.ocr_title or "").strip(),
+                        (poster.ocr_text or "").strip(),
+                    ]
+                    if x
+                ).strip()
+                if not ocr_combined:
+                    return 0.0
+                ocr_raw = _norm_text(ocr_combined)
+
+                draft_text = " ".join(
+                    x
+                    for x in [
+                        (draft.title or "").strip(),
+                        (draft.venue or "").strip(),
+                        (draft.festival or "").strip(),
+                    ]
+                    if x
+                )
+
+                draft_tokens = _tokens(draft_text)
+                ocr_tokens = _tokens(ocr_combined)
+                overlap = len(draft_tokens & ocr_tokens) if (draft_tokens and ocr_tokens) else 0
+
+                score = float(min(12, overlap * 2))
+                score += _date_bonus(draft, ocr_raw)
+                score += _time_bonus(draft, ocr_raw)
+
+                # If OCR title contains a substantial part of the event title, boost.
+                title_norm = _norm_text(draft.title)
+                if title_norm and len(title_norm) >= 10 and title_norm in ocr_raw:
+                    score += 4.0
+
+                return score
+
+            max_per_draft = 3
+            assigned: dict[int, list[PosterMedia]] = {i: [] for i in range(len(drafts))}
+
+            for poster in poster_items:
+                scores = [(_poster_score(d, poster), idx) for idx, d in enumerate(drafts)]
+                scores.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_idx = scores[0]
+                second = scores[1][0] if len(scores) > 1 else 0.0
+
+                # Guardrails: require confident match; otherwise drop to avoid wrong posters.
+                if best_score < 3.0:
+                    continue
+                if (best_score - second) < 1.5:
+                    continue
+                if len(assigned[best_idx]) >= max_per_draft:
+                    continue
+                assigned[best_idx].append(poster)
+
+            for idx, draft in enumerate(drafts):
+                draft.poster_media = list(assigned.get(idx) or [])
+                draft.poster_summary = build_poster_summary(draft.poster_media)
+        except Exception:
+            logging.warning("vk_intake: poster assignment failed", exc_info=True)
+
+    def _venue_looks_like_organizer_not_place(venue: str | None, address: str | None) -> bool:
+        name = (venue or "").strip()
+        if not name:
+            return False
+        if (address or "").strip():
+            return False
+        low = name.casefold()
+        # Heuristic: some LLM parses put an organizer/artist into location_name when the post
+        # doesn't contain an explicit venue. Reject such drafts to avoid garbage events.
+        bad_tokens = (
+            "оркестр",
+            "ансамбль",
+            "коллектив",
+            "солист",
+            "дириж",
+            "лауреат",
+            "исполнитель",
+        )
+        good_tokens = (
+            "театр",
+            "музей",
+            "библиотек",
+            "центр",
+            "дк",
+            "дом культуры",
+            "зал",
+            "кино",
+            "галере",
+            "филармон",
+            "клуб",
+            "студ",
+            "выставоч",
+        )
+        if any(t in low for t in good_tokens):
+            return False
+        if any(t in low for t in bad_tokens):
+            return True
+        # Very long names without an address-like token are suspicious.
+        if len(name) >= 52 and not re.search(r"\\b(ул\\.?|просп\\.?|пр-т|наб\\.?|пл\\.?|дом|д\\.)\\b", low):
+            return True
+        return False
+
+    kept: list[EventDraft] = []
+    dropped = 0
+    for draft in drafts:
+        if _venue_looks_like_organizer_not_place(draft.venue, draft.location_address):
+            dropped += 1
+            continue
+        kept.append(draft)
+    if dropped:
+        logging.info(
+            "vk_intake: dropped drafts due to suspicious venue: dropped=%s kept=%s",
+            dropped,
+            len(kept),
+        )
+    drafts = kept
 
     combined_lower = (combined_text or "").lower()
     paid_keywords = ("руб", "₽", "платн", "стоимост", "взнос", "донат")
@@ -1329,6 +1941,83 @@ async def build_event_drafts_from_vk(
             continue
         if not draft.is_free:
             draft.is_free = True
+
+    # Guardrail: do not accept a parsed `date` when the source contains no explicit/relative
+    # datetime signals. This protects VK auto-import from "today" hallucinations on non-event posts.
+    datetime_signal_re = re.compile(
+        r"(?iu)\b("
+        r"\d{1,2}[./-]\d{1,2}(?:[./-](?:19|20)\d{2})?|"
+        r"(?:[01]?\d|2[0-3])[:.][0-5]\d|"
+        r"(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*|"
+        r"сегодня|завтра|послезавтра|"
+        r"выходн\w*|"
+        r"понедел\w*|вторник\w*|сред\w*|четверг\w*|пятниц\w*|суббот\w*|воскресен\w*"
+        r")\b"
+    )
+    has_datetime_evidence = bool(datetime_signal_re.search(source_norm or ""))
+    if not has_datetime_evidence:
+        for draft in drafts:
+            if (draft.reject_reason or "").strip():
+                continue
+            if (draft.date or "").strip() or (draft.end_date or "").strip():
+                draft.reject_reason = "Нет сигналов даты/времени в источнике"
+
+    # Guardrail: do not create one-off events that are already in the past relative to
+    # the post publish time. Recap posts may contain past dates (for context), but those
+    # should not become standalone events.
+    for draft in drafts:
+        if (draft.reject_reason or "").strip():
+            continue
+        start_d, end_d = _parse_iso_date_range(draft.date, end_value=draft.end_date)
+        if not start_d:
+            continue
+        end_d = end_d or start_d
+        if end_d >= anchor_dt.date():
+            continue
+        event_type_cf = str(getattr(draft, "event_type", "") or "").strip().casefold()
+        # For long-running events without an explicit end date, allow (best-effort).
+        if ".." not in str(draft.date or "") and not str(draft.end_date or "").strip():
+            if event_type_cf in {"выставка", "экспозиция", "ярмарка"}:
+                continue
+        draft.reject_reason = f"Событие в прошлом: {end_d.isoformat()}"
+
+    # Low-confidence guardrail: do not create events when the extracted title appears
+    # to be copied from a recap of a past event, while the future announcement lacks
+    # an explicit title. Mark drafts as rejected so callers can skip with a clear reason.
+    for draft in drafts:
+        if (draft.reject_reason or "").strip():
+            continue
+        reason = _looks_like_recap_title_copied_to_future_event(
+            source_text=combined_text,
+            title=draft.title,
+            draft_date=draft.date,
+            draft_time=draft.time,
+            anchor_date=anchor_dt.date(),
+        )
+        if reason:
+            draft.reject_reason = reason
+
+    # Additional guardrail for recap-style posts: if the post looks like a recent recap,
+    # and the "future mention" is too generic (e.g. "тематический концерт"), skip it.
+    recap_reason = _looks_like_recent_recap_with_past_date(
+        source_text=combined_text,
+        anchor_date=anchor_dt.date(),
+    )
+    if recap_reason:
+        for draft in drafts:
+            if (draft.reject_reason or "").strip():
+                continue
+            if not _looks_like_vague_teaser_title(draft.title):
+                continue
+            try:
+                d_obj = date.fromisoformat((draft.date or "").split("..", 1)[0].strip())
+            except Exception:
+                continue
+            if d_obj < anchor_dt.date():
+                continue
+            draft.reject_reason = recap_reason
+
+    drafts = _maybe_collapse_program_schedule_drafts(drafts)
 
     return drafts, festival_payload
 
@@ -1377,6 +2066,7 @@ async def build_event_drafts(
     festival_names: list[str] | None = None,
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
+    rate_limit_max_wait_sec: float | int | str | None = None,
     db: Database,
 ) -> tuple[list[EventDraft], dict[str, Any] | None]:
     """Download posters, run OCR and return event drafts for a VK post.
@@ -1384,43 +2074,71 @@ async def build_event_drafts(
     Returns a tuple ``(drafts, festival_payload)`` mirroring
     :func:`build_event_drafts_from_vk`.
     """
+    timings_on = (os.getenv("PIPELINE_TIMINGS") or "").strip().lower() in {"1", "true", "yes", "on"}
+    timing: dict[str, float] = {}
+    def _tmark(name: str, sec: float) -> None:
+        if timings_on:
+            timing[name] = float(sec)
+
+    t_all = time.monotonic()
+    t0 = time.monotonic()
     photo_bytes = await _download_photo_media(photos or [])
+    _tmark("download_photos", time.monotonic() - t0)
     poster_items: list[PosterMedia] = []
     ocr_tokens_spent = 0
     ocr_tokens_remaining: int | None = None
     ocr_limit_notice: str | None = None
     hash_to_indices: dict[str, list[int]] | None = None
+    ocr_disabled = (os.getenv("POSTER_OCR_DISABLED") or "").strip().lower() in {"1", "true", "yes", "on"}
     if photo_bytes:
         hash_to_indices = {}
         for idx, (payload, _name) in enumerate(photo_bytes):
             digest = hashlib.sha256(payload).hexdigest()
             hash_to_indices.setdefault(digest, []).append(idx)
+        t0 = time.monotonic()
         poster_items, catbox_msg = await process_media(
             photo_bytes, need_catbox=True, need_ocr=False
         )
+        _tmark("upload_catbox", time.monotonic() - t0)
         ocr_source = source_name or "vk"
         ocr_log_context = {"event_id": None, "source": ocr_source}
         ocr_results: list[poster_ocr.PosterOcrCache] = []
-        try:
-            (
-                ocr_results,
-                ocr_tokens_spent,
-                ocr_tokens_remaining,
-            ) = await poster_ocr.recognize_posters(
-                db, photo_bytes, log_context=ocr_log_context
-            )
-        except poster_ocr.PosterOcrLimitExceededError as exc:
-            logging.warning(
-                "vk.build_event_draft OCR skipped: %s",
-                exc,
-                extra=ocr_log_context,
-            )
-            ocr_results = list(exc.results or [])
-            ocr_tokens_spent = exc.spent_tokens
-            ocr_tokens_remaining = exc.remaining
-            ocr_limit_notice = (
-                "OCR недоступен: дневной лимит токенов исчерпан, распознавание пропущено."
-            )
+        if ocr_disabled:
+            logging.info("vk.build_event_draft OCR disabled via POSTER_OCR_DISABLED=1", extra=ocr_log_context)
+        else:
+            try:
+                t0 = time.monotonic()
+                (
+                    ocr_results,
+                    ocr_tokens_spent,
+                    ocr_tokens_remaining,
+                ) = await poster_ocr.recognize_posters(
+                    db, photo_bytes, log_context=ocr_log_context
+                )
+                _tmark("ocr_posters", time.monotonic() - t0)
+            except poster_ocr.PosterOcrLimitExceededError as exc:
+                logging.warning(
+                    "vk.build_event_draft OCR skipped: %s",
+                    exc,
+                    extra=ocr_log_context,
+                )
+                ocr_results = list(exc.results or [])
+                ocr_tokens_spent = exc.spent_tokens
+                ocr_tokens_remaining = exc.remaining
+                ocr_limit_notice = (
+                    "OCR недоступен: дневной лимит токенов исчерпан, распознавание пропущено."
+                )
+            except Exception as exc:
+                # OCR is a best-effort enrichment. Do not fail the entire VK post import
+                # when OCR backend is temporarily unavailable (network/provider errors).
+                logging.warning(
+                    "vk.build_event_draft OCR failed: %s",
+                    exc,
+                    extra=ocr_log_context,
+                    exc_info=True,
+                )
+                ocr_results = []
+                ocr_limit_notice = "OCR недоступен: ошибка распознавания, распознавание пропущено."
         if ocr_results:
             apply_ocr_results_to_media(
                 poster_items,
@@ -1435,9 +2153,10 @@ async def build_event_drafts(
     else:
         ocr_source = source_name or "vk"
         ocr_log_context = {"event_id": None, "source": ocr_source}
-        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
-            db, [], log_context=ocr_log_context
-        )
+        if not ocr_disabled:
+            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
+                db, [], log_context=ocr_log_context
+            )
     drafts, festival_payload = await build_event_drafts_from_vk(
         text,
         source_name=source_name,
@@ -1453,9 +2172,21 @@ async def build_event_drafts(
         poster_media=poster_items,
         ocr_tokens_spent=ocr_tokens_spent,
         ocr_tokens_remaining=ocr_tokens_remaining,
+        rate_limit_max_wait_sec=rate_limit_max_wait_sec,
     )
+    _tmark("build_drafts_from_vk_total", time.monotonic() - t_all)
     for draft in drafts:
         draft.ocr_limit_notice = ocr_limit_notice
+    if timings_on:
+        try:
+            logger.info(
+                "timing vk_intake_build_drafts photos=%s posters=%s stages=%s",
+                len(photos or []),
+                len(poster_items or []),
+                {k: round(v, 3) for k, v in sorted(timing.items())},
+            )
+        except Exception:
+            pass
     return drafts, festival_payload
 
 
@@ -1533,6 +2264,352 @@ def _safe_construct_date(year: int, month: int, day: int) -> date | None:
             return None
 
 
+def _looks_like_vague_teaser_title(title: str | None) -> bool:
+    raw = (title or "").strip()
+    if not raw:
+        return False
+    t = unicodedata.normalize("NFKC", raw)
+    t = t.replace("\xa0", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    # Drop leading emoji/prefix noise.
+    t = re.sub(r"^[^a-zа-яё0-9]+", "", t, flags=re.IGNORECASE).strip()
+    words = re.findall(r"[а-яё]+", t, flags=re.IGNORECASE)
+    words = [w.casefold().replace("ё", "е") for w in words if w]
+    if len(words) != 2:
+        return False
+    return words[0].startswith("тематичес") and words[1] == "концерт"
+
+
+def _looks_like_recent_recap_with_past_date(
+    *,
+    source_text: str | None,
+    anchor_date: date,
+) -> str | None:
+    """Detect recap-style posts that mention a very recent past date.
+
+    We use this as a context signal: such posts often contain a small "teaser" for a
+    different future event without a proper title. Creating a standalone event from
+    that teaser is high-risk.
+    """
+    raw_text = (source_text or "").strip()
+    if not raw_text:
+        return None
+
+    def _norm(s: str) -> str:
+        s2 = unicodedata.normalize("NFKC", s)
+        s2 = s2.replace("\xa0", " ")
+        s2 = re.sub(r"\s+", " ", s2).strip()
+        return s2.casefold().replace("ё", "е")
+
+    text_norm = _norm(raw_text)
+    recap_markers = (
+        "позавчера",
+        "вчера",
+        "прош",
+        "состоял",
+        "состоялась",
+        "состоялось",
+        "вновь",
+        "исполнил",
+        "исполнила",
+        "исполн",
+        "прозвуч",
+    )
+    if not any(tok in text_norm for tok in recap_markers):
+        return None
+
+    # Require a recent past date mention to avoid false positives on generic
+    # "история/справка" posts.
+    max_past = timedelta(days=14)
+    month_names_patt = "|".join(sorted(MONTHS_RU.keys(), key=len, reverse=True))
+    date_mentions: list[date] = []
+
+    for m in re.finditer(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-]((?:19|20)\d{2}))?\b", text_norm):
+        try:
+            day = int(m.group(1))
+            month = int(m.group(2))
+            year = int(m.group(3)) if m.group(3) else int(anchor_date.year)
+        except Exception:
+            continue
+        d = _safe_construct_date(year, month, day)
+        if d:
+            date_mentions.append(d)
+
+    for m in re.finditer(
+        rf"\b(\d{{1,2}})\s+({month_names_patt})(?:\s+((?:19|20)\d{{2}}))?\b",
+        text_norm,
+        flags=re.IGNORECASE,
+    ):
+        try:
+            day = int(m.group(1))
+            mon = _month_from_token(m.group(2))
+            if not mon:
+                continue
+            year = int(m.group(3)) if m.group(3) else int(anchor_date.year)
+        except Exception:
+            continue
+        d = _safe_construct_date(year, int(mon), day)
+        if d:
+            date_mentions.append(d)
+
+    if not date_mentions:
+        return None
+
+    has_recent_past = any(
+        (d < anchor_date and (anchor_date - d) <= max_past)
+        for d in date_mentions
+    )
+    if not has_recent_past:
+        return None
+
+    return (
+        "Низкая уверенность: пост похож на отчёт о недавнем прошедшем событии, "
+        "а будущее упоминание слишком общее (нет явного названия)."
+    )
+
+
+def _maybe_rollover_llm_iso_date(
+    raw_date: str | None,
+    *,
+    anchor_date: date,
+    has_explicit_year_in_text: bool,
+) -> str | None:
+    """Roll over an LLM-produced ISO date to the next year when the year is implicit.
+
+    VK posts often contain "DD month" without a year. The parser may resolve it to
+    the current year; if that date is in the far past relative to the publish date,
+    it likely refers to the next year's event.
+
+    IMPORTANT: do NOT roll over *recent* past mentions (recaps), otherwise we create
+    bogus future events (e.g. 12 Feb -> 12 Feb next year).
+    """
+    rd = (raw_date or "").strip()
+    if not rd:
+        return raw_date
+    if has_explicit_year_in_text:
+        return raw_date
+    try:
+        d = date.fromisoformat(rd)
+    except Exception:
+        return raw_date
+    if d >= anchor_date:
+        return raw_date
+    if (anchor_date - d) <= RECENT_PAST_THRESHOLD:
+        return raw_date
+
+    candidate = d
+    for _ in range(5):
+        if candidate >= anchor_date:
+            break
+        new_year = candidate.year + 1
+        new_d = _safe_construct_date(new_year, candidate.month, candidate.day)
+        if not new_d:
+            try:
+                new_d = date(new_year, 3, 1)
+            except ValueError:
+                break
+        candidate = new_d
+    if candidate >= anchor_date:
+        return candidate.isoformat()
+    return raw_date
+
+
+def _parse_iso_date_maybe(value: str | None) -> date | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    raw = raw.split("..", 1)[0].strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _parse_iso_date_range(value: str | None, *, end_value: str | None) -> tuple[date | None, date | None]:
+    raw = (value or "").strip()
+    if not raw:
+        return None, None
+    if ".." in raw:
+        left, right = raw.split("..", 1)
+        start = _parse_iso_date_maybe(left)
+        end = _parse_iso_date_maybe(right) or start
+    else:
+        start = _parse_iso_date_maybe(raw)
+        end = start
+    # Prefer explicit end_date field when present.
+    end_override = _parse_iso_date_maybe(end_value)
+    if end_override:
+        end = end_override
+    return start, end
+
+
+def _looks_like_recap_title_copied_to_future_event(
+    *,
+    source_text: str | None,
+    title: str | None,
+    draft_date: str | None,
+    draft_time: str | None,
+    anchor_date: date,
+) -> str | None:
+    """Detect a common VK pattern: recap of a past event + mention of a future event without a name.
+
+    Example (real-world): "12 февраля ... вновь исполнила программу «X» ...", then
+    "19 марта ... исполнят тематический концерт" (no explicit title). LLM may
+    incorrectly reuse the past program title for the future date.
+
+    Returns a human-readable reject reason when confidence is low.
+    """
+    raw_text = (source_text or "").strip()
+    raw_title = (title or "").strip()
+    raw_date = (draft_date or "").strip()
+    if not (raw_text and raw_title and raw_date):
+        return None
+    try:
+        d_obj = date.fromisoformat(raw_date.split("..", 1)[0].strip())
+    except Exception:
+        return None
+
+    def _norm(s: str) -> str:
+        s2 = unicodedata.normalize("NFKC", s)
+        s2 = s2.replace("\xa0", " ")
+        for ch in ("«", "»", "“", "”", "„", "‟", '"', "'"):
+            s2 = s2.replace(ch, " ")
+        s2 = re.sub(r"\s+", " ", s2).strip()
+        s2 = s2.casefold().replace("ё", "е")
+        return s2
+
+    text_norm = _norm(raw_text)
+    title_norm = _norm(raw_title)
+    title_norm = re.sub(r"[^\w\s]+", " ", title_norm, flags=re.UNICODE)
+    title_norm = re.sub(r"\s+", " ", title_norm).strip()
+    if len(title_norm) < 6:
+        return None
+
+    title_positions: list[int] = []
+    start = 0
+    while True:
+        idx = text_norm.find(title_norm, start)
+        if idx < 0:
+            break
+        title_positions.append(int(idx))
+        start = idx + max(1, len(title_norm))
+        if len(title_positions) >= 6:
+            break
+    if not title_positions:
+        return None
+
+    # Extract date mentions with rough positions (in the normalized text).
+    month_names_patt = "|".join(sorted(MONTHS_RU.keys(), key=len, reverse=True))
+    date_mentions: list[tuple[date, int]] = []
+
+    # Numeric: dd.mm, dd/mm, dd-mm (year optional).
+    for m in re.finditer(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-]((?:19|20)\d{2}))?\b", text_norm):
+        try:
+            day = int(m.group(1))
+            month = int(m.group(2))
+            year = int(m.group(3)) if m.group(3) else int(anchor_date.year)
+        except Exception:
+            continue
+        d = _safe_construct_date(year, month, day)
+        if d:
+            date_mentions.append((d, int(m.start())))
+
+    # Text: "12 февраля" (+ optional year).
+    for m in re.finditer(
+        rf"\b(\d{{1,2}})\s+({month_names_patt})(?:\s+((?:19|20)\d{{2}}))?\b",
+        text_norm,
+        flags=re.IGNORECASE,
+    ):
+        try:
+            day = int(m.group(1))
+            mon = _month_from_token(m.group(2))
+            if not mon:
+                continue
+            year = int(m.group(3)) if m.group(3) else int(anchor_date.year)
+        except Exception:
+            continue
+        d = _safe_construct_date(year, int(mon), day)
+        if d:
+            date_mentions.append((d, int(m.start())))
+
+    if len(date_mentions) < 2:
+        return None
+
+    draft_date_positions = [pos for d, pos in date_mentions if (d.day, d.month) == (d_obj.day, d_obj.month)]
+    if not draft_date_positions:
+        return None
+
+    def _min_dist(pos: int, others: list[int]) -> int:
+        return int(min(abs(pos - x) for x in others)) if others else 10**9
+
+    def _no_sentence_boundary_between(a: int, b: int) -> bool:
+        lo = max(0, min(a, b))
+        hi = min(len(text_norm), max(a, b))
+        if hi <= lo:
+            return True
+        between = text_norm[lo:hi]
+        # Treat sentence ends and explicit newlines as hard boundaries.
+        return not bool(re.search(r"[.!?]\s|[\r\n]", between))
+
+    # Find the date mention closest to the title (likely the date the title belongs to).
+    near_title_date, near_title_pos = min(
+        date_mentions,
+        key=lambda item: _min_dist(item[1], title_positions),
+    )
+
+    # If the title appears near the draft's date mention, it's probably fine.
+    close_to_draft_date = False
+    for pos in title_positions:
+        # Require that the mention is in the same sentence/fragment; otherwise a recap paragraph
+        # followed by a new-sentence future date can look "close" in short posts.
+        nearest_dpos = min(draft_date_positions, key=lambda p: abs(p - pos))
+        if abs(pos - nearest_dpos) <= 220 and _no_sentence_boundary_between(pos, nearest_dpos):
+            close_to_draft_date = True
+            break
+    if close_to_draft_date:
+        return None
+
+    # Strong signal: title is anchored to a past date in the same post, while the extracted
+    # draft date is in the future (relative to the post publish date).
+    if near_title_date == d_obj:
+        return None
+    if not (near_title_date < anchor_date <= d_obj):
+        return None
+
+    # Check that the title lives in a "recap" window (past tense / "вновь исполнил").
+    # This reduces false positives where multiple future dates are listed.
+    nearest_title_pos = min(title_positions, key=lambda p: abs(p - near_title_pos))
+    win = text_norm[max(0, nearest_title_pos - 220) : min(len(text_norm), nearest_title_pos + 220)]
+    recap_markers = (
+        "позавчера",
+        "вчера",
+        "прош",
+        "состоял",
+        "состоялась",
+        "состоялось",
+        "вновь",
+        "исполнил",
+        "исполнила",
+        "исполн",
+        "прозвуч",
+    )
+    if not any(tok in win for tok in recap_markers):
+        return None
+
+    # If time is explicitly present (not placeholder), allow — the announcement is more likely grounded.
+    t_raw = (draft_time or "").strip().replace(".", ":")
+    if t_raw and t_raw not in {"00:00", "0:00"}:
+        return None
+
+    near_title_iso = near_title_date.isoformat()
+    return (
+        "Низкая уверенность: заголовок выглядит как название прошедшего концерта "
+        f"({near_title_iso}), а анонс на {d_obj.isoformat()} не содержит явного названия."
+    )
+
+
 def _parse_single_date_token(token: str, target_year: int) -> date | None:
     token = token.strip()
     if not token:
@@ -1562,10 +2639,45 @@ def _parse_single_date_token(token: str, target_year: int) -> date | None:
     return None
 
 
+def _orthodox_easter_gregorian(target_year: int) -> date:
+    """Return Orthodox Easter (Pascha) date in Gregorian calendar.
+
+    Algorithm: compute Julian Easter (Meeus Julian algorithm) and convert to
+    Gregorian by adding the calendar offset for the given year.
+    """
+    a = target_year % 4
+    b = target_year % 7
+    c = target_year % 19
+    d = (19 * c + 15) % 30
+    e = (2 * a + 4 * b - d + 34) % 7
+    month = (d + e + 114) // 31  # 3=March, 4=April (Julian)
+    day = ((d + e + 114) % 31) + 1
+
+    julian_easter = date(target_year, month, day)
+    gregorian_delta_days = target_year // 100 - target_year // 400 - 2
+    return julian_easter + timedelta(days=gregorian_delta_days)
+
+
+def _movable_holiday_date_range(token: str, target_year: int) -> tuple[date | None, date | None]:
+    key = token.split(":", 1)[1].strip().casefold()
+    if key in {"maslenitsa", "масленица"}:
+        easter = _orthodox_easter_gregorian(target_year)
+        start = easter - timedelta(days=55)
+        end = easter - timedelta(days=49)
+        return start, end
+    return None, None
+
+
 def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str | None]:
     raw = (record.date or "").strip()
     if not raw:
         return None, None
+
+    if raw.casefold().startswith("movable:"):
+        start, end = _movable_holiday_date_range(raw, target_year)
+        start_iso = start.isoformat() if start else None
+        end_iso = end.isoformat() if end else None
+        return start_iso, end_iso
 
     normalized = _DASH_CHAR_PATTERN.sub("-", raw)
     normalized = re.sub(r"\s+", " ", normalized.strip())
@@ -1792,6 +2904,7 @@ async def persist_event_and_pages(
     source_post_url: str | None = None,
     *,
     holiday_tolerance_days: int | None = None,
+    wait_for_telegraph_url: bool = True,
 ) -> PersistResult:
     """Store a drafted event and produce all public artefacts.
 
@@ -1808,119 +2921,103 @@ async def persist_event_and_pages(
     main_mod = sys.modules.get("main") or sys.modules.get("__main__")
     if main_mod is None:  # pragma: no cover - defensive
         raise RuntimeError("main module not found")
-    upsert_event = main_mod.upsert_event
-    upsert_event_posters = main_mod.upsert_event_posters
-    assign_event_topics = main_mod.assign_event_topics
     schedule_event_update_tasks = main_mod.schedule_event_update_tasks
     rebuild_fest_nav_if_changed = main_mod.rebuild_fest_nav_if_changed
-    ensure_festival = main_mod.ensure_festival
-    get_holiday_record = getattr(main_mod, "get_holiday_record", None)
-    sync_festival_page = getattr(main_mod, "sync_festival_page", None)
+    normalize_event_type = getattr(main_mod, "normalize_event_type", None)
 
-    poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
-    photo_urls = poster_urls or list(photos or [])
+    from smart_event_update import EventCandidate, PosterCandidate, smart_event_update
 
-    event = Event(
-        title=draft.title,
-        description=(draft.description or ""),
-        festival=(draft.festival or None),
-        date=draft.date or datetime.now(timezone.utc).date().isoformat(),
-        time=draft.time or "00:00",
-        location_name=draft.venue or "",
-        location_address=draft.location_address or None,
-        city=draft.city or "Калининград",
-        ticket_price_min=draft.ticket_price_min,
-        ticket_price_max=draft.ticket_price_max,
-        ticket_link=(draft.links[0] if draft.links else None),
-        event_type=draft.event_type or None,
-        emoji=draft.emoji or None,
-        end_date=draft.end_date or None,
-        is_free=bool(draft.is_free),
-        pushkin_card=bool(draft.pushkin_card),
-        source_text=draft.source_text or draft.title,
-        photo_urls=photo_urls,
-        photo_count=len(photo_urls),
-        source_post_url=source_post_url,
-        search_digest=draft.search_digest,
+    if (getattr(draft, "reject_reason", None) or "").strip():
+        # Keep the error string compatible with vk_auto_queue handler that treats
+        # "smart_update rejected:" as an expected rejection (not a technical failure).
+        raise RuntimeError(
+            "smart_update rejected: rejected_low_confidence "
+            f"reason={str(getattr(draft, 'reject_reason', '')).strip()}"
+        )
+
+    posters = _build_smart_update_posters(
+        draft,
+        photos=photos,
+        poster_cls=PosterCandidate,
     )
 
-    topics, text_length, error_text, manual_flag = await assign_event_topics(event)
+    normalized_event_type = (
+        normalize_event_type(
+            draft.title or "",
+            f"{draft.description or ''}\n{draft.source_text or ''}".strip(),
+            draft.event_type,
+        )
+        if callable(normalize_event_type)
+        else (draft.event_type or None)
+    )
 
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url=source_post_url,
+        source_text=draft.source_text or draft.title,
+        title=draft.title,
+        # Never default missing date/time to "today" or "00:00": it creates pseudo-events.
+        # Let Smart Update reject/skip incomplete drafts (vk_auto_queue treats it as an expected skip).
+        date=draft.date or None,
+        time=draft.time or "",
+        time_is_default=bool(getattr(draft, "time_is_default", False)),
+        end_date=draft.end_date or None,
+        festival=draft.festival or None,
+        location_name=draft.venue or "",
+        location_address=draft.location_address or None,
+        city=draft.city or None,
+        ticket_link=(draft.links[0] if draft.links else None),
+        ticket_price_min=draft.ticket_price_min,
+        ticket_price_max=draft.ticket_price_max,
+        event_type=normalized_event_type,
+        emoji=draft.emoji or None,
+        is_free=bool(draft.is_free),
+        pushkin_card=bool(draft.pushkin_card),
+        search_digest=draft.search_digest,
+        raw_excerpt=draft.description or "",
+        posters=posters,
+    )
+
+    update_result = await smart_event_update(
+        db,
+        candidate,
+        check_source_url=False,
+    )
+    if str(getattr(update_result, "status", "") or "").startswith("rejected_"):
+        raise RuntimeError(
+            f"smart_update rejected: {getattr(update_result, 'status', None)} "
+            f"reason={getattr(update_result, 'reason', None)}"
+        )
+    if not getattr(update_result, "event_id", None):
+        raise RuntimeError(
+            "smart_update returned no event_id: "
+            f"status={getattr(update_result, 'status', None)} "
+            f"reason={getattr(update_result, 'reason', None)}"
+        )
     async with db.get_session() as session:
-        saved, _ = await upsert_event(session, event)
-        await upsert_event_posters(session, saved.id, draft.poster_media)
-    if manual_flag:
-        logging.info(
-            "event_topics_classify eid=%s text_len=%d topics=%s manual=True",
-            saved.id,
-            text_length,
-            list(saved.topics or []),
+        saved = (
+            await session.get(Event, update_result.event_id)
+            if update_result.event_id
+            else None
         )
-    elif error_text:
-        logging.info(
-            "event_topics_classify eid=%s text_len=%d topics=%s error=%s",
-            saved.id,
-            text_length,
-            list(saved.topics or []),
-            error_text,
+    if saved is None:
+        raise RuntimeError(
+            "smart_update failed to persist event: "
+            f"event_id={getattr(update_result, 'event_id', None)} "
+            f"status={getattr(update_result, 'status', None)} "
+            f"reason={getattr(update_result, 'reason', None)}"
         )
-    else:
-        logging.info(
-            "event_topics_classify eid=%s text_len=%d topics=%s",
-            saved.id,
-            text_length,
-            list(saved.topics or []),
-        )
-    async with db.get_session() as session:
-        saved = await session.get(Event, saved.id)
+    text_length = len(saved.title or "") + len(saved.description or "") + len(saved.source_text or "")
+    logging.info(
+        "event_topics_classify eid=%s text_len=%d topics=%s manual=%s",
+        saved.id,
+        text_length,
+        list(saved.topics or []),
+        bool(saved.topics_manual),
+    )
     logging.info(
         "persist_event_and_pages: source_post_url=%s", saved.source_post_url
     )
-
-    holiday_record = (
-        get_holiday_record(saved.festival) if callable(get_holiday_record) else None
-    )
-    tolerance_value = holiday_tolerance_days
-    if tolerance_value is None and holiday_record is not None:
-        tolerance_value = getattr(holiday_record, "tolerance_days", None)
-
-    if holiday_record and _event_date_matches_holiday(
-        holiday_record, saved.date, saved.end_date, tolerance_value
-    ):
-        canonical_name = holiday_record.canonical_name
-        start_iso, end_iso = _holiday_date_range(holiday_record, date.today().year)
-        ensure_kwargs: dict[str, Any] = {}
-        if holiday_record.description:
-            ensure_kwargs["description"] = holiday_record.description
-            ensure_kwargs["source_text"] = holiday_record.description
-        if start_iso:
-            ensure_kwargs["start_date"] = start_iso
-        if end_iso:
-            ensure_kwargs["end_date"] = end_iso
-        photo_list = list(saved.photo_urls or []) or list(photo_urls or [])
-        if photo_list:
-            ensure_kwargs["photo_url"] = photo_list[0]
-            ensure_kwargs["photo_urls"] = photo_list
-        aliases_payload = [
-            alias for alias in getattr(holiday_record, "normalized_aliases", ()) if alias
-        ]
-        if aliases_payload:
-            ensure_kwargs["aliases"] = aliases_payload
-        fest_obj, fest_created, fest_updated = await ensure_festival(
-            db,
-            canonical_name,
-            **ensure_kwargs,
-        )
-        if saved.festival != canonical_name:
-            async with db.get_session() as session:
-                event_obj = await session.get(Event, saved.id)
-                if event_obj:
-                    event_obj.festival = canonical_name
-                    session.add(event_obj)
-                    await session.commit()
-                    saved = event_obj
-        if (fest_created or fest_updated) and callable(sync_festival_page):
-            asyncio.create_task(sync_festival_page(db, canonical_name))
 
     nav_update_needed = False
     if saved.festival:
@@ -1958,21 +3055,21 @@ async def persist_event_and_pages(
                         nav_update_needed = True
     if nav_update_needed:
         await rebuild_fest_nav_if_changed(db)
-    await schedule_event_update_tasks(db, saved)
+    if update_result.status in ("skipped_nochange", "skipped_same_source_url"):
+        await schedule_event_update_tasks(db, saved)
 
-    await schedule_event_update_tasks(db, saved)
-
-    # Wait for Telegraph URL to become available (async job)
-    # This prevents sending empty links in the operator report
-    start_wait = time.time()
-    for _ in range(20):  # Wait up to 10 seconds
-        async with db.get_session() as session:
-            saved = await session.get(Event, saved.id)
-        if saved.telegraph_url:
-            elapsed = time.time() - start_wait
-            logging.info("persist_event_and_pages: telegraph_url appeared after %.2fs", elapsed)
-            break
-        await asyncio.sleep(0.5)
+    if wait_for_telegraph_url:
+        # Wait for Telegraph URL to become available (async job). Callers that
+        # already run inline Telegraph jobs can skip this extra wait.
+        start_wait = time.time()
+        for _ in range(20):  # Wait up to 10 seconds
+            async with db.get_session() as session:
+                saved = await session.get(Event, saved.id)
+            if saved.telegraph_url:
+                elapsed = time.time() - start_wait
+                logging.info("persist_event_and_pages: telegraph_url appeared after %.2fs", elapsed)
+                break
+            await asyncio.sleep(0.5)
 
     return PersistResult(
         event_id=saved.id,
@@ -1984,7 +3081,58 @@ async def persist_event_and_pages(
         event_time=saved.time,
         event_type=saved.event_type,
         is_free=bool(saved.is_free),
+        smart_status=getattr(update_result, "status", None),
+        smart_created=bool(getattr(update_result, "created", False)),
+        smart_merged=bool(getattr(update_result, "merged", False)),
+        smart_added_posters=int(getattr(update_result, "added_posters", 0) or 0),
     )
+
+
+def _build_smart_update_posters(
+    draft: EventDraft,
+    *,
+    photos: Sequence[str] | None,
+    poster_cls: type,
+) -> list[object]:
+    """Build Smart Update poster candidates with VK URL fallback.
+
+    Catbox can be disabled in tests/live runs. In this case we still want event
+    posters rendered on Telegraph by passing original VK media URLs through the
+    same `catbox_url` field consumed by the unified event-page pipeline.
+    """
+    poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
+    photo_urls = poster_urls or list(photos or [])
+    posters: list[object] = []
+    for idx, item in enumerate(draft.poster_media):
+        url = (item.catbox_url or "").strip()
+        if not url and idx < len(photo_urls):
+            url = str(photo_urls[idx] or "").strip()
+        supabase_url = (item.supabase_url or "").strip() or (
+            url if is_supabase_storage_url(url) else None
+        )
+        catbox_url = url if url and not is_supabase_storage_url(url) else None
+        posters.append(
+            poster_cls(
+                catbox_url=catbox_url,
+                supabase_url=supabase_url,
+                sha256=item.digest,
+                phash=None,
+                ocr_text=item.ocr_text,
+                ocr_title=item.ocr_title,
+                prompt_tokens=int(getattr(item, "prompt_tokens", 0) or 0),
+                completion_tokens=int(getattr(item, "completion_tokens", 0) or 0),
+                total_tokens=int(getattr(item, "total_tokens", 0) or 0),
+            )
+        )
+    if not posters and photo_urls:
+        posters = [
+            poster_cls(
+                catbox_url=(u if u and not is_supabase_storage_url(u) else None),
+                supabase_url=(u if is_supabase_storage_url(u) else None),
+            )
+            for u in (str(url).strip() for url in photo_urls)
+        ]
+    return posters
 
 
 async def process_event(
@@ -2117,6 +3265,15 @@ async def crawl_once(
         ),
         "backfill_days_requested": backfill_days if force_backfill else None,
     }
+
+    try:
+        from source_parsing.post_metrics import compute_age_day as _compute_age_day
+        from source_parsing.post_metrics import normalize_age_day as _normalize_age_day
+        from source_parsing.post_metrics import upsert_vk_post_metric as _upsert_vk_post_metric
+    except Exception:  # pragma: no cover - optional helper
+        _compute_age_day = None
+        _normalize_age_day = None
+        _upsert_vk_post_metric = None
 
     async with db.raw_conn() as conn:
         cutoff = int(time.time()) + 2 * 3600
@@ -2458,6 +3615,40 @@ async def crawl_once(
                 if blank_single_photo:
                     group_blank_single_photo_matches += 1
                 try:
+                    try:
+                        collected_ts = int(time.time())
+                        age_raw = (
+                            _compute_age_day(published_ts=int(ts), collected_ts=int(collected_ts))
+                            if _compute_age_day
+                            else None
+                        )
+                        age_day = _normalize_age_day(age_raw) if _normalize_age_day else age_raw
+                        if (
+                            _upsert_vk_post_metric
+                            and isinstance(age_day, int)
+                            and age_day >= 0
+                        ):
+                            views = post.get("views")
+                            likes = post.get("likes")
+                            if isinstance(views, int) or isinstance(likes, int):
+                                await _upsert_vk_post_metric(
+                                    db,
+                                    group_id=int(gid),
+                                    post_id=int(pid),
+                                    age_day=int(age_day),
+                                    source_url=miss_url,
+                                    post_ts=int(ts),
+                                    views=int(views) if isinstance(views, int) else None,
+                                    likes=int(likes) if isinstance(likes, int) else None,
+                                    collected_ts=int(collected_ts),
+                                )
+                    except Exception:
+                        logging.warning(
+                            "vk.crawl.metrics persist failed gid=%s post_id=%s",
+                            gid,
+                            pid,
+                            exc_info=True,
+                        )
                     async with db.raw_conn() as conn:
                         cur = await conn.execute(
                             """

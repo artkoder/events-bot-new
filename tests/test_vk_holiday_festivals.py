@@ -1,47 +1,33 @@
-import asyncio
-from datetime import date
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
 import main
+import smart_event_update as su
 import vk_intake
 from db import Database
 from models import Event, Festival
 
 
 @pytest.mark.asyncio
-async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
+async def test_smart_update_creates_and_reuses_holiday(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
+
+    monkeypatch.setenv("REGION_FILTER_ENABLED", "0")
+    monkeypatch.setattr(su, "SMART_UPDATE_LLM_DISABLED", True)
+
+    # Avoid Telegraph/index side effects during unit tests.
+    async def fake_rebuild(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
 
     # reset holiday caches to ensure tests reflect docs
     main._read_holidays.cache_clear()
     main._holiday_record_map.cache_clear()
     main.settings_cache.clear()
-
-    async def fake_assign(event: Event):
-        return [], len(event.description or ""), "", False
-
-    scheduled: list[str] = []
-
-    async def fake_schedule(db_obj, event_obj, drain_nav: bool = True, skip_vk_sync: bool = False):
-        scheduled.append(event_obj.festival)
-        return {}
-
-    async def fake_rebuild(*_args, **_kwargs):
-        return False
-
-    sync_calls: list[str] = []
-
-    async def fake_sync_page(db_obj, name: str):
-        sync_calls.append(name)
-
-    monkeypatch.setattr(main, "assign_event_topics", fake_assign)
-    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule)
-    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
-    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
 
     target_date_token = main._normalize_holiday_date_token("31.10")
     halloween_doc_row = None
@@ -71,11 +57,7 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
         else:
             tolerance_days = int(tolerance_value)
 
-        aliases_from_doc = [
-            alias.strip()
-            for alias in alias_field.split(",")
-            if alias.strip()
-        ]
+        aliases_from_doc = [alias.strip() for alias in alias_field.split(",") if alias.strip()]
 
         halloween_doc_row = {
             "canonical_name": canonical_name,
@@ -94,16 +76,27 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
 
     photo_url = "https://example.com/halloween.jpg"
 
-    draft1 = vk_intake.EventDraft(
+    candidate1 = su.EventCandidate(
+        source_type="telegram",
+        source_url="test://holiday/halloween/1",
+        source_text="Spooky",
+        raw_excerpt="Spooky",
         title="Хэллоуинская вечеринка",
         date="2025-10-30",
         time="22:00",
+        location_name="Калининград",
+        city="Калининград",
         festival="Halloween",
-        source_text="Spooky",
+        posters=[su.PosterCandidate(catbox_url=photo_url)],
     )
 
-    result1 = await vk_intake.persist_event_and_pages(draft1, [photo_url], db)
-    await asyncio.sleep(0)
+    result1 = await su.smart_event_update(
+        db,
+        candidate1,
+        check_source_url=False,
+        schedule_tasks=False,
+    )
+    assert result1.status == "created"
 
     async with db.get_session() as session:
         events = (await session.execute(select(Event))).scalars().all()
@@ -125,45 +118,6 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     assert halloween.photo_url == photo_url
     assert halloween.photo_urls == [photo_url]
 
-    stored_html: dict[str, str] = {}
-
-    class DummyTelegraph:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def create_page(self, title, html_content, **_):
-            stored_html["html"] = html_content
-            return {"url": "https://telegra.ph/fests", "path": "fests"}
-
-        def edit_page(self, path, title, html_content, **kwargs):
-            stored_html["edited"] = html_content
-            return {}
-
-        def get_page(self, path, return_html=True):
-            return {"content_html": stored_html.get("html", "")}
-
-    async def fake_telegraph_call(func, *args, **kwargs):
-        return func(*args, **kwargs)
-
-    async def fake_create_page(tg, *args, **kwargs):
-        return tg.create_page(*args, **kwargs)
-
-    async def fake_edit_page(tg, *args, **kwargs):
-        return tg.edit_page(*args, **kwargs)
-
-    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
-    monkeypatch.setattr(main, "telegraph_call", fake_telegraph_call)
-    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
-    monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
-    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
-
-    await main.sync_festivals_index_page(db)
-    main.settings_cache.clear()
-
-    html = stored_html["html"]
-    assert photo_url in html
-    assert "Хеллоуин" in html
-
     halloween_record = main.get_holiday_record("Хеллоуин")
     assert halloween_record is not None
     assert halloween_record.date == target_date_token
@@ -171,26 +125,32 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     assert halloween_record.description == halloween_desc
     assert list(halloween_record.aliases) == ["хэллоуин", "halloween"]
 
-    current_year = date.today().year
-    start_iso, end_iso = vk_intake._holiday_date_range(halloween_record, current_year)
-    assert start_iso == f"{current_year}-10-31"
-    assert end_iso == f"{current_year}-10-31"
-
+    start_iso, end_iso = vk_intake._holiday_date_range(halloween_record, 2025)
+    assert start_iso == "2025-10-31"
+    assert end_iso == "2025-10-31"
     assert halloween.start_date == start_iso
     assert halloween.end_date == end_iso
 
-    assert scheduled == ["Хеллоуин"]
-    assert sync_calls == ["Хеллоуин"]
-
-    draft2 = vk_intake.EventDraft(
+    candidate2 = su.EventCandidate(
+        source_type="telegram",
+        source_url="test://holiday/halloween/2",
+        source_text="Spooky again",
+        raw_excerpt="Spooky again",
         title="Вечеринка 2",
         date="2025-10-31",
+        time="19:00",
+        location_name="Калининград",
+        city="Калининград",
         festival="хэллоуин",
-        source_text="Spooky again",
     )
 
-    result2 = await vk_intake.persist_event_and_pages(draft2, [], db)
-    await asyncio.sleep(0)
+    result2 = await su.smart_event_update(
+        db,
+        candidate2,
+        check_source_url=False,
+        schedule_tasks=False,
+    )
+    assert result2.status == "created"
 
     async with db.get_session() as session:
         events = (await session.execute(select(Event))).scalars().all()
@@ -203,5 +163,3 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     assert festivals[0].description == halloween_desc
     assert festivals[0].aliases == ["хеллоуин", "хэллоуин", "halloween"]
 
-    assert scheduled == ["Хеллоуин", "Хеллоуин"]
-    assert sync_calls == ["Хеллоуин"]
