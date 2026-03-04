@@ -105,3 +105,44 @@ async def finish_ops_run(
             await conn.commit()
     except Exception:
         logger.warning("ops_run: failed to finish run id=%s status=%s", run_id, status, exc_info=True)
+
+
+async def cleanup_running_ops_runs_on_startup(
+    db: Database,
+    *,
+    status: str = "crashed",
+    finished_at: datetime | None = None,
+) -> int:
+    """Mark unfinished runs as crashed after an unexpected restart.
+
+    Fly restarts/OOM kills drop in-memory tasks. Any rows left in
+    ``ops_run.status='running'`` become orphaned and confuse operational
+    dashboards. This helper is intended to be called once on app startup
+    *before* schedulers start new runs.
+    """
+
+    try:
+        async with db.raw_conn() as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE ops_run
+                SET
+                    finished_at = ?,
+                    status = ?
+                WHERE status = 'running'
+                  AND finished_at IS NULL
+                """,
+                (
+                    _utc_sql(finished_at),
+                    str(status or "").strip() or "crashed",
+                ),
+            )
+            await conn.commit()
+            count = int(cursor.rowcount or 0)
+    except Exception:
+        logger.warning("ops_run: startup cleanup failed", exc_info=True)
+        return 0
+
+    if count:
+        logger.info("ops_run: startup cleanup marked=%s status=%s", count, status)
+    return count

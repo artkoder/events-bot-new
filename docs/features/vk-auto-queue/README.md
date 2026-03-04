@@ -147,14 +147,24 @@ ENV:
 - `VK_AUTO_IMPORT_TIMES_LOCAL` (по умолчанию `06:30,18:30`) локальные времена запуска.
 - `VK_AUTO_IMPORT_TZ` (по умолчанию `Europe/Kaliningrad`) таймзона расписания.
 - `VK_AUTO_IMPORT_LIMIT` (по умолчанию `25`) сколько постов обработать за один запуск.
-- `VK_AUTO_IMPORT_PREFETCH` (по умолчанию `1`) включает конвейер N/N+1: пока сохраняется пост N, параллельно готовим (fetch + media/OCR + LLM-parse) пост N+1.
+- `VK_AUTO_IMPORT_PREFETCH` (по умолчанию `1`) включает конвейер N/N+1: пока сохраняется пост N, параллельно подтягиваем лёгкие данные поста N+1 (wall.getById + мета).
+- `VK_AUTO_IMPORT_PREFETCH_DRAFTS` (по умолчанию `0`) если включён — в префетче дополнительно выполняется (download media + OCR + LLM-parse) для N+1. ⚠️ Может заметно увеличить RAM и привести к OOM на маленьких машинах (например Fly `512MB`).
 - `VK_AUTO_IMPORT_INLINE_JOBS` (по умолчанию `1`) ждать inline-джобы для отчёта (Telegraph/ICS).
 - `VK_AUTO_IMPORT_INLINE_INCLUDE_ICS` (по умолчанию `0`) ждать ICS inline вместе с Telegraph (обычно не нужно для E2E/local).
 - `VK_AUTO_IMPORT_SLOW_ROW_LOG_SEC` (по умолчанию `60`) порог для автоматического stage timing log по одной строке очереди даже без `PIPELINE_TIMINGS=1`; `0` означает логировать все строки.
 
-Важно: обработка событий остаётся последовательной и сериализована через `HEAVY_SEMAPHORE` и внутренний lock Smart Update, но подготовка следующего поста может выполняться параллельно.
+Важно: обработка событий остаётся последовательной и сериализована через `HEAVY_SEMAPHORE` и внутренний lock Smart Update, но префетч N+1 может выполняться параллельно. По умолчанию префетч лёгкий; полный (media/OCR/LLM) включается только через `VK_AUTO_IMPORT_PREFETCH_DRAFTS=1`.
 
 Если `VK_AUTO_IMPORT_INLINE_JOBS=1`, то `persist_event_and_pages()` больше не ждёт отдельно появления `telegraph_url` до 10 секунд: очередь всё равно сразу запускает inline `telegraph_build`, поэтому двойное ожидание убрано без потери качества/полноты отчёта.
+
+### Recovery after restart/OOM
+
+- При старте приложения все `vk_inbox.status='locked'` сбрасываются в `pending`, чтобы очередь не зависала после OOM/рестарта.
+- Любые `ops_run.status='running'` помечаются как `crashed` с `finished_at=now` (диагностика незавершённых прогонов).
+
+### Media safety
+
+- `ENSURE_JPEG_MAX_PIXELS` (по умолчанию `20000000`) — ограничение на конвертацию WEBP/AVIF→JPEG: слишком большие изображения пропускаются вместо риска OOM.
 
 ### LLM budget for poster OCR
 
