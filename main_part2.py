@@ -16401,6 +16401,7 @@ async def build_source_page_content(
 
         paragraph_tag_re = re.compile(r"<p\b", re.IGNORECASE)
         heading_tag_re = re.compile(r"<h[1-6]\b", re.IGNORECASE)
+        list_tag_re = re.compile(r"<(?:ul|ol)\b", re.IGNORECASE)
         media_tag_re = re.compile(r"<(?:figure|img)\b", re.IGNORECASE)
         body_text_tag_re = re.compile(
             r"<(?:p|ul|ol|blockquote|pre|table)\b", re.IGNORECASE
@@ -16411,6 +16412,10 @@ async def build_source_page_content(
                 return False
             last = previous_blocks[-1]
             if last == spacer:
+                return False
+            # Event/source pages should not add an artificial blank paragraph
+            # right before list blocks (`<ul>/<ol>`).
+            if page_mode != "history" and list_tag_re.match(upcoming.strip()):
                 return False
             if (
                 heading_tag_re.match(last.strip())
