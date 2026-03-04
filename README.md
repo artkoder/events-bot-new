@@ -407,6 +407,11 @@ A VK service (server) token helps keep read-only API traffic away from the user 
    > larger memory tier to avoid out-of-memory kills. On Apps V2 use `fly scale
    > memory 512`; on Machines:
    > `fly machines update -m 512 -c shared-cpu-1x <machine-id>`.
+   >
+   > Docker build context should stay lean. Local folders like `artifacts/`,
+   > `backups/`, `tmp/`, `__pycache__/` and `.pytest_cache/` are excluded via
+   > `.dockerignore`; if deploy upload suddenly becomes huge, check that no new
+   > local dump/cache directory bypasses those rules.
 
 4. Optional tuning:
    - Enable swap if needed (for example `--swap 256`).

@@ -1,6 +1,8 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- **Deploy**: Excluded local backups, `__pycache__`, `.pytest_cache`, and temp directories from Docker build context to avoid oversized Fly deploy uploads.
 
 ## [1.12.0] - 2026-03-04
 ### Highlights

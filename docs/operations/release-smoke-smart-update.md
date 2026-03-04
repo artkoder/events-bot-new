@@ -19,6 +19,11 @@
 - Gemma/Gateway: `GOOGLE_API_KEY`
 - Kaggle: `KAGGLE_USERNAME`, `KAGGLE_KEY`
 
+Перед `fly deploy` проверьте `.dockerignore`: локальные дампы и кэши
+(`artifacts/`, `backups/`, `tmp/`, `__pycache__/`, `.pytest_cache/`) не
+должны попадать в build context. Иначе сборка и загрузка образа резко
+увеличиваются, а мусор оказывается внутри `/app` на проде.
+
 Для Telegram Monitoring также должны быть настроены delivery secrets в Kaggle (см. `docs/operations/kaggle-secrets.md`).
 
 Быстрый локальный preflight (проверяет наличие базовых ENV и доступность Catbox/Telegram Bot API, без печати секретов):
