@@ -2,12 +2,19 @@
 
 ## [Unreleased]
 ### Fixed
+- **Telegram Monitor / Kaggle Polling**: Reworked dynamic timeout to be source-count driven from production baseline (`~3.64 min/source`) with default `+30%` safety via `TG_MONITORING_TIMEOUT_SAFETY_MULTIPLIER=1.3`, so `/tg` scales with channel count and avoids under-sized limits on long runs.
 - **Telegraph Event Pages**: Removed synthetic blank `&#8203;` spacer right before `<ul>/<ol>` list blocks on event/source pages, while preserving other existing paragraph spacings.
 - **Deploy**: Excluded local backups, `__pycache__`, `.pytest_cache`, and temp directories from Docker build context to avoid oversized Fly deploy uploads.
 - **VK Auto Queue**: Prevented `/vk_auto_import` from being killed by OOM on small machines by making N+1 prefetch lightweight by default; full media/OCR/LLM prefetch is now opt-in via `VK_AUTO_IMPORT_PREFETCH_DRAFTS=1`.
 - **Ops Run / VK Inbox**: On app startup, orphaned `ops_run(status=running)` are marked as `crashed` and VK inbox locks are released, so queues recover automatically after restarts/OOM.
 - **Media**: Added a guardrail for WEBP/AVIF→JPEG conversion (`ENSURE_JPEG_MAX_PIXELS`, default `20000000`) to skip oversized images instead of risking OOM.
 - **Smart Update / Tickets**: Prevented donor compensation amounts (e.g. “компенсация 1063 руб.”) from being treated as ticket prices; blood donation actions are auto-marked free so Telegraph/VK summaries don’t show them as paid.
+- **Smart Update / Matching**: Normalized Russian `ё`→`е` in title matching to prevent duplicate events that differ only by that letter.
+- **Smart Update / Giveaways**: Ticket-giveaway promos with only deadline/result dates (e.g. “итоги 14.03”) are now skipped as `skipped_giveaway` (`giveaway_no_event`) to avoid pseudo-events.
+- **Telegraph / Formatting**: Reformatted viewer-review bullets like `Имя: ...` in review sections into a quote + attribution style (`> «…»` + `> — Имя`) for better readability on Telegraph.
+- **Smart Update / Past Events**: Automated imports now skip events that already ended before today (local date) as `skipped_past_event` (`past_event`) to avoid useless event/Telegraph/ICS load.
+- **Smart Update / Far-Future Dates**: When creating events more than `SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS` months ahead, Smart Update checks poster OCR for an explicit conflicting `DD/MM` (or `DD <month>`) date and auto-sets `event.silent=1` on mismatch to prevent public-facing wrong far-future dates.
+- **Admin / Delete Event**: Event deletion no longer attempts to delete source VK wall posts; only bot-managed VK posts (`event.vk_source_hash` present) are deleted.
 
 ## [1.12.0] - 2026-03-04
 ### Highlights

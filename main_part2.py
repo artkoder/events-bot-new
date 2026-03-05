@@ -6275,6 +6275,7 @@ async def handle_rebuild_event_command(message: types.Message, db: Database, bot
 
             cleaned_ff = su._dedupe_description(ff_desc) or ff_desc
             cleaned_ff = su._normalize_plaintext_paragraphs(cleaned_ff) or cleaned_ff
+            cleaned_ff = su._promote_review_bullets_to_blockquotes(cleaned_ff) or cleaned_ff
             cleaned_ff = su._normalize_blockquote_markers(cleaned_ff) or cleaned_ff
             cleaned_ff = (
                 su._sanitize_description_output(

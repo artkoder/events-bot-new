@@ -47,6 +47,14 @@ def _reset_run_due_jobs_lock():
 
 
 @pytest.fixture(autouse=True)
+def _disable_smart_update_skip_past_events(monkeypatch):
+    # Most unit tests use fixed historical dates for deterministic assertions. Smart Update's
+    # production guardrail (skip past events) is enabled by default, so disable it globally
+    # in tests and enable explicitly in focused coverage.
+    monkeypatch.setenv("SMART_UPDATE_SKIP_PAST_EVENTS", "0")
+
+
+@pytest.fixture(autouse=True)
 def _mock_telegraph(monkeypatch, request):
     if "get_telegraph_token" not in request.node.nodeid:
         monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
@@ -78,7 +86,10 @@ def _mock_telegraph(monkeypatch, request):
                     await session.commit()
             return url
         return None
-    monkeypatch.setattr(main, "update_telegraph_event_page", fake_update)
+    # Most tests don't need a full Telegraph build; keep it mocked for speed and to avoid
+    # network/HTML edge cases. Allow opting into the real implementation for focused tests.
+    if "test_update_telegraph_event_page_promotes_review_bullets" not in request.node.nodeid:
+        monkeypatch.setattr(main, "update_telegraph_event_page", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
 
 
