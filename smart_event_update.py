@@ -19,6 +19,7 @@ from sqlalchemy import and_, delete, or_, select
 
 from db import Database
 from models import Event, EventPoster, EventSource, EventSourceFact, PosterOcrCache
+from sections import MONTHS_RU
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,22 @@ _GIVEAWAY_LINE_RE = re.compile(
     r"итог\w*|"
     r"розыгрыш|разыгрыва\w*|розыгра\w*|"
     r"конкурс|giveaway|"
+    r"приз\w*"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_GIVEAWAY_MECHANICS_RE = re.compile(
+    r"\b("
+    r"услови\w*|"
+    r"участв\w*|"
+    r"подпиш\w*|"
+    r"репост\w*|"
+    r"коммент\w*|"
+    r"отмет\w*|"
+    r"лайк\w*|"
+    r"победител\w*|"
+    r"итог\w*|"
     r"приз\w*"
     r")\b",
     re.IGNORECASE,
@@ -197,6 +214,12 @@ SMART_UPDATE_DESCRIPTION_MAX_CHARS = _env_int(
 SMART_UPDATE_REWRITE_MAX_TOKENS = _env_int(
     # Default kept fairly high: we want a full description, not a short snippet.
     "SMART_UPDATE_REWRITE_MAX_TOKENS", 1400, lo=120, hi=6500
+)
+
+# If an event is extracted far into the future, treat poster date mismatches as a high-risk signal.
+# Default matches the operator expectation: > 6 months ahead requires more scrutiny.
+SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS = _env_int(
+    "SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS", 6, lo=0, hi=24
 )
 
 # Optional: allow light emoji usage in *full* public descriptions (Telegraph/body).
@@ -2037,6 +2060,7 @@ async def _llm_fact_first_description_md(
         raw = _strip_private_use(raw) or raw
         raw = _fix_inline_bullet_lists(raw) or raw
         raw = _normalize_bullet_markers(raw) or raw
+        raw = _promote_review_bullets_to_blockquotes(raw) or raw
         raw = _normalize_blockquote_markers(raw) or raw
         raw = _limit_description_emojis(raw) or raw
         raw = _sanitize_description_output(raw, source_text="") or raw
@@ -2275,6 +2299,24 @@ _REPORTED_SPEECH_RE = re.compile(
 )
 
 _SCENE_HINT_RE = re.compile(r"(?is)\b(основн\w+|мал\w+)\s+сцен\w+\b")
+_REVIEW_CONTEXT_RE = re.compile(
+    r"(?iu)\b("
+    r"отзыв\w*|"
+    r"реценз\w*|"
+    r"комментар\w*|"
+    r"впечатлен\w*|"
+    r"мнения\w*|"
+    r"зрител\w*|"
+    r"восторг\w*|"
+    r"говорят|"
+    r"пишут"
+    r")\b"
+)
+_REVIEW_LIST_ITEM_RE = re.compile(
+    r"(?iu)^\s*(?:[-*•]|\d{1,3}[.)])\s+"
+    r"(?P<who>[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё-]{1,24}(?:\s+[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё-]{1,24}){0,2}(?:\s*(?:,|\(|—)\s*[^:]{1,60})?)"
+    r"\s*:\s*(?P<body>\S.+?)\s*$"
+)
 
 
 def _promote_first_person_quotes_to_blockquotes(text: str | None) -> str | None:
@@ -2396,6 +2438,112 @@ def _promote_inline_quoted_direct_speech_to_blockquotes(text: str | None) -> str
     return updated or None
 
 
+def _promote_review_bullets_to_blockquotes(text: str | None) -> str | None:
+    """Render simple audience reviews as Markdown blockquotes.
+
+    Pattern:
+      - `<Name>: <review text>`
+    under a nearby review context ("отзывы", "зрители", etc.)
+
+    This is a formatting-only helper to improve Telegraph readability; it must not
+    drop or rewrite text.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+    paragraphs = [p.strip() for p in re.split(r"\n{2,}", raw) if p.strip()]
+    if not paragraphs:
+        return None
+
+    out: list[str] = []
+
+    def _is_fully_quoted(v: str) -> bool:
+        s = (v or "").strip()
+        if len(s) < 2:
+            return False
+        pairs = [
+            ("«", "»"),
+            ('"', '"'),
+            ("“", "”"),
+            ("„", "“"),
+        ]
+        return any(s.startswith(op) and s.endswith(cl) for op, cl in pairs)
+
+    def _quote_review_body(v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            return s
+        if _is_fully_quoted(s):
+            return s
+        # If the author already started/ended quoting, don't try to "fix" it.
+        if s.startswith(("«", '"', "“", "„")) or s.endswith(("»", '"', "”", "“")):
+            return s
+        return f"«{s}»"
+
+    for para in paragraphs:
+        lines = [ln.rstrip() for ln in (para or "").splitlines()]
+        if not lines:
+            continue
+
+        # Find a contiguous list block inside this paragraph.
+        start: int | None = None
+        for i, ln in enumerate(lines):
+            if _LIST_ITEM_LINE_RE.match((ln or "").strip()):
+                start = i
+                break
+        if start is None:
+            out.append(para)
+            continue
+
+        end = start
+        while end < len(lines) and _LIST_ITEM_LINE_RE.match((lines[end] or "").strip()):
+            end += 1
+
+        list_lines = [lines[i].strip() for i in range(start, end) if (lines[i] or "").strip()]
+        if len(list_lines) < 2:
+            out.append(para)
+            continue
+
+        items: list[tuple[str, str]] = []
+        for ln in list_lines:
+            m = _REVIEW_LIST_ITEM_RE.match(ln)
+            if not m:
+                items = []
+                break
+            who = (m.group("who") or "").strip()
+            body = (m.group("body") or "").strip()
+            if not who or not body:
+                items = []
+                break
+            items.append((who, body))
+        if not items:
+            out.append(para)
+            continue
+
+        preface = " ".join((ln or "").strip() for ln in lines[:start] if (ln or "").strip()).strip()
+        prev = out[-1] if out else ""
+        context = "\n".join([preface, prev]).strip()
+        if not _REVIEW_CONTEXT_RE.search(context):
+            out.append(para)
+            continue
+
+        if preface:
+            out.append(preface)
+        for who, body in items:
+            q = _quote_review_body(body)
+            # Two-line quote: quote text + attribution.
+            out.append(f"> {q}\n> — {who}")
+
+        tail = "\n".join((ln or "").rstrip() for ln in lines[end:] if (ln or "").strip()).strip()
+        if tail:
+            out.append(tail)
+
+    merged = "\n\n".join(p for p in out if (p or "").strip()).strip()
+    return merged or None
+
+
 def _drop_reported_speech_duplicates(text: str | None) -> str | None:
     """Remove paraphrased "X notes that ..." if the same clause exists as a direct quote.
 
@@ -2466,11 +2614,25 @@ def _normalize_blockquote_markers(text: str | None) -> str | None:
         return None
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     # If a blockquote marker leaked into the middle of a paragraph, split it out.
-    raw = re.sub(r"(?<=\S)\s+>\s+", "\n\n> ", raw)
+    raw = re.sub(r"(?<=\S)[ \t]+>\s+", "\n\n> ", raw)
     # Remove leading spaces before a blockquote marker.
     raw = re.sub(r"(?m)^[ \t]+(>\s+)", r"\1", raw)
-    # Ensure a blank line before any blockquote paragraph.
-    raw = re.sub(r"(?m)(?<!^)(?<!\n\n)^(>\s+)", r"\n\n\1", raw)
+    # Ensure a blank line before the *start* of any blockquote block.
+    # Do not insert blank lines between consecutive quote lines (`> ...\n> ...`),
+    # otherwise multi-line quotes (e.g. quote + attribution) break apart.
+    lines = raw.split("\n")
+    out_lines: list[str] = []
+    quote_line_re = re.compile(r"^\s*>\s+\S")
+    for ln in lines:
+        if quote_line_re.match(ln):
+            if out_lines:
+                prev = out_lines[-1]
+                if prev.strip() and not quote_line_re.match(prev):
+                    out_lines.append("")
+            out_lines.append(ln.lstrip())
+        else:
+            out_lines.append(ln)
+    raw = "\n".join(out_lines)
     raw = re.sub(r"\n{3,}", "\n\n", raw).strip()
     return raw or None
 
@@ -3021,6 +3183,17 @@ _EVENT_INVITE_RE = re.compile(
     r"выставк\w*"
     r")\b"
 )
+_EVENT_HAPPENS_VERB_RE = re.compile(
+    r"(?i)\b("
+    r"состо(ится|ятся)|"
+    r"пройд(ёт|ет|ут)|"
+    r"приглаша(ем|ю|ет)|"
+    r"встречаемс\w*|"
+    r"начал(о|а|ется|нутся)|"
+    r"стартует|"
+    r"начинаем"
+    r")\b"
+)
 
 _TOO_SOON_NOTICE_RE = re.compile(
     r"(?iu)\b("
@@ -3395,6 +3568,51 @@ def _has_datetime_signals(text: str | None) -> bool:
     if re.search(r"\b(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\b", value):
         return True
     return False
+
+
+def _giveaway_has_underlying_event_facts(text: str | None) -> bool:
+    raw = str(text or "").replace("\\n", "\n").strip()
+    if not raw:
+        return False
+
+    has_time = False
+    has_date = False
+    has_event_signal = False
+
+    for line in raw.splitlines():
+        value = line.strip()
+        if not value:
+            continue
+        for part in re.split(r"(?<=[.!?…])\s+", value):
+            chunk = part.strip()
+            if not chunk:
+                continue
+
+            if _EVENT_INVITE_RE.search(chunk) or _EVENT_SIGNAL_RE.search(chunk):
+                has_event_signal = True
+
+            is_mechanics = bool(_GIVEAWAY_MECHANICS_RE.search(chunk) and not _EVENT_HAPPENS_VERB_RE.search(chunk))
+
+            if re.search(r"\b([01]?\d|2[0-3])[:.]([0-5]\d)\b", chunk):
+                if re.search(r"(?iu)\bдо\s+([01]?\d|2[0-3])[:.]([0-5]\d)\b", chunk):
+                    continue
+                if is_mechanics:
+                    continue
+                has_time = True
+
+            if re.search(r"\b\d{1,2}[./]\d{1,2}\b", chunk) or re.search(
+                r"(?iu)\b(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\b",
+                chunk,
+            ):
+                if _DEADLINE_RE.search(chunk):
+                    continue
+                if is_mechanics:
+                    continue
+                has_date = True
+
+    if has_time:
+        return True
+    return has_date and has_event_signal
 
 
 def _title_tokens(title: str | None) -> set[str]:
@@ -5067,6 +5285,91 @@ def _parse_iso_date(value: str | None) -> date | None:
         return None
 
 
+_DAY_MONTH_NUM_RE = re.compile(r"\b(\d{1,2})\s*[./-]\s*(\d{1,2})\b")
+_MONTH_WORD_PATTERN = "|".join(sorted((re.escape(k) for k in MONTHS_RU.keys()), key=len, reverse=True))
+_DAY_MONTH_WORD_RE = (
+    re.compile(rf"\b(\d{{1,2}})\s+({_MONTH_WORD_PATTERN})\b", re.IGNORECASE)
+    if _MONTH_WORD_PATTERN
+    else None
+)
+
+
+def _extract_day_month_pairs(text: str | None) -> set[tuple[int, int]]:
+    raw = str(text or "").strip()
+    if not raw:
+        return set()
+    normalized = unicodedata.normalize("NFKC", raw).casefold().replace("ё", "е")
+    pairs: set[tuple[int, int]] = set()
+    for m in _DAY_MONTH_NUM_RE.finditer(normalized):
+        try:
+            day = int(m.group(1))
+            month = int(m.group(2))
+        except Exception:
+            continue
+        if not (1 <= day <= 31 and 1 <= month <= 12):
+            continue
+        pairs.add((day, month))
+    if _DAY_MONTH_WORD_RE is not None:
+        for m in _DAY_MONTH_WORD_RE.finditer(normalized):
+            try:
+                day = int(m.group(1))
+            except Exception:
+                continue
+            mon_word = (m.group(2) or "").casefold().replace("ё", "е")
+            month = MONTHS_RU.get(mon_word)
+            if not month or not (1 <= day <= 31):
+                continue
+            pairs.add((day, int(month)))
+    return pairs
+
+
+def _poster_day_month_pairs(posters: Sequence[PosterCandidate]) -> set[tuple[int, int]]:
+    pairs: set[tuple[int, int]] = set()
+    for poster in posters or []:
+        pairs |= _extract_day_month_pairs(getattr(poster, "ocr_title", None))
+        pairs |= _extract_day_month_pairs(getattr(poster, "ocr_text", None))
+    return pairs
+
+
+def _format_day_month_pairs(pairs: set[tuple[int, int]]) -> str:
+    if not pairs:
+        return ""
+    return ", ".join(f"{d:02d}/{m:02d}" for d, m in sorted(pairs, key=lambda x: (x[1], x[0])))
+
+
+def _far_future_poster_date_mismatch_note(
+    *,
+    candidate_date: str | None,
+    posters: Sequence[PosterCandidate],
+    months_threshold: int,
+) -> str | None:
+    """Return operator note when a far-future extracted date conflicts with poster OCR."""
+    if months_threshold <= 0:
+        return None
+    start = _parse_iso_date(candidate_date)
+    if not start:
+        return None
+    today = datetime.now(timezone.utc).date()
+    try:
+        from dateutil.relativedelta import relativedelta
+
+        far_cutoff = today + relativedelta(months=int(months_threshold))
+    except Exception:
+        far_cutoff = today + timedelta(days=31 * int(months_threshold))
+    if start < far_cutoff:
+        return None
+    pairs = _poster_day_month_pairs(posters)
+    if not pairs:
+        return None
+    if (start.day, start.month) in pairs:
+        return None
+    pairs_label = _format_day_month_pairs(pairs)
+    extracted_label = f"{start.day:02d}/{start.month:02d}"
+    return (
+        f"⚠️ Дата: конфликт с афишей (OCR={pairs_label}, extracted={extracted_label}) → event.silent=1"
+    )
+
+
 def _add_one_calendar_month(start: date) -> date:
     year = start.year
     month = start.month + 1
@@ -5201,9 +5504,45 @@ def _event_date_range(ev: Event) -> tuple[date | None, date | None]:
 def _candidate_date_range(candidate: EventCandidate) -> tuple[date | None, date | None]:
     start = _parse_iso_date(candidate.date)
     end = _parse_iso_date(candidate.end_date) if candidate.end_date else None
+    if not end and candidate.date and ".." in candidate.date:
+        try:
+            end = _parse_iso_date(candidate.date.split("..", 1)[1])
+        except Exception:
+            end = None
     if start and not end:
         end = start
     return start, end
+
+
+def _smart_update_skip_past_events_enabled() -> bool:
+    raw = (os.getenv("SMART_UPDATE_SKIP_PAST_EVENTS") or "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _smart_update_today_local() -> date:
+    try:
+        from event_utils import LOCAL_TZ as _LOCAL_TZ
+    except Exception:
+        _LOCAL_TZ = timezone.utc
+    return datetime.now(_LOCAL_TZ).date()
+
+
+def _should_skip_past_smart_update_candidate(candidate: EventCandidate) -> bool:
+    """Skip candidates that have fully ended before today (local).
+
+    This is a guardrail for automated ingestion (VK/TG/parsers) to avoid creating
+    useless past events + Telegraph/ICS load.
+    """
+    if not _smart_update_skip_past_events_enabled():
+        return False
+    source_type = str(candidate.source_type or "").strip().lower()
+    if source_type == "bot":
+        return False
+    cand_start, cand_end = _candidate_date_range(candidate)
+    if not cand_start or not cand_end:
+        return False
+    today = _smart_update_today_local()
+    return cand_end < today
 
 
 def _ranges_overlap(a_start: date | None, a_end: date | None, b_start: date | None, b_end: date | None) -> bool:
@@ -7080,7 +7419,7 @@ def _normalize_title_for_match(title: str | None) -> str:
         return ""
     raw = _strip_private_use(title) or (title or "")
     raw = re.sub(r"[\"«»]", "", raw)
-    raw = re.sub(r"\s+", " ", raw).strip().lower()
+    raw = re.sub(r"\s+", " ", raw).strip().casefold().replace("ё", "е")
     return raw
 
 
@@ -8275,6 +8614,19 @@ async def _smart_event_update_impl(
         )
         return SmartUpdateResult(status="invalid", reason="missing_location")
 
+    inferred_default_end_date = _maybe_apply_default_end_date_for_long_event(candidate)
+
+    if _should_skip_past_smart_update_candidate(candidate):
+        logger.info(
+            "smart_update.skip reason=past_event source_type=%s source_url=%s title=%s date=%s end_date=%s",
+            candidate.source_type,
+            candidate.source_url,
+            _clip_title(candidate.title),
+            candidate.date,
+            candidate.end_date,
+        )
+        return SmartUpdateResult(status="skipped_past_event", reason="past_event")
+
     await _maybe_disambiguate_telegram_default_location_city(candidate)
 
     # Deterministic region filter (project scope: Kaliningrad Oblast).
@@ -8425,9 +8777,8 @@ async def _smart_event_update_impl(
         if len(urls) > 2:
             _push_queue_note(f"🎟 … ещё {len(urls) - 2}")
 
-    default_end_date = _maybe_apply_default_end_date_for_long_event(candidate)
-    if default_end_date:
-        text_filter_facts.append(f"Дата окончания по умолчанию: {default_end_date}")
+    if inferred_default_end_date:
+        text_filter_facts.append(f"Дата окончания по умолчанию: {inferred_default_end_date}")
 
     # Giveaways: keep event facts but strip giveaway mechanics when possible.
     is_giveaway = _looks_like_ticket_giveaway(clean_title, raw_source_text, raw_excerpt)
@@ -8439,7 +8790,10 @@ async def _smart_event_update_impl(
         if (before_src or "") != (raw_source_text or "") or (before_excerpt or "") != (raw_excerpt or ""):
             text_filter_facts.append("Убрана механика розыгрыша")
         # If we still don't have a plausible event, treat as non-event content.
-        if not (_has_datetime_signals(raw_source_text) or _has_datetime_signals(raw_excerpt)):
+        if not (
+            _giveaway_has_underlying_event_facts(raw_source_text)
+            or _giveaway_has_underlying_event_facts(raw_excerpt)
+        ):
             logger.info(
                 "smart_update.skip reason=giveaway_no_event source_type=%s source_url=%s title=%s",
                 candidate.source_type,
@@ -8792,6 +9146,7 @@ async def _smart_event_update_impl(
     # Posters policy:
     # Keep all posters (dedupe/order happens later). OCR is used for prioritization only.
     # This avoids events ending up without images due to overly strict filtering.
+    force_silent_due_to_date_risk = False
     poster_filter_facts: list[str] = []
     if candidate.posters:
         # Best-effort: backfill missing OCR from local cache (cheap, no network).
@@ -8822,6 +9177,14 @@ async def _smart_event_update_impl(
                             p.ocr_title = cached.title
             except Exception:
                 logger.warning("smart_update: poster OCR cache backfill failed", exc_info=True)
+        note = _far_future_poster_date_mismatch_note(
+            candidate_date=candidate.date,
+            posters=candidate.posters,
+            months_threshold=SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS,
+        )
+        if note:
+            force_silent_due_to_date_risk = True
+            poster_filter_facts.append(note)
 
     if check_source_url and candidate.source_url:
         timing = (os.getenv("SMART_UPDATE_DEBUG_TIMING") or "").strip().lower() in {"1", "true", "yes"}
@@ -9437,6 +9800,7 @@ async def _smart_event_update_impl(
                 ) or description_value
             description_value = _dedupe_description(description_value) or description_value
             description_value = _normalize_plaintext_paragraphs(description_value) or description_value
+            description_value = _promote_review_bullets_to_blockquotes(description_value) or description_value
             description_value = _promote_first_person_quotes_to_blockquotes(description_value) or description_value
             description_value = _promote_inline_quoted_direct_speech_to_blockquotes(description_value) or description_value
             description_value = _drop_reported_speech_duplicates(description_value) or description_value
@@ -9465,6 +9829,7 @@ async def _smart_event_update_impl(
             # Fact-first output should not be "topped up" with source snippets; keep it strictly fact-driven.
             description_value = _dedupe_description(description_value) or description_value
             description_value = _normalize_plaintext_paragraphs(description_value) or description_value
+            description_value = _promote_review_bullets_to_blockquotes(description_value) or description_value
             description_value = _normalize_blockquote_markers(description_value) or description_value
             description_value = (
                 _sanitize_description_output(
@@ -9711,6 +10076,7 @@ async def _smart_event_update_impl(
             end_date_is_inferred=bool(candidate.end_date_is_inferred),
             is_free=is_free_value,
             pushkin_card=bool(candidate.pushkin_card),
+            silent=bool(force_silent_due_to_date_risk),
             source_text=clean_source_text or "",
             source_texts=[clean_source_text] if clean_source_text else [],
             source_post_url=candidate.source_url if _is_http_url(candidate.source_url) else None,
@@ -10067,6 +10433,7 @@ async def _smart_event_update_impl(
                 )
                 if cleaned and cleaned != before_description:
                     cleaned = _normalize_plaintext_paragraphs(cleaned) or cleaned
+                    cleaned = _promote_review_bullets_to_blockquotes(cleaned) or cleaned
                     cleaned = _promote_first_person_quotes_to_blockquotes(cleaned) or cleaned
                     cleaned = _promote_inline_quoted_direct_speech_to_blockquotes(cleaned) or cleaned
                     cleaned = _drop_reported_speech_duplicates(cleaned) or cleaned

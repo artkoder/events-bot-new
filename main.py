@@ -10202,7 +10202,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
                 d = parse_iso_date(event.date)
                 w_start = weekend_start_for_date(d) if d else None
-                vk_post = event.source_vk_post_url
+                # Only delete VK posts that were created/managed by the bot.
+                # For VK-sourced events `source_vk_post_url` points to the original post and must never be deleted.
+                if (event.source_vk_post_url or "").strip() and (getattr(event, "vk_source_hash", None) or "").strip():
+                    vk_post = event.source_vk_post_url
                 await session.delete(event)
                 await session.commit()
         if month:
@@ -15613,6 +15616,8 @@ async def update_telegraph_event_page(
                 _description_needs_channel_promo_strip as _needs_channel_promo_strip,
                 _description_needs_infoblock_logistics_strip as _needs_infoblock_strip,
                 _llm_remove_infoblock_logistics as _llm_strip_infoblock,
+                _normalize_blockquote_markers as _norm_bq,
+                _promote_review_bullets_to_blockquotes as _promote_reviews,
                 _sanitize_description_output as _sanitize_desc,
             )
 
@@ -15661,6 +15666,12 @@ async def update_telegraph_event_page(
                 sanitized = None
             if sanitized:
                 page_text = sanitized
+            try:
+                promoted = _promote_reviews(page_text)
+            except Exception:
+                promoted = None
+            if promoted:
+                page_text = _norm_bq(promoted) or promoted
         except Exception:
             pass
         html_content, _, _ = await build_source_page_content(
