@@ -131,7 +131,7 @@
 
 ## Надёжность Kaggle polling
 
-- Статус Kaggle kernel опрашивается с интервалом `TG_MONITORING_POLL_INTERVAL` (по умолчанию 30s) до `TG_MONITORING_TIMEOUT_MINUTES` (по умолчанию 90m).
+- Статус Kaggle kernel опрашивается с интервалом `TG_MONITORING_POLL_INTERVAL` (по умолчанию 30s) до динамического лимита ожидания (или фиксированного, если включён `fixed` mode).
 - Транзиентные ошибки сети/SSL при опросе Kaggle API (например `UNEXPECTED_EOF_WHILE_READING`) **не валят прогон**: мониторинг продолжает опрос до получения `COMPLETE/FAILED` или таймаута, а в UI этап показывается как «временная ошибка сети».
 
 ## Надёжность импорта (SQLite lock)
@@ -316,11 +316,12 @@
 - `TG_MONITORING_TIMEOUT_MODE=dynamic|fixed` (default `dynamic`)
 - `TG_MONITORING_TIMEOUT_MINUTES` — базовый/минимальный таймаут (default `90`)
 - `TG_MONITORING_TIMEOUT_BASE_MINUTES` — базовая прибавка для dynamic (default `15`)
-- `TG_MONITORING_TIMEOUT_PER_SOURCE_MINUTES` — прибавка на источник для dynamic (default `2.5`)
+- `TG_MONITORING_TIMEOUT_PER_SOURCE_MINUTES` — baseline прибавка на источник (default `3.64`)
+- `TG_MONITORING_TIMEOUT_SAFETY_MULTIPLIER` — safety multiplier для baseline (default `1.3`)
 - `TG_MONITORING_TIMEOUT_MAX_MINUTES` — верхняя граница для dynamic (default `360`)
 
 В режиме `dynamic` итоговый таймаут считается так:
-`max(TG_MONITORING_TIMEOUT_MINUTES, TG_MONITORING_TIMEOUT_BASE_MINUTES + ceil(sources * TG_MONITORING_TIMEOUT_PER_SOURCE_MINUTES))`,
+`max(TG_MONITORING_TIMEOUT_MINUTES, TG_MONITORING_TIMEOUT_BASE_MINUTES + ceil(sources * TG_MONITORING_TIMEOUT_PER_SOURCE_MINUTES * TG_MONITORING_TIMEOUT_SAFETY_MULTIPLIER))`,
 но не больше `TG_MONITORING_TIMEOUT_MAX_MINUTES`.
 
 Скан лимиты (в Kaggle):

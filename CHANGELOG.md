@@ -15,6 +15,7 @@
 - **Smart Update / Past Events**: Automated imports now skip events that already ended before today (local date) as `skipped_past_event` (`past_event`) to avoid useless event/Telegraph/ICS load.
 - **Smart Update / Far-Future Dates**: When creating events more than `SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS` months ahead, Smart Update checks poster OCR for an explicit conflicting `DD/MM` (or `DD <month>`) date and auto-sets `event.silent=1` on mismatch to prevent public-facing wrong far-future dates.
 - **Admin / Delete Event**: Event deletion no longer attempts to delete source VK wall posts; only bot-managed VK posts (`event.vk_source_hash` present) are deleted.
+- **VK Auto Queue / Event Parse**: Added a conservative prefilter for obvious long historical/admin non-event VK posts before full `event_parse`; ambiguous or event-like posts still go through the normal LLM parse unchanged, reducing wasted TPM on repeated non-events.
 
 ## [1.12.0] - 2026-03-04
 ### Highlights

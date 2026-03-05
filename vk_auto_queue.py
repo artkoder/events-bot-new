@@ -1030,6 +1030,7 @@ async def _prefetch_vk_inbox_row(
                 festival_hint=bool(source_is_festival),
                 publish_ts=publish_ts,
                 event_ts_hint=post.event_ts_hint,
+                prefilter_obvious_non_events=True,
                 db=db,
             )
     except Exception as exc:
@@ -1808,6 +1809,7 @@ async def _process_vk_inbox_row(
                         publish_ts=publish_ts,
                         event_ts_hint=post.event_ts_hint,
                         rate_limit_max_wait_sec=0,
+                        prefilter_obvious_non_events=True,
                         db=db,
                     )
                     break

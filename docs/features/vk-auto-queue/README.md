@@ -181,6 +181,25 @@ ENV для тонкой настройки:
 - `VK_PARSE_POSTER_TEXT_MAX_BLOCK_CHARS` (по умолчанию `500`) — максимум символов на один OCR-блок.
 - `VK_PARSE_POSTER_TEXT_MAX_TOTAL_CHARS` (по умолчанию `1200`) — общий лимит символов OCR в parse prompt.
 
+### Conservative prefilter for obvious non-events
+
+Перед полным `event_parse` VK auto-import теперь делает дешёвую предклассификацию только для **очевидных** long-form non-event постов:
+
+- длинные исторические/справочные тексты без признаков будущего посещаемого события;
+- длинные административные/новостные тексты без даты/времени/регистрации/билетов и без event-like сигналов.
+
+Важно:
+
+- prefilter включён только в пути `vk_auto_queue`, а не для всех вызовов `build_event_drafts`;
+- это консервативный guardrail: любой спорный пост всё равно идёт в обычный LLM parse;
+- future date/time hint, event keywords, registration/ticket hints, poster OCR, `festival_hint` и `operator_extra` отключают fast reject и сохраняют полный разбор.
+
+ENV:
+
+- `VK_AUTO_IMPORT_PREFILTER_OBVIOUS_NON_EVENTS` (по умолчанию `1`) — включает conservative prefilter.
+- `VK_AUTO_IMPORT_PREFILTER_HISTORY_MIN_CHARS` (по умолчанию `2200`) — минимальная длина для historical/info reject.
+- `VK_AUTO_IMPORT_PREFILTER_ADMIN_MIN_CHARS` (по умолчанию `1800`) — минимальная длина для admin/news reject.
+
 ## Инварианты (как у Telegram Monitoring)
 
 - Один VK пост может порождать несколько событий.
