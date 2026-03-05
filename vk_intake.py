@@ -48,6 +48,28 @@ OCR_PENDING_SENTINEL = "__ocr_pending__"
 
 HISTORY_MATCHED_KEYWORD = "history"
 
+_VK_PARSE_PREFILTER_VISIT_HINT_RE = re.compile(
+    r"\b("
+    r"билет\w*|регистрац\w*|вход\w*|стоимост\w*|донат\w*|"
+    r"приглаша(?:ем|ют)\w*|приходите|жд[её]м|"
+    r"состоит(?:ся|есь)\w*|пройдет\w*|пройд[её]т\w*|"
+    r"начал\w*|открыти\w*|сеанс\w*|"
+    r"экскурси\w*|лекци\w*|концерт\w*|спектакл\w*|"
+    r"выставк\w*|кинопоказ\w*|мастер[ -]класс\w*|фестивал\w*"
+    r")\b",
+    re.I | re.U,
+)
+_VK_PARSE_PREFILTER_ADMIN_RE = re.compile(
+    r"\b("
+    r"администрац\w*|жител\w*|голосовани\w*|итог\w*|"
+    r"проект[а-я-]*победител\w*|благоустройств\w*|"
+    r"муниципальн\w*|округ\w*|район\w*|нацпроект\w*|"
+    r"заседан\w*|депутат\w*|совет\w*|"
+    r"поздрав\w*|наград\w*|юбиляр\w*"
+    r")\b",
+    re.I | re.U,
+)
+
 
 def _read_int_env(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
@@ -555,6 +577,97 @@ def detect_historical_context(text: str) -> bool:
         if year <= 1994:
             return True
     return any(name in text_low for name in HISTORICAL_TOPONYMS)
+
+
+def _vk_parse_preclassify(
+    text: str,
+    *,
+    source_name: str | None = None,
+    poster_texts: Sequence[str] | None = None,
+    publish_ts: datetime | int | float | None = None,
+    event_ts_hint: int | None = None,
+    operator_extra: str | None = None,
+    festival_hint: bool = False,
+) -> tuple[str, str | None]:
+    """Cheap conservative gate before the full VK parse prompt.
+
+    The goal is not to classify every post, only to skip obvious long-form
+    non-events that would otherwise reserve >12k TPM and still end up rejected.
+    Anything even slightly ambiguous stays in ``maybe_event`` and proceeds to
+    the normal LLM parser unchanged.
+    """
+    if festival_hint or (operator_extra or "").strip():
+        return "maybe_event", None
+
+    enabled = (os.getenv("VK_AUTO_IMPORT_PREFILTER_OBVIOUS_NON_EVENTS", "1") or "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return "maybe_event", None
+
+    text_clean = (text or "").strip()
+    if not text_clean:
+        return "maybe_event", None
+
+    history_min_chars = max(800, _read_int_env("VK_AUTO_IMPORT_PREFILTER_HISTORY_MIN_CHARS", 2200))
+    admin_min_chars = max(800, _read_int_env("VK_AUTO_IMPORT_PREFILTER_ADMIN_MIN_CHARS", 1800))
+    if len(text_clean) < min(history_min_chars, admin_min_chars):
+        return "maybe_event", None
+
+    context_parts: list[str] = [text_clean]
+    source_clean = (source_name or "").strip()
+    if source_clean:
+        context_parts.append(source_clean)
+    for block in list(poster_texts or [])[:3]:
+        block_clean = (block or "").strip()
+        if block_clean:
+            context_parts.append(block_clean)
+    combined_text = "\n".join(context_parts)
+    combined_norm = unicodedata.normalize("NFKC", combined_text).casefold().replace("ё", "е")
+
+    future_hint = int(event_ts_hint) if isinstance(event_ts_hint, int) and event_ts_hint > 0 else None
+    if future_hint is None:
+        try:
+            tzinfo = require_main_attr("LOCAL_TZ")
+            future_hint = extract_event_ts_hint(
+                combined_text,
+                default_time=None,
+                publish_ts=publish_ts,
+                allow_past=False,
+                tz=tzinfo,
+            )
+        except Exception:
+            future_hint = None
+    if future_hint:
+        return "maybe_event", None
+
+    kw_ok, _matched = match_keywords(combined_text)
+    visitable_signal = bool(
+        kw_ok
+        or PRICE_RE.search(combined_norm)
+        or _VK_PARSE_PREFILTER_VISIT_HINT_RE.search(combined_norm)
+    )
+    if visitable_signal:
+        return "maybe_event", None
+
+    historical_years = {
+        int(match)
+        for match in HISTORICAL_YEAR_RE.findall(combined_norm)
+        if str(match).isdigit() and int(match) <= 1994
+    }
+    historical_hit = detect_historical_context(combined_norm)
+    if len(text_clean) >= history_min_chars and historical_hit and historical_years:
+        return (
+            "non_event",
+            "Длинный исторический/справочный пост без признаков будущего посещаемого события",
+        )
+
+    admin_hits = len(_VK_PARSE_PREFILTER_ADMIN_RE.findall(combined_norm))
+    if len(text_clean) >= admin_min_chars and admin_hits >= 3:
+        return (
+            "non_event",
+            "Длинный административный/новостной пост без признаков посещаемого события",
+        )
+
+    return "maybe_event", None
 
 
 def normalize_phone_candidates(text: str) -> str:
@@ -1226,6 +1339,7 @@ async def build_event_drafts_from_vk(
     ocr_tokens_spent: int = 0,
     ocr_tokens_remaining: int | None = None,
     rate_limit_max_wait_sec: float | int | str | None = None,
+    prefilter_obvious_non_events: bool = False,
 ) -> tuple[list[EventDraft], dict[str, Any] | None]:
     """Return normalised event drafts extracted from a VK post.
 
@@ -1298,6 +1412,33 @@ async def build_event_drafts_from_vk(
             "Оператор подтверждает, что пост описывает фестиваль. "
             "Сопоставь с существующими фестивалями (JSON ниже) или создай новый."
         )
+
+    if prefilter_obvious_non_events:
+        verdict, reason = _vk_parse_preclassify(
+            text,
+            source_name=source_name,
+            poster_texts=poster_texts,
+            publish_ts=publish_ts,
+            event_ts_hint=event_ts_hint,
+            operator_extra=operator_extra,
+            festival_hint=festival_hint,
+        )
+        if verdict == "non_event" and reason:
+            logger.info(
+                "vk.parse prefilter verdict=%s reason=%s source=%s text_len=%s posters=%s",
+                verdict,
+                reason,
+                source_name or "vk",
+                len((text or "").strip()),
+                len(poster_items),
+            )
+            return [
+                EventDraft(
+                    title="",
+                    source_text=text or None,
+                    reject_reason=reason,
+                )
+            ], None
 
     t0 = time.monotonic()
     parsed = await vk_intake_parse_llm(
@@ -2067,6 +2208,7 @@ async def build_event_drafts(
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
     rate_limit_max_wait_sec: float | int | str | None = None,
+    prefilter_obvious_non_events: bool = False,
     db: Database,
 ) -> tuple[list[EventDraft], dict[str, Any] | None]:
     """Download posters, run OCR and return event drafts for a VK post.
@@ -2173,6 +2315,7 @@ async def build_event_drafts(
         ocr_tokens_spent=ocr_tokens_spent,
         ocr_tokens_remaining=ocr_tokens_remaining,
         rate_limit_max_wait_sec=rate_limit_max_wait_sec,
+        prefilter_obvious_non_events=prefilter_obvious_non_events,
     )
     _tmark("build_drafts_from_vk_total", time.monotonic() - t_all)
     for draft in drafts:

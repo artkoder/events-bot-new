@@ -252,6 +252,59 @@ async def test_vk_auto_import_rejects_low_confidence_drafts(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_vk_auto_import_enables_obvious_non_event_prefilter(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (20898960, "kukly", "Калининградский областной театр кукол", None, None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 20898960, 4794, 0, "stub", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    captured: dict[str, object] = {}
+
+    async def fake_fetch(*_args, **_kwargs):
+        return (
+            "Исторический очерк о послевоенном театре кукол.",
+            [],
+            datetime.now(timezone.utc),
+            {"views": 10, "likes": 1},
+            vk_auto_queue.VkFetchStatus(True, "ok"),
+        )
+
+    async def fake_build_event_drafts(*_args, **kwargs):
+        captured["prefilter_obvious_non_events"] = kwargs.get("prefilter_obvious_non_events")
+        return [
+            vk_intake.EventDraft(
+                title="",
+                reject_reason="Длинный исторический/справочный пост без признаков будущего посещаемого события",
+            )
+        ], None
+
+    async def should_not_be_called(*_args, **_kwargs):
+        raise AssertionError("persist_event_and_pages must not be called for reject-only drafts")
+
+    monkeypatch.setattr(vk_auto_queue, "fetch_vk_post_text_and_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build_event_drafts)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", should_not_be_called)
+
+    bot = DummyBot()
+    await vk_auto_queue.run_vk_auto_import(db, bot, chat_id=1, limit=1, operator_id=123)
+
+    assert captured["prefilter_obvious_non_events"] is True
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE id=1")
+        (status,) = await cur.fetchone()
+    assert status == "rejected"
+
+
+@pytest.mark.asyncio
 async def test_vk_auto_import_skips_festival_helper_for_regular_sources(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

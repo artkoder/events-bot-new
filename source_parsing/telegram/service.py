@@ -199,7 +199,9 @@ POLL_INTERVAL_SECONDS = int(os.getenv("TG_MONITORING_POLL_INTERVAL", "30"))
 TIMEOUT_MINUTES = int(os.getenv("TG_MONITORING_TIMEOUT_MINUTES", "90"))
 TIMEOUT_MODE = (os.getenv("TG_MONITORING_TIMEOUT_MODE") or "dynamic").strip().lower()
 TIMEOUT_BASE_MINUTES = int(os.getenv("TG_MONITORING_TIMEOUT_BASE_MINUTES", "15"))
-TIMEOUT_PER_SOURCE_MINUTES = float(os.getenv("TG_MONITORING_TIMEOUT_PER_SOURCE_MINUTES", "2.5"))
+# Production baseline: ~3.64 minutes per source; safety multiplier accounts for Kaggle/TG variance.
+TIMEOUT_PER_SOURCE_MINUTES = float(os.getenv("TG_MONITORING_TIMEOUT_PER_SOURCE_MINUTES", "3.64"))
+TIMEOUT_SAFETY_MULTIPLIER = float(os.getenv("TG_MONITORING_TIMEOUT_SAFETY_MULTIPLIER", "1.3"))
 TIMEOUT_MAX_MINUTES = int(os.getenv("TG_MONITORING_TIMEOUT_MAX_MINUTES", "360"))
 KAGGLE_STARTUP_WAIT_SECONDS = int(os.getenv("TG_MONITORING_STARTUP_WAIT", "10"))
 MAX_TG_MESSAGE_LEN = int(os.getenv("TG_MONITORING_MAX_MESSAGE_LEN", "3800"))
@@ -594,13 +596,18 @@ def _compute_kaggle_poll_timeout_minutes(*, sources_count: int) -> int:
     try:
         per_source = max(0.0, float(TIMEOUT_PER_SOURCE_MINUTES))
     except Exception:
-        per_source = 2.5
+        per_source = 3.64
+    try:
+        safety = max(0.1, float(TIMEOUT_SAFETY_MULTIPLIER))
+    except Exception:
+        safety = 1.3
     try:
         max_minutes = max(1, int(TIMEOUT_MAX_MINUTES))
     except Exception:
         max_minutes = 360
 
-    est = base + int(math.ceil(max(0, int(sources_count)) * per_source))
+    effective_per_source = per_source * safety
+    est = base + int(math.ceil(max(0, int(sources_count)) * effective_per_source))
     # Backward-compatible floor: older config expected TIMEOUT_MINUTES to be "safe default".
     timeout = max(TIMEOUT_MINUTES, est)
     return min(max_minutes, max(1, timeout))
@@ -2700,13 +2707,16 @@ async def _run_telegram_monitor_locked(
     )
     poll_timeout_minutes = _compute_kaggle_poll_timeout_minutes(sources_count=len(sources))
     logger.info(
-        "tg_monitor.timeout_plan run_id=%s mode=%s sources=%d timeout_minutes=%d (base=%s per_source=%s max=%s floor=%s)",
+        "tg_monitor.timeout_plan run_id=%s mode=%s sources=%d timeout_minutes=%d "
+        "(base=%s per_source=%s safety=%s effective_per_source=%s max=%s floor=%s)",
         run_id,
         TIMEOUT_MODE,
         len(sources),
         poll_timeout_minutes,
         TIMEOUT_BASE_MINUTES,
         TIMEOUT_PER_SOURCE_MINUTES,
+        TIMEOUT_SAFETY_MULTIPLIER,
+        TIMEOUT_PER_SOURCE_MINUTES * TIMEOUT_SAFETY_MULTIPLIER,
         TIMEOUT_MAX_MINUTES,
         TIMEOUT_MINUTES,
     )
