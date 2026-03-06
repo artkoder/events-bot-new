@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ### Fixed
+- **Daily Announcements (Telegram)**: Prevented repeated `/daily` sends for the same channel/day by adding an in-process scheduler dedup guard (inflight + sent-today cache); also persist `last_daily` after partial successful sends so transient errors on later messages do not re-trigger full duplicate batches every minute.
 - **Telegram Monitor / Kaggle Polling**: Reworked dynamic timeout to be source-count driven from production baseline (`~3.64 min/source`) with default `+30%` safety via `TG_MONITORING_TIMEOUT_SAFETY_MULTIPLIER=1.3`, so `/tg` scales with channel count and avoids under-sized limits on long runs.
 - **Telegraph Event Pages**: Removed synthetic blank `&#8203;` spacer right before `<ul>/<ol>` list blocks on event/source pages, while preserving other existing paragraph spacings.
 - **Deploy**: Excluded local backups, `__pycache__`, `.pytest_cache`, and temp directories from Docker build context to avoid oversized Fly deploy uploads.

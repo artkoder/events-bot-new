@@ -7972,6 +7972,55 @@ async def test_daily_test_send_no_record(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_send_daily_records_last_daily_after_partial_failure(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            main.Channel(channel_id=1, title="ch", is_admin=True, daily_time="08:00")
+        )
+        await session.commit()
+
+    async def fake_build_daily_posts(db_obj, tz, now=None):
+        return [("first", None), ("second", None)]
+
+    monkeypatch.setattr(main, "build_daily_posts", fake_build_daily_posts)
+
+    class FailSecondBot(DummyBot):
+        async def send_message(self, chat_id, text, **kwargs):
+            if len(self.messages) >= 1:
+                raise RuntimeError("temporary send error")
+            return await super().send_message(chat_id, text, **kwargs)
+
+    bot = FailSecondBot("123:abc")
+    with pytest.raises(RuntimeError):
+        await main.send_daily_announcement(db, bot, 1, timezone.utc)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, 1)
+    assert ch.last_daily == date.today().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_daily_runtime_claim_prevents_duplicate_schedule():
+    await main._daily_reset_runtime_state()
+    day = "2026-03-06"
+
+    assert await main._daily_try_claim(42, day) is True
+    assert await main._daily_try_claim(42, day) is False
+
+    await main._daily_release_claim(42, day, sent_count=2)
+    assert await main._daily_try_claim(42, day) is False
+
+    next_day = "2026-03-07"
+    assert await main._daily_try_claim(42, next_day) is True
+
+    await main._daily_release_claim(42, next_day, sent_count=0)
+    await main._daily_reset_runtime_state()
+
+
+@pytest.mark.asyncio
 async def test_build_daily_posts_split(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

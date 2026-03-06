@@ -33,6 +33,7 @@ If you see skip notifications in admin chat often, spread the schedules further 
 - **partner reminders** – reminds inactive partners after 09:00 local time.
 - **cleanup old events** – removes past events after 03:00 local time and notifies the superadmin.
 - **general stats** – daily operational system report (`/general_stats`) for the previous 24 hours.
+- **Telegram daily announcements** – posts `/daily` channel announcements after configured `daily_time`; scheduler has per-channel in-process dedup guard (inflight + sent-today cache) to prevent repeated sends while one run is still in progress.
 - **VK daily posts and polls** – publishes daily announcements and festival polls when posting times are reached and a VK group is configured.
 - **VK auto queue import** – imports queued VK posts (`vk_inbox`) via Smart Update on a fixed schedule when enabled.
 - **Telegraph pages sync** – refreshes month and weekend Telegraph pages after 01:00 local time. Disabled by default; enable with `ENABLE_NIGHTLY_PAGE_SYNC=1`. Nightly runs update both page content and the month navigation block.

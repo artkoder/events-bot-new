@@ -104,6 +104,15 @@ if "month_name_nominative" not in globals():
             return f"{name} {y}"
         return name
 
+if "_daily_inflight_channels" not in globals():
+    _daily_inflight_channels: set[int] = set()
+
+if "_daily_sent_cache" not in globals():
+    _daily_sent_cache: set[tuple[int, str]] = set()
+
+if "_daily_state_lock" not in globals():
+    _daily_state_lock = asyncio.Lock()
+
 
 def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
     """Normalize emoji placement so it appears only once per rendered line."""
@@ -4157,6 +4166,38 @@ async def send_daily_announcement_vk(
             await post_to_vk(group_id, section2, db, bot)
 
 
+async def _daily_try_claim(channel_id: int, day_key: str) -> bool:
+    async with _daily_state_lock:
+        stale = {item for item in _daily_sent_cache if item[1] != day_key}
+        if stale:
+            _daily_sent_cache.difference_update(stale)
+        if channel_id in _daily_inflight_channels:
+            return False
+        if (channel_id, day_key) in _daily_sent_cache:
+            return False
+        _daily_inflight_channels.add(channel_id)
+        return True
+
+
+async def _daily_release_claim(
+    channel_id: int,
+    day_key: str,
+    *,
+    sent_count: int,
+) -> None:
+    async with _daily_state_lock:
+        _daily_inflight_channels.discard(channel_id)
+        if sent_count > 0:
+            _daily_sent_cache.add((channel_id, day_key))
+
+
+async def _daily_reset_runtime_state() -> None:
+    """Test helper: clear in-process daily scheduler state."""
+    async with _daily_state_lock:
+        _daily_inflight_channels.clear()
+        _daily_sent_cache.clear()
+
+
 async def send_daily_announcement(
     db: Database,
     bot: Bot,
@@ -4165,14 +4206,16 @@ async def send_daily_announcement(
     *,
     record: bool = True,
     now: datetime | None = None,
-):
+    raise_on_error: bool = True,
+) -> int:
     # 1) Собираем контент вне любых семафоров
     posts = await build_daily_posts(db, tz, now)
     if not posts:
         logging.info("daily: no posts for channel=%s; skip last_daily", channel_id)
-        return
+        return 0
     # 2) Отправляем с «узким» шлюзом TG, чтобы не блокировать систему целиком
     sent = 0
+    pending_error: Exception | None = None
     for text, markup in posts:
         try:
             async with TG_SEND_SEMAPHORE:
@@ -4191,19 +4234,48 @@ async def send_daily_announcement(
             msg = str(e).lower()
             if "chat not found" in msg or "forbidden" in msg:
                 logging.warning("daily send skipped for %s: %s", channel_id, e)
-                return
+                return sent
             logging.error("daily send failed for %s: %s", channel_id, e)
             if "message is too long" in str(e):
                 continue
-            raise
+            pending_error = e
+            break
     # 3) Отмечаем только если что-то реально ушло
     if record and now is None and sent > 0:
-        async with db.raw_conn() as conn:
-            await conn.execute(
-                "UPDATE channel SET last_daily=? WHERE channel_id=?",
-                ((now or datetime.now(tz)).date().isoformat(), channel_id),
-            )
-            await conn.commit()
+        try:
+            async with db.raw_conn() as conn:
+                await conn.execute(
+                    "UPDATE channel SET last_daily=? WHERE channel_id=?",
+                    ((now or datetime.now(tz)).date().isoformat(), channel_id),
+                )
+                await conn.commit()
+        except Exception:
+            logging.exception("daily: failed to update last_daily for channel=%s", channel_id)
+    if pending_error and raise_on_error:
+        raise pending_error
+    return sent
+
+
+async def _run_daily_scheduler_send(
+    db: Database,
+    bot: Bot,
+    channel_id: int,
+    tz: timezone,
+    day_key: str,
+) -> None:
+    sent = 0
+    try:
+        sent = await send_daily_announcement(
+            db,
+            bot,
+            channel_id,
+            tz,
+            raise_on_error=False,
+        )
+    except Exception:
+        logging.exception("daily_scheduler: channel %s failed", channel_id)
+    finally:
+        await _daily_release_claim(channel_id, day_key, sent_count=sent)
 
 
 async def daily_scheduler(db: Database, bot: Bot):
@@ -4215,6 +4287,7 @@ async def daily_scheduler(db: Database, bot: Bot):
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = dt.datetime.now(tz)
+        day_key = now.date().isoformat()
         now_time = now.time().replace(second=0, microsecond=0)
         async with db.raw_conn() as conn:
             conn.row_factory = __import__("sqlite3").Row
@@ -4239,8 +4312,18 @@ async def daily_scheduler(db: Database, bot: Bot):
             )
             if due:
                 try:
+                    channel_id = int(r["channel_id"])
+                    claimed = await _daily_try_claim(channel_id, day_key)
+                    if not claimed:
+                        logging.info(
+                            "daily_scheduler: channel=%s skipped (already inflight/sent)",
+                            channel_id,
+                        )
+                        continue
                     # не блокируем цикл планировщика — отправляем в фоне
-                    asyncio.create_task(send_daily_announcement(db, bot, r["channel_id"], tz))
+                    asyncio.create_task(
+                        _run_daily_scheduler_send(db, bot, channel_id, tz, day_key)
+                    )
                 except Exception as e:
                     log.exception(
                         "daily_scheduler: channel %s failed: %s",
