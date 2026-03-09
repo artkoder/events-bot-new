@@ -11,17 +11,17 @@ import time
 import uuid
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 import ssl
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import OperationalError
 
 from db import Database
-from models import TelegramSource, TelegramSourceForceMessage
+from models import TelegramScannedMessage, TelegramSource, TelegramSourceForceMessage
 from ops_run import finish_ops_run, start_ops_run
 from source_parsing.telegram.deduplication import get_month_context_urls
 from telegram_sources import normalize_tg_username
@@ -330,7 +330,18 @@ async def _build_config_payload(
         )
         sources = res.scalars().all()
         force_map: dict[int, list[int]] = {}
+        recent_event_map: dict[int, list[int]] = {}
         source_ids = [src.id for src in sources if src.id is not None]
+        recent_days_raw = (os.getenv("TG_MONITORING_DAYS_BACK") or "3").strip()
+        recent_limit_raw = (os.getenv("TG_MONITORING_RECENT_RESCAN_LIMIT") or "200").strip()
+        try:
+            recent_days = max(1, int(recent_days_raw or "3"))
+        except Exception:
+            recent_days = 3
+        try:
+            recent_limit = max(1, min(int(recent_limit_raw or "200"), 1000))
+        except Exception:
+            recent_limit = 200
         if source_ids:
             res_force = await session.execute(
                 select(TelegramSourceForceMessage).where(
@@ -339,6 +350,37 @@ async def _build_config_payload(
             )
             for row in res_force.scalars().all():
                 force_map.setdefault(row.source_id, []).append(row.message_id)
+            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=recent_days)
+            res_recent = await session.execute(
+                select(
+                    TelegramScannedMessage.source_id,
+                    TelegramScannedMessage.message_id,
+                )
+                .where(
+                    TelegramScannedMessage.source_id.in_(source_ids),
+                    TelegramScannedMessage.message_date.is_not(None),
+                    TelegramScannedMessage.message_date >= cutoff_dt,
+                    or_(
+                        TelegramScannedMessage.events_extracted > 0,
+                        TelegramScannedMessage.events_imported > 0,
+                    ),
+                )
+                .order_by(
+                    TelegramScannedMessage.source_id,
+                    TelegramScannedMessage.message_date.desc(),
+                    TelegramScannedMessage.message_id.desc(),
+                )
+            )
+            for source_id, message_id in res_recent.all():
+                try:
+                    sid = int(source_id)
+                    mid = int(message_id)
+                except Exception:
+                    continue
+                bucket = recent_event_map.setdefault(sid, [])
+                if len(bucket) >= recent_limit or mid in bucket:
+                    continue
+                bucket.append(mid)
     payload = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -350,6 +392,7 @@ async def _build_config_payload(
                 "default_ticket_link": src.default_ticket_link,
                 "trust_level": src.trust_level,
                 "force_message_ids": sorted(set(force_map.get(src.id or -1, []))),
+                "recent_event_message_ids": sorted(set(recent_event_map.get(src.id or -1, []))),
             }
             for src in sources
         ],

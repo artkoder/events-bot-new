@@ -3,3 +3,187 @@
 Здесь лежат исторические отчёты, ревью, планы реализации и ретроспективы.
 
 - Роутинг: см. `docs/routes.yml` → `reports`.
+- Кейсы по дублям Smart Update: `docs/reports/smart-update-duplicate-casebook.md`.
+- Longrun-анализ identity-resolution для Smart Update: `docs/reports/smart-update-identity-longrun.md`.
+- Brief для внешней LLM-консультации по Smart Update: `docs/reports/smart-update-cross-llm-brief.md`.
+- Разбор внешней консультации Claude Opus: `docs/reports/smart-update-opus-consultation-review.md`.
+- Session 2 brief для Claude Opus (пограничные merge-кейсы): `docs/reports/smart-update-opus-session2-brief.md`.
+- Session 2 material map (возражения, Gemma-ограничения, указатели на реальные кейсы): `docs/reports/smart-update-opus-session2-material-map.md`.
+- Session 2 handoff для Claude Opus (ready-to-send пакет и reset по рекомендациям v1): `docs/reports/smart-update-opus-session2-handoff.md`.
+- Session 2 cross-check report от Claude Opus: `docs/reports/smart-update-session2-crosscheck-report.md`.
+- Session 2 deep consultation от Claude Opus: `docs/reports/smart-update-session2-deep-consultation.md`.
+- Наш review deep-consultation и follow-up возражения: `docs/reports/smart-update-session2-deep-consultation-review.md`.
+- Сквозная нумерация этапов внешней консультации: `docs/reports/smart-update-opus-stage-index.md`.
+- Stage 03 brief для следующего раунда с Opus: `docs/reports/smart-update-opus-stage-03-brief.md`.
+- Stage 03 production-ready dry-run и выводы: `docs/reports/smart-update-opus-stage-03-production-layer.md`.
+- Stage 04 consensus dry-run и narrowed preprod candidate для следующего Opus-раунда: `docs/reports/smart-update-opus-stage-04-consensus-prep.md`.
+- Competitive response от Opus по Stage 04: `docs/reports/smart-update-stage-04-competitive-response.md`.
+- Наш review competitive response и локальная проверка новых Stage 04B rules: `docs/reports/smart-update-stage-04-competitive-response-review.md`.
+- Follow-up response от Opus по Stage 04: `docs/reports/smart-update-stage-04-followup-response.md`.
+- Stage 05 final brief перед последним Opus-раундом: `docs/reports/smart-update-opus-stage-05-brief.md`.
+- Stage 06 live validation после реального VK auto-import прогона: `docs/reports/smart-update-opus-stage-06-live-validation.md`.
+- Stage 07 live rerun follow-up с giveaway false-positive и zoo same-source mixed signal: `docs/reports/smart-update-opus-stage-07-live-rerun-followup.md`.
+- Brief для нового Opus-раунда по улучшению Gemma event copy в fact-first Smart Update: `docs/reports/smart-update-opus-gemma-event-copy-brief.md`.
+- Ответ Opus по Gemma event copy: `docs/reports/smart-update-opus-gemma-event-copy-response.md`.
+- Наш review ответа Opus по Gemma event copy: `docs/reports/smart-update-opus-gemma-event-copy-response-review.md`.
+- Follow-up response Opus по Gemma event copy: `docs/reports/smart-update-opus-gemma-event-copy-followup-response.md`.
+- Наш review follow-up response по Gemma event copy: `docs/reports/smart-update-opus-gemma-event-copy-followup-response-review.md`.
+- Brief для полного prompt-audit раунда по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-prompt-audit-brief.md`.
+- Канонический brief для раунда audit + pattern-driven redesign по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-pattern-redesign-brief.md`.
+- Response Opus по pattern-driven redesign Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-pattern-redesign-response.md`.
+- Наш review response по pattern-driven redesign Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-pattern-redesign-response-review.md`.
+- Narrow follow-up response Opus по pattern-driven redesign Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-pattern-redesign-followup-response.md`.
+- Наш пересмотренный review narrow follow-up response по pattern-driven redesign Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-pattern-redesign-followup-response-review.md`.
+- Quality-first calibration response Opus по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-quality-first-calibration-response.md`.
+- Наш review quality-first calibration response по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-quality-first-calibration-response-review.md`.
+- Final implementation calibration response Opus по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-final-impl-calibration-response.md`.
+- Наш review final implementation calibration response по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-final-impl-calibration-response-review.md`.
+- Preservation / migration matrix response Opus по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-preservation-matrix-response.md`.
+- Наш review preservation / migration matrix response по Gemma event copy flow: `docs/reports/smart-update-opus-gemma-event-copy-preservation-matrix-response-review.md`.
+- Реальный dry-run на 5 новых событиях через текущий Gemma fact-first flow: `docs/reports/smart-update-opus-gemma-event-copy-dry-run-5-events-2026-03-07.md`.
+- Experimental pattern-driven dry-run на тех же 5 событиях для сравнения с baseline: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-5-events-2026-03-07.md`.
+- Brief для новой критической Opus-консультации по реальному качеству event-copy: `docs/reports/smart-update-opus-gemma-event-copy-quality-consultation-brief.md`.
+- Ответ Opus на quality consultation по реальным dry-run результатам: `docs/reports/smart-update-opus-gemma-event-copy-quality-consultation-response.md`.
+- Наш review quality consultation response по реальным dry-run результатам: `docs/reports/smart-update-opus-gemma-event-copy-quality-consultation-response-review.md`.
+- Follow-up recalibration response Opus по quality consultation: `docs/reports/smart-update-opus-gemma-event-copy-quality-consultation-followup-response.md`.
+- Наш review follow-up recalibration response Opus: `docs/reports/smart-update-opus-gemma-event-copy-quality-consultation-followup-response-review.md`.
+- Каталог Opus по улучшениям качества текста event-copy: `docs/reports/smart-update-opus-gemma-event-copy-text-quality-improvements.md`.
+- Наш review каталога улучшений качества текста: `docs/reports/smart-update-opus-gemma-event-copy-text-quality-improvements-review.md`.
+- Канонический brief для финального узкого Opus-раунда по сборке `v2 quality patch pack`: `docs/reports/smart-update-opus-gemma-event-copy-v2-quality-patch-pack-brief.md`.
+- Ответ Opus с компактным `v2 quality patch pack`: `docs/reports/smart-update-opus-gemma-event-copy-v2-quality-patch-pack-response.md`.
+- Наш review ответа Opus по `v2 quality patch pack`: `docs/reports/smart-update-opus-gemma-event-copy-v2-quality-patch-pack-response-review.md`.
+- Dry-run `v2` subset на тех же 5 событиях (`baseline / v1 / v2`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-5-events-2026-03-07.md`.
+- Наш review dry-run `v2` subset: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-review-2026-03-07.md`.
+- Ответ Opus на quality consultation по `v2 dry-run`: `docs/reports/smart-update-opus-gemma-event-copy-v2-dryrun-quality-consultation-response.md`.
+- Наш review ответа Opus по `v2 dry-run`: `docs/reports/smart-update-opus-gemma-event-copy-v2-dryrun-quality-consultation-response-review.md`.
+- Dry-run `v2.1` subset на тех же 5 событиях (`baseline / v1 / v2 / v2.1`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-1-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.1` subset: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-1-review-2026-03-07.md`.
+- Brief для новой Opus-консультации по реальному `v2.1` dry-run: `docs/reports/smart-update-opus-gemma-event-copy-v2-1-dryrun-quality-consultation-brief.md`.
+- Ответ Opus на quality consultation по `v2.1 dry-run`: `docs/reports/smart-update-opus-gemma-event-copy-v2-1-dryrun-quality-consultation-response.md`.
+- Наш review ответа Opus по `v2.1 dry-run`: `docs/reports/smart-update-opus-gemma-event-copy-v2-1-dryrun-quality-consultation-response-review.md`.
+- Dry-run `v2.2` subset на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-2-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.2` subset: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-2-review-2026-03-07.md`.
+- Brief для новой Opus-консультации по реальному `v2.2` dry-run: `docs/reports/smart-update-opus-gemma-event-copy-v2-2-dryrun-quality-consultation-brief.md`.
+- First-contact brief для новой Gemini-консультации по event-copy quality: `docs/reports/smart-update-gemini-event-copy-first-consultation-brief.md`.
+- Ответ Gemini на first-contact консультацию по event-copy quality: `docs/reports/smart-update-gemini-event-copy-first-consultation-response.md`.
+- Наш review ответа Gemini по first-contact консультации: `docs/reports/smart-update-gemini-event-copy-first-consultation-response-review.md`.
+- Dry-run `v2.3` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3`) с исходными постами и промежуточными fact layers: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-3-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.3`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-3-review-2026-03-07.md`.
+- Brief для Gemini-консультации по реальному `v2.3` dry-run с запросом на конкретные prompt-level правки для Gemma: `docs/reports/smart-update-gemini-event-copy-v2-3-dryrun-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.3` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-3-dryrun-quality-consultation-response.md`.
+- Наш критический review ответа Gemini по `v2.3` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-3-dryrun-quality-consultation-response-review.md`.
+- Dry-run `v2.4` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-4-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.4`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-4-review-2026-03-07.md`.
+- Brief для Gemini-консультации по regression после `v2.4`: `docs/reports/smart-update-gemini-event-copy-v2-4-regression-consultation-brief.md`.
+- Ответ Gemini на regression-консультацию после `v2.4`: `docs/reports/smart-update-gemini-event-copy-v2-4-regression-consultation-response.md`.
+- Наш критический review ответа Gemini по regression после `v2.4`: `docs/reports/smart-update-gemini-event-copy-v2-4-regression-consultation-response-review.md`.
+- Dry-run `v2.5` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-5-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.5`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-5-review-2026-03-07.md`.
+- Brief для Gemini-консультации по реальному `v2.5` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-5-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.5` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-5-quality-consultation-response.md`.
+- Наш критический review ответа Gemini по `v2.5` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-5-quality-consultation-response-review.md`.
+- Hypothesis-consultation response Gemini перед `v2.6`: `docs/reports/smart-update-gemini-event-copy-v2-6-hypotheses-consultation-response.md`.
+- Наш review hypothesis-consultation response перед `v2.6`: `docs/reports/smart-update-gemini-event-copy-v2-6-hypotheses-consultation-response-review.md`.
+- Dry-run `v2.6` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-6-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.6`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-6-review-2026-03-07.md`.
+- Brief для Gemini-консультации по реальному `v2.6` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-6-dryrun-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.6` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-6-dryrun-quality-consultation-response.md`.
+- Наш критический review ответа Gemini по `v2.6` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-6-dryrun-quality-consultation-response-review.md`.
+- Brief для Gemini pre-run консультации по `v2.7`: `docs/reports/smart-update-gemini-event-copy-v2-7-hypotheses-consultation-brief.md`.
+- Ответ Gemini на pre-run консультацию по `v2.7`: `docs/reports/smart-update-gemini-event-copy-v2-7-hypotheses-consultation-response.md`.
+- Наш review pre-run ответа Gemini по `v2.7`: `docs/reports/smart-update-gemini-event-copy-v2-7-hypotheses-consultation-response-review.md`.
+- Dry-run `v2.7` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-7-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.7`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-7-review-2026-03-07.md`.
+- Brief для Gemini-консультации по реальному `v2.7` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-7-dryrun-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.7` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-7-dryrun-quality-consultation-response.md`.
+- Наш критический review ответа Gemini по `v2.7` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-7-dryrun-quality-consultation-response-review.md`.
+- Brief для Gemini pre-run консультации по `v2.8`: `docs/reports/smart-update-gemini-event-copy-v2-8-hypotheses-consultation-brief.md`.
+- Ответ Gemini на pre-run консультацию по `v2.8`: `docs/reports/smart-update-gemini-event-copy-v2-8-hypotheses-consultation-response.md`.
+- Наш review pre-run ответа Gemini по `v2.8`: `docs/reports/smart-update-gemini-event-copy-v2-8-hypotheses-consultation-response-review.md`.
+- Docs-only prompt context для `v2.8` с extraction/generation/revise blocks и support-layer sanitizer: `docs/reports/smart-update-gemini-event-copy-v2-8-prompt-context.md`.
+- Dry-run `v2.8` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7 / v2.8`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-8-5-events-2026-03-07.md`.
+- Наш review dry-run `v2.8`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-8-review-2026-03-07.md`.
+- Brief для Gemini-консультации по реальному `v2.8` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-8-dryrun-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.8` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-8-dryrun-quality-consultation-response.md`.
+- Наш review ответа Gemini по `v2.8` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-8-dryrun-quality-consultation-response-review.md`.
+- Narrow follow-up brief для Gemini по sanitizer interaction после `v2.8`: `docs/reports/smart-update-gemini-event-copy-v2-8-sanitizer-followup-brief.md`.
+- Ответ Gemini на sanitizer follow-up после `v2.8`: `docs/reports/smart-update-gemini-event-copy-v2-8-sanitizer-followup-response.md`.
+- Наш review Gemini sanitizer follow-up после `v2.8`: `docs/reports/smart-update-gemini-event-copy-v2-8-sanitizer-followup-response-review.md`.
+- Brief для Gemini pre-run консультации по `v2.9`: `docs/reports/smart-update-gemini-event-copy-v2-9-hypotheses-consultation-brief.md`.
+- Ответ Gemini на pre-run консультацию по `v2.9`: `docs/reports/smart-update-gemini-event-copy-v2-9-hypotheses-consultation-response.md`.
+- Наш review pre-run ответа Gemini по `v2.9`: `docs/reports/smart-update-gemini-event-copy-v2-9-hypotheses-consultation-response-review.md`.
+- Docs-only prompt context для `v2.9` с exact prompt / sanitizer changes: `docs/reports/smart-update-gemini-event-copy-v2-9-prompt-context.md`.
+- Dry-run `v2.9` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7 / v2.8 / v2.9`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-9-5-events-2026-03-08.md`.
+- Наш review dry-run `v2.9`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-9-review-2026-03-08.md`.
+- Brief для Gemini-консультации по реальному `v2.9` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-9-dryrun-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.9` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-9-dryrun-quality-consultation-response.md`.
+- Наш review ответа Gemini по `v2.9` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-9-dryrun-quality-consultation-response-review.md`.
+- Docs-only prompt context для `v2.10` с `list consolidation`, action-oriented hints и preserved sanitizer bypass: `docs/reports/smart-update-gemini-event-copy-v2-10-prompt-context.md`.
+- Dry-run `v2.10` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7 / v2.8 / v2.9 / v2.10`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-10-5-events-2026-03-08.md`.
+- Наш review dry-run `v2.10`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-10-review-2026-03-08.md`.
+- Brief для Gemini-консультации по реальному `v2.10` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-10-dryrun-quality-consultation-brief.md`.
+- Ответ Gemini на консультацию по реальному `v2.10` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-10-dryrun-quality-consultation-response.md`.
+- Наш review ответа Gemini по `v2.10` dry-run: `docs/reports/smart-update-gemini-event-copy-v2-10-dryrun-quality-consultation-response-review.md`.
+- Канонический review комплексной консультации `Opus -> Gemini` перед `v2.11`: `docs/reports/smart-update-opus-gemini-event-copy-v2-11-complex-consultation-review.md`.
+- Dry-run `v2.11` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7 / v2.8 / v2.9 / v2.10 / v2.11`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-11-5-events-2026-03-08.md`.
+- Наш review dry-run `v2.11`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-11-review-2026-03-08.md`.
+- Synthesis нового консультационного раунда по результатам `v2.11` и видение `v2.12`: `docs/reports/smart-update-event-copy-v2-12-consultation-synthesis-2026-03-08.md`.
+- Docs-only prompt context для новой `full-floor normalization` architecture в `v2.12`: `docs/reports/smart-update-gemma-event-copy-v2-12-prompt-context.md`.
+- Dry-run `v2.12` как первый раунд новой architecture: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-12-5-events-2026-03-08.md`.
+- Наш review dry-run `v2.12` с явным verdict против `v2.11` и baseline: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-12-review-2026-03-08.md`.
+- Synthesis post-run конкурентной консультации `Opus -> Gemini` по `v2.12`: `docs/reports/smart-update-event-copy-v2-12-postrun-consultation-synthesis-2026-03-08.md`.
+- Docs-only prompt context для `v2.13` с exemplar-driven generation и targeted-repair-only architecture: `docs/reports/smart-update-gemma-event-copy-v2-13-prompt-context.md`.
+- Dry-run `v2.13` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7 / v2.8 / v2.9 / v2.10 / v2.11 / v2.12 / v2.13`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-13-5-events-2026-03-08.md`.
+- Наш review dry-run `v2.13` с явным verdict против baseline и `v2.12`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-13-review-2026-03-08.md`.
+- Synthesis post-run конкурентной консультации `Opus -> Gemini` по `v2.13`: `docs/reports/smart-update-event-copy-v2-13-postrun-consultation-synthesis-2026-03-08.md`.
+- Docs-only prompt context для `v2.14` с `LLM story outline` и LLM-first corrections против regex-heavy drift: `docs/reports/smart-update-gemma-event-copy-v2-14-prompt-context.md`.
+- Dry-run `v2.14` на тех же 5 событиях (`baseline / v1 / v2 / v2.1 / v2.2 / v2.3 / v2.4 / v2.5 / v2.6 / v2.7 / v2.8 / v2.9 / v2.10 / v2.11 / v2.12 / v2.13 / v2.14`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-14-5-events-2026-03-08.md`.
+- Наш review dry-run `v2.14` с явным verdict против baseline и `v2.13`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-14-review-2026-03-08.md`.
+- Synthesis post-run конкурентной консультации `Opus -> Gemini` по `v2.14`: `docs/reports/smart-update-event-copy-v2-14-postrun-consultation-synthesis-2026-03-08.md`.
+- Каноническая ретроспектива `baseline -> v2.14` по Gemma event-copy: `docs/reports/smart-update-gemma-event-copy-retrospective-baseline-v2-14-2026-03-08.md`.
+- Канонический design brief для `v2.15` по Gemma event-copy: `docs/reports/smart-update-gemma-event-copy-v2-15-design-brief-2026-03-08.md`.
+- Наш review Gemini-консультации по `v2.15` design brief с фокусом на качество текста: `docs/reports/smart-update-gemini-event-copy-v2-15-text-quality-consultation-review-2026-03-08.md`.
+- Ретроспектива полезных предложений `Opus` и `Gemini` по линии event-copy: `docs/reports/smart-update-event-copy-external-consultation-retrospective-2026-03-08.md`.
+- Master-retrospective рекомендаций `Opus` и `Gemini` по всей линии event-copy как единая knowledge base перед `2.15.2`: `docs/reports/smart-update-event-copy-opus-gemini-recommendations-master-retrospective-2026-03-08.md`.
+- Канонический design brief для `2.15.2` по Gemma event-copy: `docs/reports/smart-update-gemma-event-copy-v2-15-2-design-brief-2026-03-08.md`.
+- Канонический design brief для `2.15.3` по Gemma event-copy: `docs/reports/smart-update-gemma-event-copy-v2-15-3-design-brief-2026-03-08.md`.
+- Extracted strict `Opus` prompt pack для Gemma-шагов `2.15.3`: `docs/reports/smart-update-opus-v2-15-3-prompt-pack-2026-03-08.md`.
+- Наш review strict `Opus` prompt pack по `2.15.3`: `docs/reports/smart-update-opus-v2-15-3-prompt-pack-review-2026-03-08.md`.
+- Наш review strict `Opus` prompt-profiling по `2.15.2`: `docs/reports/smart-update-opus-event-copy-v2-15-2-prompt-profiling-review-2026-03-08.md`.
+- Impact-report по deep research о Gemma и его фактическому влиянию на `2.15.2`: `docs/reports/smart-update-gemma-deep-research-impact-on-v2-15-2-2026-03-08.md`.
+- Docs-only prompt context для `2.15.2` с атомарным `normalize -> tiny planner -> dynamic generation -> targeted repair` flow: `docs/reports/smart-update-gemma-event-copy-v2-15-2-prompt-context-2026-03-08.md`.
+- Dry-run `2.15.2` на тех же 5 событиях (`baseline / v2.13 / v2.14 / v2.15.2`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-15-2-5-events-2026-03-08.md`.
+- Наш review dry-run `2.15.2` с явным verdict против baseline, `v2.13` и `v2.14`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-15-2-review-2026-03-08.md`.
+- Наш review Gemini-консультации по реальным текстам `2.15.2`: `docs/reports/smart-update-gemini-event-copy-v2-15-2-dryrun-text-consultation-review-2026-03-08.md`.
+- Docs-only prompt context для `2.15.3` с full prompt-pack repack, self-contained prompts и dynamic generation blocks: `docs/reports/smart-update-gemma-event-copy-v2-15-3-prompt-context-2026-03-08.md`.
+- Dry-run `2.15.3` на тех же 5 событиях (`baseline / v2.13 / v2.14 / v2.15.2 / v2.15.3`): `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-15-3-5-events-2026-03-08.md`.
+- Компактное сравнение только текстов `baseline vs v2.15.3` по всем 5 событиям: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-15-3-texts-vs-baseline-2026-03-08.md`.
+- Наш review dry-run `2.15.3` с явным verdict против baseline и `v2.15.2`: `docs/reports/smart-update-opus-gemma-event-copy-pattern-dry-run-v2-15-3-review-2026-03-08.md`.
+- Наш review Gemini-консультации по реальным текстам `2.15.3`: `docs/reports/smart-update-gemini-event-copy-v2-15-3-dryrun-text-consultation-review-2026-03-08.md`.
+- Step-level profiling report для `2.15.3` на одном реальном кейсе (`2673`) с полным trace по этапам `A -> ... -> final`: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-3-step-profile-event-2673-2026-03-08.md`.
+- Наш review step-level profiling по `2673` с локализацией root cause по шагам `normalize -> planner -> generation -> repair`: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-3-step-profile-event-2673-review-2026-03-08.md`.
+- Atomic step-tuning report для `v2.15.5` на том же кейсе `2673`, уже с отдельными локальными win-метриками для `normalize_subject / expand_agenda / normalize_program / plan_lead / generate_lead / generate_body / repair`: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-5-atomic-step-tuning-event-2673-2026-03-08.md`.
+- Atomic step-tuning report для `v2.15.6` на контрастном `lecture_person` кейсе `2687`, где тот же подход проверен уже в другом разрезе `normalize_cluster / normalize_theme / normalize_profiles / plan_lead / generate_lead / generate_body / repair`: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-6-atomic-step-tuning-event-2687-2026-03-08.md`.
+- Atomic step-tuning report для `v2.15.7` на `program_rich` кейсе `2734`, где цикл был расширен ещё и на pre-generation preparation (`normalize_concept / normalize_setlist / normalize_performer / normalize_stage / plan_lead / generate_lead / generate_body / repair`) и дал локальный win по полному `6/6` slot coverage: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-7-atomic-step-tuning-event-2734-2026-03-08.md`.
+- Atomic shape-batch report для `v2.15.8` на 6 новых событиях (`screening_card / party_theme_program / exhibition_context_collection`), где локальные extraction-win уже перенеслись на несколько shape одновременно и была локализована новая зона риска в downstream assembly: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-8-atomic-shape-batch-2026-03-08.md`.
+- Downstream assembly retune report для `v2.15.9`, где после консультаций `Opus` и `Gemini` был протестирован deterministic routing вместо `plan_lead` и более строгий `assemble_lead / assemble_body` на тех же 6 кейсах: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-9-downstream-assembly-retune-2026-03-08.md`.
+- Screening grounding retune report для `v2.15.10`, где `screening_card` был отдельно добит до более честного критерия `coverage + groundedness audit`, чтобы не считать world-knowledge drift локальной победой: `docs/reports/smart-update-opus-gemma-event-copy-v2-15-10-screening-grounding-retune-2026-03-08.md`.
+- Канонический design brief для `v2.15.11`, который возвращает в экспериментальный event-copy pipeline baseline-aligned multi-source fact accumulation, narrative vs infoblock split и block-level layout planning: `docs/reports/smart-update-gemma-event-copy-v2-15-11-design-brief-2026-03-09.md`.
+- Канонический runtime-integration brief для `v2.16.1`, который переосмысляет ветку уже как встраивание atomic/pattern-driven win-ов в реальный Smart Update fact-first flow с source-by-source accumulation, event-level rebuild и multi-event source scoping: `docs/reports/smart-update-gemma-event-copy-v2-16-1-design-brief-2026-03-09.md`.
+- Первый duel dry-run `Smart Update vs Smart Update ice-cream` для `v2.16.1` на 6 реальных событиях с накопленными фактами, side-by-side baseline/ice-cream текстами и детерминированной диагностикой потерь: `docs/reports/smart-update-gemma-event-copy-v2-16-1-ice-cream-duel-2026-03-09.md`.
+- Synthesis первого консультационного раунда `Opus + Gemini` по `v2.16.1 ice-cream duel` с решением оставить baseline runtime нетронутым и переводить следующую итерацию в anti-hallucination micro-contract tuning: `docs/reports/smart-update-event-copy-v2-16-1-ice-cream-duel-consultation-synthesis-2026-03-09.md`.
+- Второй duel dry-run `v2.16.1 ice-cream iter2` со stage-profiled pipeline, безопасным structured assembly и покейсной локализацией failure-stage: `docs/reports/smart-update-gemma-event-copy-v2-16-1-ice-cream-duel-iter2-2026-03-09.md`.
+- Synthesis второго консультационного раунда по `v2.16.1 ice-cream iter2`: `Opus` подтвердил ценность stage-profiling и pinpoint prompt-contract fixes, `Gemini` дважды оказался недоступен из-за `429 MODEL_CAPACITY_EXHAUSTED`: `docs/reports/smart-update-event-copy-v2-16-1-ice-cream-duel-iter2-consultation-synthesis-2026-03-09.md`.
+- Третий duel dry-run `v2.16.1 ice-cream iter3` с anti-expansion tightening, shape-specific guardrails и полным подтверждением нового contract gap `audit_narrative_core -> final_audit`: `docs/reports/smart-update-gemma-event-copy-v2-16-1-ice-cream-duel-iter3-2026-03-09.md`.
+- Synthesis третьего консультационного раунда по `v2.16.1 ice-cream iter3`: `Opus` зафиксировал, что реальные blocking failures теперь сидят в modality/scope drift и что для `party_theme_program` / `theater_history` нужен уже structural generation mode, а не очередной narrative-tightening; `Gemini` single-launch report не вернул из-за provider `MODEL_CAPACITY_EXHAUSTED`: `docs/reports/smart-update-event-copy-v2-16-1-ice-cream-duel-iter3-consultation-synthesis-2026-03-09.md`.
+- Канонический design brief для `v2.16.2 lollipop`, который переводит эксперимент в funnel-архитектуру: versioned bank маленьких Gemma stage-prompts, select/merge стадии, baseline-aligned infoblock/list reuse и один финальный `4o` writer call: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-funnel-design-brief-2026-03-09.md`.
+- Salvage-matrix для `v2.16.2 lollipop`, где поздние удачные stage/prompt-версии из `2.15.5+` и `ice-cream` разложены по новым seed-family `lollipop` и по влиянию на quality bar: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-salvage-matrix-2026-03-09.md`.
+- Synthesis консультационного раунда по `v2.16.2 lollipop seed-bank`: `Opus` и `Gemini` сошлись на том, что extraction-bank уже силён, а composition-bank нужно уточнить через `hook seed`, two-tier merge, `facts.priority` и раннюю `writer.final_4o.spec`; pattern для `v1` сужен до structural signal/hint: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-seed-bank-consultation-synthesis-2026-03-09.md`.
+- Bootstrap stage-bank report для `v2.16.2 lollipop`, который фиксирует стартовый family order, casebook и machine-readable initial bank без hard routing в mainline: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-stage-bank-bootstrap-2026-03-09.md`.
+- Первый family bootstrap report для `v2.16.2 lollipop` по `facts.extract`, где собран стартовый candidate-bank, fit hypotheses по типам source/event и зафиксирован broad-run policy до любого merge/select: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-extract-bootstrap-2026-03-09.md`.
+- Первый реальный family lab report для `v2.16.2 lollipop` по `facts.extract`, где весь стартовый `12`-event casebook прогнан через `15` Gemma stage-candidates, сохранены pre-merge outputs и вручную выделены `priority_core / secondary_broad / specialized_keep` группы для следующего family-tuning раунда: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-extract-lab-2026-03-09.md`.
+- Evidence-pack для `v2.16.2 lollipop facts.extract`, который впервые даёт consultation-ready представление `source -> prompt -> raw output -> parsed result` по каждому stage-run и индексирует representative traces по ключевым stage: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-extract-evidence-pack-2026-03-09.md`.
+- Provenance-map для `v2.16.2 lollipop facts.extract`, который возвращает явную связь между текущими `facts.extract_*.v1` ids, `lollipop` slot/revision и историческими prompt/version источниками из `v2.15.x`: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-extract-provenance-map-2026-03-09.md`.
+- Consultation synthesis по `v2.16.2 lollipop facts.extract`, где `Opus` и `Gemini` уже оценили evidence-pack, сошлись на aggressive pruning и baseline-as-control, а итоговый shortlist сужен до `subject/card/agenda/support/performer/participation` + `stage.tightened` и спорного `theme`-challenger: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-extract-consultation-synthesis-2026-03-09.md`.
+- Первый реальный family lab для `v2.16.2 lollipop facts.dedup`, где extraction shortlist уже не rerun-ится, а проходит через новый `baseline_diff -> cross_enrich -> audit` pilot на `4` representative событиях с полным fact accounting: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-dedup-lab-2026-03-09.md`.
+- Consultation synthesis по `v2.16.2 lollipop facts.dedup`, где design-review `Opus` отверг global clustering, post-run `Opus` подтвердил правильность architecture, но оставил `facts.merge` в статусе `NO-GO` до retune `baseline_diff`; оба `Gemini` single-launch завершились provider `MODEL_CAPACITY_EXHAUSTED`: `docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-dedup-consultation-synthesis-2026-03-09.md`.

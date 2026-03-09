@@ -298,6 +298,92 @@ async def test_tg_monitoring_ignores_new_messages_without_events(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_tg_monitoring_ignores_existing_non_event_message_for_metrics(tmp_path, monkeypatch):
+    from models import TelegramScannedMessage
+
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+
+    async with db.get_session() as session:
+        src = TelegramSource(username="testchan", enabled=True)
+        session.add(src)
+        await session.commit()
+        await session.refresh(src)
+        session.add(
+            TelegramScannedMessage(
+                source_id=int(src.id),
+                message_id=10,
+                message_date=datetime.now(timezone.utc),
+                status="skipped",
+                events_extracted=0,
+                events_imported=0,
+            )
+        )
+        await session.commit()
+
+    results = {
+        "run_id": "r-existing-noevent",
+        "generated_at": generated_at,
+        "stats": {
+            "sources_total": 1,
+            "messages_scanned": 1,
+            "messages_with_events": 0,
+            "events_extracted": 0,
+        },
+        "messages": [
+            {
+                "source_username": "testchan",
+                "source_title": "Test Channel Title",
+                "message_id": 10,
+                "message_date": generated_at,
+                "source_link": "https://t.me/testchan/10",
+                "text": "Старый пост без событий",
+                "metrics": {"views": 100, "likes": 10},
+                "events": [],
+            }
+        ],
+    }
+    results_path = Path(tmp_path) / "telegram_results.json"
+    results_path.write_text(json.dumps(results, ensure_ascii=False), encoding="utf-8")
+
+    import source_parsing.telegram.handlers as tg_handlers
+
+    async def should_not_run(*_args, **_kwargs):
+        raise AssertionError("smart_event_update must not run for existing no-events message")
+
+    monkeypatch.setattr(tg_handlers, "smart_event_update", should_not_run)
+
+    progress_log: list[str] = []
+
+    async def capture_progress(progress) -> None:
+        progress_log.append(str(progress.stage))
+
+    report = await process_telegram_results(
+        results_path,
+        db,
+        bot=None,
+        progress_callback=capture_progress,
+    )
+
+    assert report.messages_metrics_only == 0
+    assert progress_log == []
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            """
+            SELECT COUNT(1)
+            FROM telegram_post_metric m
+            JOIN telegram_source src ON src.id = m.source_id
+            WHERE src.username=? AND m.message_id=?
+            """,
+            ("testchan", 10),
+        )
+        (cnt,) = await cur.fetchone()
+    assert int(cnt or 0) == 0
+
+
+@pytest.mark.asyncio
 async def test_tg_monitoring_schema_v2_persists_source_meta_and_keeps_manual_festival_series(tmp_path):
     db = main.Database(str(tmp_path / "db.sqlite"))
     await db.init()

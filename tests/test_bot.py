@@ -8003,6 +8003,35 @@ async def test_send_daily_records_last_daily_after_partial_failure(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_send_daily_forbidden_marks_last_daily(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            main.Channel(channel_id=1, title="ch", is_admin=True, daily_time="08:00")
+        )
+        await session.commit()
+
+    async def fake_build_daily_posts(db_obj, tz, now=None):
+        return [("only", None)]
+
+    monkeypatch.setattr(main, "build_daily_posts", fake_build_daily_posts)
+
+    class ForbiddenBot(DummyBot):
+        async def send_message(self, chat_id, text, **kwargs):
+            raise RuntimeError("Forbidden: bot was kicked from the channel chat")
+
+    bot = ForbiddenBot("123:abc")
+    sent = await main.send_daily_announcement(db, bot, 1, timezone.utc)
+    assert sent == 0
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, 1)
+    assert ch.last_daily == date.today().isoformat()
+
+
+@pytest.mark.asyncio
 async def test_daily_runtime_claim_prevents_duplicate_schedule():
     await main._daily_reset_runtime_state()
     day = "2026-03-06"

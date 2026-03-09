@@ -93,11 +93,24 @@
    - `messages_with_events = COUNT(*) WHERE events_extracted>0 OR events_imported>0`
    - `sources_with_events = COUNT(DISTINCT source_id) WHERE events_extracted>0 OR events_imported>0`
 
+Дополнительно `/general_stats` показывает итог Telegram monitoring по импортам из run-log:
+- `events_created` — сколько новых событий создал TG monitoring за окно отчёта;
+- `events_updated` — сколько существующих событий TG monitoring обновил/смерджил за окно отчёта.
+
+Эти числа берутся из `ops_run(kind='tg_monitoring').metrics_json`:
+- `events_created`
+- `events_merged` (в отчёте рендерится как `events_updated` для единообразия с остальными пайплайнами)
+
 ### 3.3. /parse (source parsing)
 
 8) **Сколько и во сколько было успешных запусков `/parse`** (Needs run log)  
 9) **Сколько он обработал источников, сколько новых событий дал каждый источник** (Needs run log)  
    Важно: показываем **все успешные запуски**, даже если `0` новых событий/`0` источников — это “health monitor”.
+
+Практическая деталь реализации:
+- `/general_stats` для `/parse` берёт `events_created/events_updated` из `ops_run.metrics_json`;
+- если старый `ops_run` сохранил эти поля как `0`, но в `details_json.sources` есть поисточниковые `new_events/updated_events`, отчёт делает fallback к сумме этих source-level счётчиков;
+- breakdown `/parse` рендерит оба значения: `new=` и `updated=`, чтобы ticket/status enrich не терялся в сводке.
 
 Примечание: “best-effort” можно восстановить по `event_source.imported_at` для `source_type` театральных источников, но это:
 - не даёт времена “запусков”
@@ -125,6 +138,17 @@
 14) **Из обновлённых — сколько имеет источников 2, 3, …** (Exact при наличии определения “обновлено”)  
     Источник: `event_source` → `sources_per_event = COUNT(*) GROUP BY event_id` и распределение по множеству обновлённых.
 
+Дополнительно `/general_stats` показывает coverage по источникам в двух срезах:
+- `source_share_period` — доля уникальных событий, которые были **созданы или обновлены** в окне отчёта, с разбивкой по `vk` / `telegram` / `/parse`;
+- `source_share_future_active` — доля всех **не-прошедших** событий (`date >= today` или `end_date >= today`, только `active`, без `silent`) с разбивкой по тем же группам.
+
+Группы источников:
+- `/parse` = `event_source.source_type LIKE 'parser:%'`
+- `telegram` = `event_source.source_type LIKE 'telegram%'` или legacy `tg`
+- `vk` = `event_source.source_type LIKE 'vk%'`
+
+Важно: это именно **coverage по event_id**, а не взаимоисключающее распределение. Одно событие может иметь несколько источников, поэтому суммы процентов могут быть больше `100%`.
+
 15) **Сколько событий было по неизвестным ранее городам/НП и каким** (Needs schema support)  
     Текущее состояние:
     - есть кэш `geo_city_region_cache(city_norm, …, updated_at)`
@@ -141,6 +165,11 @@
 
 16) **Сколько событий содержало упоминаний о фестивале и добавлено в фестивальную очередь** (Exact)  
     Источник: `festival_queue.created_at` (новые элементы очереди) + фильтрация по `festival_context` при необходимости.
+    
+    Дополнительно в `/general_stats` выводится **текущий snapshot очереди на момент отчёта**:
+    - `festival_queue_status_now` (`total/pending/running/done/error`);
+    - `festival_queue_active_now` (`pending + running`);
+    - `festival_queue_active_by_source_now` (разбивка backlog по `source_kind`: `vk/tg/url`).
 
 17) **Сколько и во сколько было успешных запусков разбора фестивальной очереди** (Needs run log)  
     Дополнительно (Exact, но не “по запускам”): можно показать, сколько элементов обработано и сколько успешно:
@@ -195,7 +224,7 @@
 - `/parse`: список источников + `new_added`/`updated`/`failed` по каждому
 - `/3di`: `events_considered`, `previews_rendered`, `duration_sec`
 - `festival_queue`: `limit`, `source_kind`, `processed/success/failed`, `duration_sec`
-- `tg_monitoring`: `sources_scanned`, `messages_processed`, `messages_with_events`, `events_imported`
+- `tg_monitoring`: `sources_scanned`, `messages_processed`, `messages_with_events`, `events_imported`, `events_created`, `events_merged`
 
 ## 6) Формат сообщения (рекомендация)
 
@@ -205,7 +234,7 @@
 2) VK (`vk_queue_added_period`, `vk_queue_parsed_period`, `vk_queue_unresolved_now` + автоимпорт метрики)  
 3) Telegram  
 4) `/parse` и `/3di` (список запусков с временем Kaliningrad)  
-5) События (created/updated + breakdown по кол-ву источников)  
+5) События (created/updated + breakdown по кол-ву источников + source coverage по `vk/telegram//parse` за окно и по текущему future inventory)  
 6) География (новые города)  
 7) Фестивали/очередь  
 8) Тех.метрики (Gemma, bucket size)

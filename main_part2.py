@@ -4198,6 +4198,26 @@ async def _daily_reset_runtime_state() -> None:
         _daily_sent_cache.clear()
 
 
+async def _record_daily_sent_date(
+    db: Database,
+    channel_id: int,
+    tz: timezone,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    try:
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "UPDATE channel SET last_daily=? WHERE channel_id=?",
+                ((now or datetime.now(tz)).date().isoformat(), channel_id),
+            )
+            await conn.commit()
+        return True
+    except Exception:
+        logging.exception("daily: failed to update last_daily for channel=%s", channel_id)
+        return False
+
+
 async def send_daily_announcement(
     db: Database,
     bot: Bot,
@@ -4234,6 +4254,8 @@ async def send_daily_announcement(
             msg = str(e).lower()
             if "chat not found" in msg or "forbidden" in msg:
                 logging.warning("daily send skipped for %s: %s", channel_id, e)
+                if record and now is None:
+                    await _record_daily_sent_date(db, channel_id, tz, now=now)
                 return sent
             logging.error("daily send failed for %s: %s", channel_id, e)
             if "message is too long" in str(e):
@@ -4242,15 +4264,7 @@ async def send_daily_announcement(
             break
     # 3) Отмечаем только если что-то реально ушло
     if record and now is None and sent > 0:
-        try:
-            async with db.raw_conn() as conn:
-                await conn.execute(
-                    "UPDATE channel SET last_daily=? WHERE channel_id=?",
-                    ((now or datetime.now(tz)).date().isoformat(), channel_id),
-                )
-                await conn.commit()
-        except Exception:
-            logging.exception("daily: failed to update last_daily for channel=%s", channel_id)
+        await _record_daily_sent_date(db, channel_id, tz, now=now)
     if pending_error and raise_on_error:
         raise pending_error
     return sent
@@ -16828,6 +16842,8 @@ def create_app() -> web.Application:
     dp.include_router(special_router)  # must be after db init
     from handlers.admin_assist_cmd import admin_assist_router
     dp.include_router(admin_assist_router)
+    from handlers.recent_imports_cmd import recent_imports_router
+    dp.include_router(recent_imports_router)
     from handlers.popular_posts_cmd import popular_posts_router
     dp.include_router(popular_posts_router)
     from handlers.telegraph_cache_cmd import telegraph_cache_router

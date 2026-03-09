@@ -1,5 +1,6 @@
 import re
 import html
+import unicodedata
 from datetime import datetime, timezone, timedelta, time, date
 from models import Event, Festival
 from digest_helper import (
@@ -92,6 +93,104 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     addr = re.sub(r"\s{2,}", " ", addr).strip()
     return addr
 
+
+def _normalize_location_fragment(part: str | None) -> str:
+    if not part:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(part))
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.casefold()
+
+
+def _contains_token_subsequence(
+    haystack: list[str], needle: list[str]
+) -> bool:
+    if not haystack or not needle or len(needle) > len(haystack):
+        return False
+    for idx in range(len(haystack) - len(needle) + 1):
+        if haystack[idx : idx + len(needle)] == needle:
+            return True
+    return False
+
+
+def _location_fragment_has_number(tokens: list[str]) -> bool:
+    return any(any(ch.isdigit() for ch in token) for token in tokens)
+
+
+def _location_name_already_contains_address(
+    location_name: str | None,
+    location_address: str | None,
+) -> bool:
+    name_norm = _normalize_location_fragment(location_name)
+    addr_norm = _normalize_location_fragment(location_address)
+    if not name_norm or not addr_norm:
+        return False
+    if addr_norm == name_norm:
+        return True
+    if len(addr_norm) >= 8 and addr_norm in name_norm:
+        return True
+
+    addr_tokens = addr_norm.split()
+    name_fragments = [str(location_name or "").strip()]
+    name_fragments.extend(
+        fragment.strip()
+        for fragment in str(location_name or "").split(",")
+        if fragment.strip()
+    )
+    for fragment in name_fragments:
+        fragment_norm = _normalize_location_fragment(fragment)
+        if not fragment_norm:
+            continue
+        if fragment_norm == addr_norm:
+            return True
+        if len(addr_norm) >= 8 and addr_norm in fragment_norm:
+            return True
+        fragment_tokens = fragment_norm.split()
+        shorter_tokens = fragment_tokens
+        longer_tokens = addr_tokens
+        if len(fragment_tokens) > len(addr_tokens):
+            shorter_tokens = addr_tokens
+            longer_tokens = fragment_tokens
+        if (
+            len(shorter_tokens) >= 2
+            and _location_fragment_has_number(shorter_tokens)
+            and _contains_token_subsequence(longer_tokens, shorter_tokens)
+        ):
+            return True
+    return False
+
+
+def _compose_event_location(
+    location_name: str | None,
+    location_address: str | None,
+    city: str | None,
+) -> str:
+    name = str(location_name or "").strip()
+    city_value = str(city or "").lstrip("#").strip()
+    address = str(location_address or "").strip()
+    if address and city_value:
+        address = strip_city_from_address(address, city_value) or ""
+
+    name_norm = _normalize_location_fragment(name)
+    address_norm = _normalize_location_fragment(address)
+    city_norm = _normalize_location_fragment(city_value)
+
+    parts: list[str] = []
+    if name:
+        parts.append(name)
+    if address and not _location_name_already_contains_address(name, address):
+        parts.append(address)
+    if city_value and city_norm and len(city_norm) >= 4:
+        if city_norm not in name_norm and city_norm not in address_norm:
+            parts.append(city_value)
+    elif city_value:
+        parts.append(city_value)
+
+    return ", ".join(part for part in parts if part)
+
+
 def format_event_md(
     e: Event,
     festival: Festival | None = None,
@@ -168,14 +267,11 @@ def format_event_md(
         if include_ics and ics:
             more_line += f" \U0001f4c5 [добавить в календарь]({ics})"
         lines.append(more_line)
-    loc = e.location_name or ""
-    addr = e.location_address
-    if addr and e.city:
-        addr = strip_city_from_address(addr, e.city)
-    if addr:
-        loc += f", {addr}"
-    if e.city:
-        loc += f", {e.city}"
+    loc = _compose_event_location(
+        e.location_name,
+        e.location_address,
+        e.city,
+    )
 
     date_part = ""
     if e.date:

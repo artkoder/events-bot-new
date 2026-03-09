@@ -1,0 +1,77 @@
+# Smart Update Gemma Event Copy V2.16.2 Lollipop Facts.Extract Evidence Pack
+
+Дата: 2026-03-09
+
+## 1. Что это
+
+- Это consultation-ready пакет для family `facts.extract`.
+- Для каждого stage-run теперь есть явный набор `input.json -> prompt.txt -> raw_output.txt -> result.json`.
+- Полный агрегированный packet: `artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09_consultation_packet.json`
+
+## 2. Как читать один stage-run
+
+- `input.json`: исходник для stage, включая `source_payload`, `source_excerpt`, `raw_facts` и metadata stage.
+- `prompt.txt`: точный prompt, отправленный в Gemma.
+- `raw_output.txt`: сырой ответ модели.
+- `result.json`: очищенный parsed result + metrics.
+
+## 3. Representative Links
+
+### `facts.extract_card.v1`
+
+- `2673`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_card.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_card.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_card.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_card.v1/result.json)
+- `2759`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_card.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_card.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_card.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_card.v1/result.json)
+
+### `facts.extract_theme.v1`
+
+- `2687`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_theme.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_theme.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_theme.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_theme.v1/result.json)
+- `2498`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2498/facts.extract_theme.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2498/facts.extract_theme.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2498/facts.extract_theme.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2498/facts.extract_theme.v1/result.json)
+
+### `facts.extract_subject.v1`
+
+- `2673`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_subject.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_subject.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_subject.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_subject.v1/result.json)
+- `2447`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_subject.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_subject.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_subject.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_subject.v1/result.json)
+
+### `facts.extract_concept.v1`
+
+- `2734`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_concept.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_concept.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_concept.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_concept.v1/result.json)
+- `2759`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_concept.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_concept.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_concept.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_concept.v1/result.json)
+
+### `facts.extract_identity.v1`
+
+- `2659`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_identity.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_identity.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_identity.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_identity.v1/result.json)
+- `2731`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2731/facts.extract_identity.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2731/facts.extract_identity.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2731/facts.extract_identity.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2731/facts.extract_identity.v1/result.json)
+
+### `facts.extract_cluster.v1`
+
+- `2687`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_cluster.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_cluster.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_cluster.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_cluster.v1/result.json)
+- `2759`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_cluster.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_cluster.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_cluster.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2759/facts.extract_cluster.v1/result.json)
+
+### `facts.extract_setlist.v1`
+
+- `2734`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_setlist.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_setlist.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_setlist.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2734/facts.extract_setlist.v1/result.json)
+- `2659`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_setlist.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_setlist.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_setlist.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_setlist.v1/result.json)
+
+### `facts.extract_program.v1`
+
+- `2747`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_program.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_program.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_program.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_program.v1/result.json)
+- `2687`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_program.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_program.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_program.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2687/facts.extract_program.v1/result.json)
+
+### `facts.extract_program_shape.v1`
+
+- `2447`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_program_shape.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_program_shape.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_program_shape.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2447/facts.extract_program_shape.v1/result.json)
+- `2732`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2732/facts.extract_program_shape.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2732/facts.extract_program_shape.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2732/facts.extract_program_shape.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2732/facts.extract_program_shape.v1/result.json)
+
+### `facts.extract_profiles.v1`
+
+- `2747`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_profiles.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_profiles.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_profiles.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2747/facts.extract_profiles.v1/result.json)
+- `2673`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_profiles.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_profiles.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_profiles.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2673/facts.extract_profiles.v1/result.json)
+
+### `facts.extract_participation.v1`
+
+- `2701`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2701/facts.extract_participation.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2701/facts.extract_participation.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2701/facts.extract_participation.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2701/facts.extract_participation.v1/result.json)
+- `2659`: [input](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_participation.v1/input.json) | [prompt](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_participation.v1/prompt.txt) | [raw](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_participation.v1/raw_output.txt) | [result](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09/2659/facts.extract_participation.v1/result.json)
+
+## 4. Full Trace Root
+
+- [trace root](/workspaces/events-bot-new/artifacts/codex/smart_update_lollipop_facts_extract_family_v2_16_2_2026-03-09)

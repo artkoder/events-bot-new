@@ -347,8 +347,9 @@ async def handle_tg_callback(callback: CallbackQuery):
         source_id = int(parts[2])
         adding_source_sessions[user_id] = f"loc:{source_id}:{_parse_int(3, 1)}"
         await callback.message.answer(
-            "📍 Пришлите default_location для источника (как будет сохраняться в событиях),\n"
-            "например: Научная библиотека\n"
+            "📍 Пришлите default_location для источника в формате `Место, адрес, город` или просто `Место`.\n"
+            "При импорте строка раскладывается по полям события (`location_name/location_address/city`).\n"
+            "Например: `Научная библиотека, Мира 9, Калининград`\n"
             "Чтобы очистить — отправьте `-`.\n"
             "Отмена: /cancel",
             parse_mode="Markdown",

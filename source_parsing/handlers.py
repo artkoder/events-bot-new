@@ -1952,11 +1952,14 @@ async def run_source_parsing(
         if log_handler:
             logging.getLogger().removeHandler(log_handler)
             log_handler.close()
+        total_created = sum(int(stats.new_added) for stats in (result.stats_by_source or {}).values())
+        total_updated = sum(int(stats.ticket_updated) for stats in (result.stats_by_source or {}).values())
         source_details = {
             source: {
                 "processed": int(stats.total_received),
                 "new_events": int(stats.new_added),
-                "updated_events": int(stats.ticket_updated + stats.already_exists),
+                "updated_events": int(stats.ticket_updated),
+                "already_exists": int(stats.already_exists),
                 "failed": int(stats.failed),
                 "skipped": int(stats.skipped),
             }
@@ -1969,8 +1972,8 @@ async def run_source_parsing(
             metrics={
                 "total_events": int(result.total_events or 0),
                 "sources_processed": int(len(result.stats_by_source or {})),
-                "events_created": int(len(result.added_events or [])),
-                "events_updated": int(len(result.updated_events or [])),
+                "events_created": int(total_created),
+                "events_updated": int(total_updated),
                 "errors_count": int(len(result.errors or [])),
                 "kernel_duration": round(float(result.kernel_duration or 0.0), 3),
                 "processing_duration": round(float(result.processing_duration or 0.0), 3),

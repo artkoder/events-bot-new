@@ -22,7 +22,21 @@ def test_location_normalisation_prefers_known_address_over_mismatched_known_venu
         "city": "Калининград",
     }
     main._normalise_event_location_from_reference(obj)
-    assert str(obj.get("location_name") or "").startswith("Библиотека Чехова,")
+    assert obj.get("location_name") == "Библиотека Чехова"
+    assert obj.get("location_address") == "Московский пр-кт 39"
+    assert obj.get("city") == "Калининград"
+
+
+def test_location_normalisation_splits_known_venue_into_structured_fields() -> None:
+    obj = {
+        "location_name": "Историко-художественный музей, Клиническая 21, Калининград",
+        "location_address": "Клиническая 21",
+        "city": "Калининград",
+    }
+    main._normalise_event_location_from_reference(obj)
+    assert obj.get("location_name") == "Историко-художественный музей"
+    assert obj.get("location_address") == "Клиническая 21"
+    assert obj.get("city") == "Калининград"
 
 
 def test_known_venue_matching_gumbinnen_is_in_gusev() -> None:

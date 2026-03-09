@@ -146,3 +146,82 @@ async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path)
         assert links["https://t.me/meowafisha/6823?single"].events[0].event_id == int(ev.id)
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_popular_posts_three_day_uses_latest_available_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("POST_POPULARITY_MIN_SAMPLE", "2")
+    monkeypatch.setattr(popular, "_utc_now_ts", lambda: 1_800_000_000)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    try:
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "INSERT INTO telegram_source(username, enabled) VALUES(?,1)",
+                ("late_snapshots",),
+            )
+            cur = await conn.execute(
+                "SELECT id FROM telegram_source WHERE username=? LIMIT 1",
+                ("late_snapshots",),
+            )
+            row = await cur.fetchone()
+            assert row and row[0]
+            source_id = int(row[0])
+            published_1 = 1_800_000_000 - 2 * 86400
+            published_2 = 1_800_000_000 - 86400
+            await conn.execute(
+                """
+                INSERT INTO telegram_scanned_message(
+                    source_id, message_id, status, events_extracted, events_imported
+                ) VALUES(?,?,?,?,?)
+                """,
+                (source_id, 101, "done", 1, 1),
+            )
+            await conn.execute(
+                """
+                INSERT INTO telegram_scanned_message(
+                    source_id, message_id, status, events_extracted, events_imported
+                ) VALUES(?,?,?,?,?)
+                """,
+                (source_id, 102, "done", 1, 1),
+            )
+            await conn.execute(
+                """
+                INSERT INTO telegram_post_metric(
+                    source_id, message_id, age_day, source_url, message_ts, collected_ts, views, likes
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (source_id, 101, 0, "https://t.me/late_snapshots/101", published_1, published_1 + 3600, 100, 10),
+            )
+            await conn.execute(
+                """
+                INSERT INTO telegram_post_metric(
+                    source_id, message_id, age_day, source_url, message_ts, collected_ts, views, likes
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (source_id, 101, 1, "https://t.me/late_snapshots/101", published_1, published_1 + 86400, 150, 15),
+            )
+            await conn.execute(
+                """
+                INSERT INTO telegram_post_metric(
+                    source_id, message_id, age_day, source_url, message_ts, collected_ts, views, likes
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (source_id, 102, 0, "https://t.me/late_snapshots/102", published_2, published_2 + 3600, 200, 20),
+            )
+            await conn.commit()
+
+        items, dbg = await _load_top_items(db, window_days=3, age_day=2, limit=10)
+
+        assert dbg["snapshot_mode"] == "latest_available"
+        assert dbg["tg_metrics_total"] == 2
+        assert dbg["tg_total"] == 2
+        assert len(items) == 1
+        assert items[0].platform == "tg"
+        assert items[0].post_id == 102
+        assert items[0].baseline.sample == 2
+        assert items[0].baseline.median_views == 175
+        assert items[0].baseline.median_likes == 17
+    finally:
+        await db.close()

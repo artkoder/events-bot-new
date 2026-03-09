@@ -127,6 +127,49 @@ def test_format_event_daily_limits_digest_to_16_words() -> None:
     assert len(words) <= 16
 
 
+def test_format_event_daily_dedupes_embedded_address_and_city() -> None:
+    event = make_event(
+        location_name="Научная библиотека, Мира 9, Калининград",
+        location_address="Мира 9, Калининград",
+        city="Калининград",
+    )
+
+    rendered = main.format_event_daily(event)
+
+    assert "Научная библиотека, Мира 9, Калининград" in rendered
+    assert "Мира 9, Калининград, Мира 9" not in rendered
+    assert "#Калининград" not in rendered
+    assert rendered.count("Мира 9") == 1
+
+
+def test_format_event_daily_drops_address_variant_if_name_already_has_it() -> None:
+    event = make_event(
+        location_name="Дом Семьи, Леонова 4, Калининград",
+        location_address="Космонавта Леонова 4",
+        city="Калининград",
+    )
+
+    rendered = main.format_event_daily(event)
+
+    assert "Дом Семьи, Леонова 4, Калининград" in rendered
+    assert "Космонавта Леонова 4" not in rendered
+    assert "#Калининград" not in rendered
+
+
+def test_format_event_md_dedupes_location_without_city_hashtag() -> None:
+    event = make_event(
+        location_name="Историко-художественный музей, Клиническая 21, Калининград",
+        location_address="Клиническая 21",
+        city="Калининград",
+    )
+
+    rendered = main.format_event_md(event, include_details=False)
+
+    assert "📍 Историко-художественный музей, Клиническая 21, Калининград" in rendered
+    assert rendered.count("Клиническая 21") == 1
+    assert "#Калининград" not in rendered
+
+
 def test_format_event_md_limits_digest_to_16_words() -> None:
     long_digest = " ".join(f"слово{i}" for i in range(1, 22))
     event = make_event(search_digest=long_digest, description="Полное описание события.")

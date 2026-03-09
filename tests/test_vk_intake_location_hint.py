@@ -61,6 +61,5 @@ async def test_vk_intake_injects_location_hint_into_llm_text(tmp_path, monkeypat
     )
 
     assert drafts
-    assert "локацию по умолчанию" in (captured.get("text") or "")
+    assert "Хинт по локации" in (captured.get("text") or "")
     assert "Дворец спорта «Юность»" in (captured.get("text") or "")
-

@@ -2237,6 +2237,29 @@ def _infer_city_from_location_string(text: str | None) -> str | None:
     return None
 
 
+def _split_location_string(text: str | None) -> tuple[str | None, str | None, str | None]:
+    raw = str(text or "").strip()
+    if not raw:
+        return None, None, None
+
+    city = _infer_city_from_location_string(raw)
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if city and parts:
+        last = _CITY_PREFIX_RE.sub("", parts[-1].lstrip("#").strip()).strip()
+        if _norm_space(last) == _norm_space(city):
+            parts = parts[:-1]
+
+    if not parts:
+        return raw, None, city
+
+    name = parts[0] or raw
+    address = ", ".join(parts[1:]).strip() if len(parts) > 1 else None
+    if address and city:
+        address = strip_city_from_address(address, city)
+        address = address.strip() or None
+    return name or None, address, city
+
+
 def _looks_like_bad_title(title: str | None) -> bool:
     raw = str(title or "").strip()
     if not raw:
@@ -2848,7 +2871,12 @@ def _build_candidate(
     time_raw = event_data.get("time") or ""
     end_date = event_data.get("end_date")
     extracted_location = event_data.get("location_name")
-    location_name = extracted_location or source.default_location
+    (
+        default_location_name,
+        default_location_address,
+        default_city,
+    ) = _split_location_string(source.default_location)
+    location_name = extracted_location or default_location_name or source.default_location
     location_address = event_data.get("location_address")
     extracted_location_address = location_address
     location_overridden_by_default = False
@@ -2862,13 +2890,18 @@ def _build_candidate(
             extracted_location,
             source.default_location,
         )
-        location_name = source.default_location
-        location_address = None
+        location_name = default_location_name or source.default_location
+        location_address = default_location_address
         location_overridden_by_default = True
+    elif not extracted_location and default_location_address:
+        if not location_address:
+            location_address = default_location_address
+        elif _location_matches(location_address, default_location_address):
+            location_address = default_location_address
     if not location_name and location_address:
         location_name, location_address = location_address, None
     extracted_city = event_data.get("city")
-    default_city = _infer_city_from_location_string(source.default_location)
+    default_city = default_city or _infer_city_from_location_string(source.default_location)
     city_overridden_by_default = False
     if not default_city and location_name and "," in str(location_name):
         # Best-effort: sometimes extractor puts "Venue, City" into location_name.
@@ -3679,11 +3712,18 @@ async def process_telegram_results(
 
         forced = await _is_force_message(db, source_id=int(source.id), message_id=int(message_id))
         existing = await _is_message_scanned(db, int(source.id), int(message_id))
+        existing_eventful = bool(
+            existing
+            and (
+                int(getattr(existing, "events_extracted", 0) or 0) > 0
+                or int(getattr(existing, "events_imported", 0) or 0) > 0
+            )
+        )
 
         # "Poster bridge" detection (before early-continue on no-events messages).
         message_dt = _parse_datetime(message.get("message_date"))
         bridge_target = None
-        if events_extracted <= 0 and (not forced) and (not existing):
+        if events_extracted <= 0 and (not forced) and (not existing_eventful):
             try:
                 posters_payload = message.get("posters") or []
                 has_posters = isinstance(posters_payload, list) and len(posters_payload) > 0
@@ -3764,7 +3804,7 @@ async def process_telegram_results(
         # Drop "no events + not forced + not previously scanned" early.
         # Kaggle may include such posts for completeness, but they are useless for server import
         # and would pollute popularity baselines if we stored metrics for them.
-        if events_extracted <= 0 and not forced and not existing and not bridge_target:
+        if events_extracted <= 0 and not forced and not existing_eventful and not bridge_target:
             continue
 
         processed_no += 1
@@ -4142,7 +4182,13 @@ async def process_telegram_results(
 
         # Metrics: persist only for posts that represent real event content (events/forced/existing).
         # Poster-bridge messages are non-event "attachments" and must not pollute popularity baselines.
-        if metrics and (events_extracted > 0 or forced or existing) and isinstance(message_id, int) and isinstance(age_day, int) and age_day >= 0:
+        if (
+            metrics
+            and (events_extracted > 0 or forced or existing_eventful)
+            and isinstance(message_id, int)
+            and isinstance(age_day, int)
+            and age_day >= 0
+        ):
             try:
                 views = metrics.get("views")
                 likes = metrics.get("likes")
@@ -4182,7 +4228,7 @@ async def process_telegram_results(
                     exc_info=True,
                 )
 
-        if existing and not forced:
+        if existing_eventful and not forced:
             report.messages_metrics_only += 1
             report.events_extracted_metrics_only += int(existing.events_extracted or 0)
             logger.info(
