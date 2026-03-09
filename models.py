@@ -617,6 +617,7 @@ class EventSource(SQLModel, table=True):
     __table_args__ = (
         Index("ix_event_source_event", "event_id"),
         Index("ix_event_source_type_url", "source_type", "source_url"),
+        Index("ix_event_source_imported_at", "imported_at"),
         UniqueConstraint("event_id", "source_url", name="ux_event_source_event_url"),
     )
 

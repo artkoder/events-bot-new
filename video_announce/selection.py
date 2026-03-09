@@ -1151,6 +1151,25 @@ def build_payload(
 
 
 def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
+    def _parse_event_day(raw: str | None) -> date | None:
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(str(raw).split("..", 1)[0])
+        except Exception:
+            return None
+
+    def _effective_intro_day(ev: Event, *, target_day: date | None) -> date | None:
+        start_day = _parse_event_day(getattr(ev, "date", None))
+        if start_day is None:
+            return None
+        if target_day is None or start_day >= target_day:
+            return start_day
+        end_day = _parse_event_day(getattr(ev, "end_date", None))
+        if end_day is not None and target_day <= end_day:
+            return target_day
+        return start_day
+
     def _poster_urls(ev: Event) -> list[str]:
         urls: list[str] = []
         seen: set[str] = set()
@@ -1198,6 +1217,7 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         else {}
     )
     schedule_map = selection_params.get("dedup_schedule")
+    target_day = _parse_event_day(selection_params.get("target_date"))
 
     # Simplified Intro Logic: Directly use stored value
     intro_text_override = (
@@ -1272,11 +1292,9 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     if payload.events:
         dates_list: list[date] = []
         for ev in payload.events:
-            try:
-                d = date.fromisoformat(ev.date.split("..", 1)[0])
-                dates_list.append(d)
-            except Exception:
-                pass
+            effective_day = _effective_intro_day(ev, target_day=target_day)
+            if effective_day is not None:
+                dates_list.append(effective_day)
         if dates_list:
             min_date = min(dates_list)
             max_date = max(dates_list)

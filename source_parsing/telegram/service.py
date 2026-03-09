@@ -204,6 +204,14 @@ TIMEOUT_PER_SOURCE_MINUTES = float(os.getenv("TG_MONITORING_TIMEOUT_PER_SOURCE_M
 TIMEOUT_SAFETY_MULTIPLIER = float(os.getenv("TG_MONITORING_TIMEOUT_SAFETY_MULTIPLIER", "1.3"))
 TIMEOUT_MAX_MINUTES = int(os.getenv("TG_MONITORING_TIMEOUT_MAX_MINUTES", "360"))
 KAGGLE_STARTUP_WAIT_SECONDS = int(os.getenv("TG_MONITORING_STARTUP_WAIT", "10"))
+KAGGLE_DATASET_BIND_WAIT_SECONDS = max(
+    5,
+    int(os.getenv("TG_MONITORING_DATASET_BIND_WAIT_SECONDS", "120")),
+)
+KAGGLE_DATASET_BIND_POLL_SECONDS = max(
+    2,
+    int(os.getenv("TG_MONITORING_DATASET_BIND_POLL_SECONDS", "10")),
+)
 MAX_TG_MESSAGE_LEN = int(os.getenv("TG_MONITORING_MAX_MESSAGE_LEN", "3800"))
 KEEP_FORCE_MESSAGE_IDS = (os.getenv("TG_MONITORING_KEEP_FORCE_MESSAGE_IDS") or "").strip().lower() in {
     "1",
@@ -736,6 +744,92 @@ async def _poll_kaggle_kernel(
     return "timeout", last_status, time.monotonic() - started
 
 
+async def _await_kernel_dataset_sources(
+    client: KaggleClient,
+    kernel_ref: str,
+    expected_sources: list[str],
+    *,
+    run_id: str | None = None,
+    timeout_seconds: int = KAGGLE_DATASET_BIND_WAIT_SECONDS,
+    poll_interval_seconds: int = KAGGLE_DATASET_BIND_POLL_SECONDS,
+    status_callback: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
+) -> dict:
+    expected_clean = [str(item).strip() for item in expected_sources if str(item).strip()]
+    if not expected_clean:
+        return {}
+
+    started = time.monotonic()
+    deadline = started + max(1, int(timeout_seconds))
+    last_meta: dict | None = None
+    last_error: str | None = None
+
+    async def _notify(status: dict | None) -> None:
+        if not status_callback:
+            return
+        try:
+            await status_callback("dataset_bind", kernel_ref, status)
+        except Exception:
+            logger.exception("tg_monitor: dataset-bind status callback failed")
+
+    while time.monotonic() < deadline:
+        try:
+            matched, meta = await asyncio.to_thread(
+                client.kernel_has_dataset_sources,
+                kernel_ref,
+                expected_clean,
+            )
+            last_meta = meta or {}
+            actual_sources = list(last_meta.get("dataset_sources") or [])
+            await _notify(
+                {
+                    "_expected_dataset_sources": expected_clean,
+                    "_actual_dataset_sources": actual_sources,
+                    "_dataset_bind_timeout_seconds": int(timeout_seconds),
+                    "_elapsed_seconds": time.monotonic() - started,
+                }
+            )
+            logger.info(
+                "tg_monitor.kernel_dataset_bind run_id=%s kernel_ref=%s matched=%s expected=%s actual=%s",
+                run_id,
+                kernel_ref,
+                matched,
+                expected_clean,
+                actual_sources,
+            )
+            if matched:
+                return last_meta
+            last_error = None
+        except Exception as exc:
+            last_error = str(exc) or exc.__class__.__name__
+            logger.warning(
+                "tg_monitor.kernel_dataset_bind_error run_id=%s kernel_ref=%s err=%s",
+                run_id,
+                kernel_ref,
+                last_error,
+            )
+            await _notify(
+                {
+                    "_expected_dataset_sources": expected_clean,
+                    "_dataset_bind_timeout_seconds": int(timeout_seconds),
+                    "_elapsed_seconds": time.monotonic() - started,
+                    "failureMessage": f"metadata check failed: {last_error}",
+                }
+            )
+        await asyncio.sleep(max(1, int(poll_interval_seconds)))
+
+    actual_sources = list((last_meta or {}).get("dataset_sources") or [])
+    details = (
+        f"expected={expected_clean} actual={actual_sources}"
+        if actual_sources
+        else f"expected={expected_clean}"
+    )
+    if last_error:
+        details = f"{details} last_error={last_error}"
+    raise RuntimeError(
+        f"Kaggle kernel metadata did not bind expected datasets in time ({details})"
+    )
+
+
 async def _cleanup_datasets(dataset_slugs: list[str]) -> None:
     if KEEP_DATASETS:
         logger.info("tg_monitor.datasets_kept slugs=%s", dataset_slugs)
@@ -1123,6 +1217,7 @@ def _format_kaggle_phase(phase: str) -> str:
     labels = {
         "prepare": "подготовка",
         "pushed": "запуск в Kaggle",
+        "dataset_bind": "подтверждение kernel metadata",
         "poll": "выполнение",
         "poll_error": "временная ошибка сети",
         "complete": "завершено",
@@ -1248,6 +1343,11 @@ def _format_kaggle_status_message(
     ]
     if status is not None:
         lines.append(f"Статус Kaggle: {_format_kaggle_status(status)}")
+        expected_sources = status.get("_expected_dataset_sources") if isinstance(status, dict) else None
+        actual_sources = status.get("_actual_dataset_sources") if isinstance(status, dict) else None
+        if expected_sources:
+            actual_txt = ", ".join(str(item) for item in (actual_sources or [])) or "—"
+            lines.append(f"Datasets: ожидаю {len(expected_sources)}, вижу {actual_txt}")
         timeout_minutes = status.get("_poll_timeout_minutes")
         elapsed_seconds = status.get("_elapsed_seconds")
         try:
@@ -2774,6 +2874,7 @@ async def _run_telegram_monitor_locked(
     client = KaggleClient()
     dataset_cipher = ""
     dataset_key = ""
+    expected_kernel_sources: list[str] = []
     try:
         dataset_cipher, dataset_key = await _prepare_kaggle_datasets(
             client=client,
@@ -2781,6 +2882,7 @@ async def _run_telegram_monitor_locked(
             secrets_payload=secrets_payload,
             run_id=run_id,
         )
+        expected_kernel_sources = [dataset_cipher, dataset_key]
         await _notify("🗄️ Kaggle datasets готовы, запускаю kernel…")
         logger.info(
             "tg_monitor.datasets created run_id=%s cipher=%s key=%s",
@@ -2804,6 +2906,13 @@ async def _run_telegram_monitor_locked(
             kernel_ref,
             [dataset_cipher, dataset_key],
         )
+        await _await_kernel_dataset_sources(
+            client,
+            kernel_ref,
+            expected_kernel_sources,
+            run_id=run_id,
+            status_callback=_update_kaggle_status,
+        )
         await asyncio.sleep(KAGGLE_STARTUP_WAIT_SECONDS)
 
         status, status_data, duration = await _poll_kaggle_kernel(
@@ -2819,6 +2928,15 @@ async def _run_telegram_monitor_locked(
             kernel_ref,
             status,
             duration,
+        )
+        await _await_kernel_dataset_sources(
+            client,
+            kernel_ref,
+            expected_kernel_sources,
+            run_id=run_id,
+            timeout_seconds=max(5, KAGGLE_DATASET_BIND_POLL_SECONDS),
+            poll_interval_seconds=max(2, KAGGLE_DATASET_BIND_POLL_SECONDS),
+            status_callback=_update_kaggle_status,
         )
         if status != "complete":
             failure = _extract_kaggle_failure_message(status_data)

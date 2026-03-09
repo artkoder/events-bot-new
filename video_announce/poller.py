@@ -51,6 +51,8 @@ def _read_positive_int(env_key: str, default: int) -> int:
 
 VIDEO_MAX_MB = _read_positive_int("VIDEO_MAX_MB", 50)
 VIDEO_KAGGLE_TIMEOUT_MINUTES = _read_positive_int("VIDEO_KAGGLE_TIMEOUT_MINUTES", 150)
+VIDEO_DATASET_BIND_WAIT_SECONDS = _read_positive_int("VIDEO_DATASET_BIND_WAIT_SECONDS", 120)
+VIDEO_DATASET_BIND_POLL_SECONDS = _read_positive_int("VIDEO_DATASET_BIND_POLL_SECONDS", 10)
 
 logger.info(
     "video_announce: limits configured max_video_mb=%s kaggle_timeout_min=%s",
@@ -242,6 +244,60 @@ def _format_kaggle_status(status: dict | None) -> str:
     if failure_msg:
         result += f" ({failure_msg})"
     return result
+
+
+async def await_kernel_dataset_binding(
+    client: KaggleClient,
+    kernel_ref: str,
+    *,
+    dataset_slug: str | None,
+    session_id: int | None = None,
+    timeout_seconds: int = VIDEO_DATASET_BIND_WAIT_SECONDS,
+    poll_interval_seconds: int = VIDEO_DATASET_BIND_POLL_SECONDS,
+) -> dict:
+    expected = [str(dataset_slug).strip()] if str(dataset_slug or "").strip() else []
+    if not expected:
+        return {}
+
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=max(1, int(timeout_seconds)))
+    last_meta: dict | None = None
+    last_error: str | None = None
+    while datetime.now(timezone.utc) < deadline:
+        try:
+            matched, meta = await asyncio.to_thread(
+                client.kernel_has_dataset_sources,
+                kernel_ref,
+                expected,
+            )
+            last_meta = meta or {}
+            logger.info(
+                "video_announce: kernel dataset bind session=%s kernel=%s matched=%s expected=%s actual=%s",
+                session_id,
+                kernel_ref,
+                matched,
+                expected,
+                list(last_meta.get("dataset_sources") or []),
+            )
+            if matched:
+                return last_meta
+            last_error = None
+        except Exception as exc:
+            last_error = str(exc) or exc.__class__.__name__
+            logger.warning(
+                "video_announce: kernel dataset bind check failed session=%s kernel=%s err=%s",
+                session_id,
+                kernel_ref,
+                last_error,
+            )
+        await asyncio.sleep(max(1, int(poll_interval_seconds)))
+
+    actual_sources = list((last_meta or {}).get("dataset_sources") or [])
+    details = f"expected={expected}"
+    if actual_sources:
+        details += f" actual={actual_sources}"
+    if last_error:
+        details += f" last_error={last_error}"
+    raise RuntimeError(f"kernel dataset binding was not confirmed ({details})")
 
 
 def _status_text(
@@ -645,6 +701,49 @@ async def run_kernel_poller(
             unknown_status_count = 0
         
         if state == "complete":
+            if dataset_slug:
+                try:
+                    await await_kernel_dataset_binding(
+                        client,
+                        kernel_ref,
+                        dataset_slug=dataset_slug,
+                        session_id=session_obj.id,
+                        timeout_seconds=max(5, poll_interval),
+                        poll_interval_seconds=max(2, min(poll_interval, VIDEO_DATASET_BIND_POLL_SECONDS)),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "video_announce: kernel complete but dataset binding mismatch session=%s kernel=%s err=%s",
+                        session_obj.id,
+                        kernel_ref,
+                        exc,
+                    )
+                    session_obj = await _update_status(
+                        db,
+                        session_obj.id,
+                        status=VideoAnnounceSessionStatus.FAILED,
+                        error=f"kernel superseded before output download: {exc}",
+                    )
+                    if not session_obj:
+                        return
+                    await update_status_message(
+                        bot,
+                        session_obj,
+                        status,
+                        chat_id=status_chat_id,
+                        message_id=status_message_id,
+                        allow_send=True,
+                        note="Kernel был перепривязан к другому dataset",
+                    )
+                    await bot.send_message(
+                        notify_chat_id,
+                        (
+                            f"⚠️ Сессия #{session_obj.id}: kernel больше не привязан к dataset "
+                            f"{dataset_slug}. Похоже, другой запуск перезаписал notebook."
+                        ),
+                    )
+                    await _cleanup_dataset(client, dataset_slug)
+                    return
             break
         if state in {"error", "failed"}:
             failure_msg = status.get("failureMessage") or status.get("failure_message") or ""
