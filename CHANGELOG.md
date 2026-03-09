@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- **Admin Reports / Recent Imports UI**: `/recent_imports` rows now start with `id`, then show a compact status icon (`✅` created, `🔄` updated), and only then the Telegraph-linked title, reducing visual noise in long source reports.
 - **General Stats / Telegram Source Shares**: `/general_stats` now shows Telegram `events_created/events_updated` from `tg_monitoring` run logs and adds source-share coverage blocks for `vk` / `telegram` / `/parse` both for events touched in the report window and for the current active future inventory; shares are event-level coverage and may overlap for multisource events.
 - **CrumpleVideo / `/v`**: Intro date range for long-running events (`ярмарка`/events with `end_date`) now clamps to the selected target window instead of leaking the historical start date into tomorrow-mode payloads.
 - **CrumpleVideo / Poster Overlay**: Notebook overlay placement now scans the full poster for low-text zones, keeps fact-only overlays compact, and avoids styling the first line as a large title when the overlay only adds date/location facts.

@@ -27,6 +27,10 @@ _SOURCE_LABELS: tuple[tuple[str, str], ...] = (
     ("vk", "VK"),
     ("parse", "/parse"),
 )
+_STATUS_ICONS = {
+    "created": "✅",
+    "updated": "🔄",
+}
 
 
 @dataclass(slots=True, frozen=True)
@@ -222,14 +226,14 @@ def _render_pages(
             body_lines.append("—")
             body_lines.append("")
             continue
-        for idx, row in enumerate(rows, start=1):
-            label = "создано" if row.status == "created" else "обновлено"
+        for row in rows:
+            status_icon = _STATUS_ICONS.get(row.status, "•")
             title = html.escape(row.title)
             if row.telegraph_url:
                 title_part = f'<a href="{html.escape(row.telegraph_url)}">{title}</a>'
             else:
                 title_part = title
-            body_lines.append(f"{idx}. {title_part} (id={row.event_id}, {label})")
+            body_lines.append(f"id={row.event_id} {status_icon} {title_part}")
         body_lines.append("")
 
     while body_lines and not body_lines[-1].strip():
