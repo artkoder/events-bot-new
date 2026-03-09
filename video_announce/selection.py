@@ -67,6 +67,8 @@ def _format_fair_time(value: str | None) -> str | None:
 
 
 def _build_fair_schedule_text(ev: Event) -> str | None:
+    if bool(getattr(ev, "end_date_is_inferred", False)):
+        return None
     raw_end = getattr(ev, "end_date", None)
     if not raw_end:
         return None
@@ -409,6 +411,10 @@ async def fetch_candidates(
                         Event.event_type == "ярмарка",
                         Event.end_date.is_not(None),
                         Event.end_date >= today_iso,
+                        or_(
+                            Event.end_date_is_inferred.is_(False),
+                            Event.end_date_is_inferred.is_(None),
+                        ),
                         Event.date <= fallback_iso,
                     ),
                 )
@@ -1163,6 +1169,8 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         start_day = _parse_event_day(getattr(ev, "date", None))
         if start_day is None:
             return None
+        if bool(getattr(ev, "end_date_is_inferred", False)):
+            return start_day
         if target_day is None or start_day >= target_day:
             return start_day
         end_day = _parse_event_day(getattr(ev, "end_date", None))
