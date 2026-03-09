@@ -2765,6 +2765,11 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": "/recent_imports [hours]",
+        "desc": "List events created or updated from Telegram, VK, and /parse for the last N hours (default 24)",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/status [job_id]",
         "desc": "Show uptime and job status",
         "roles": {"superadmin"},
@@ -5453,6 +5458,114 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     addr = re.sub(r"(?i)^\s*(?:ул\.?|улица)\s+", "", addr).strip()
     addr = re.sub(r"\s{2,}", " ", addr).strip()
     return addr
+
+
+def _normalize_location_fragment(part: str | None) -> str:
+    if not part:
+        return ""
+    normalized = unicodedata.normalize("NFKC", str(part))
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.casefold()
+
+
+def _contains_token_subsequence(
+    haystack: Sequence[str], needle: Sequence[str]
+) -> bool:
+    if not haystack or not needle or len(needle) > len(haystack):
+        return False
+    haystack_items = list(haystack)
+    needle_items = list(needle)
+    for idx in range(len(haystack_items) - len(needle_items) + 1):
+        if haystack_items[idx : idx + len(needle_items)] == needle_items:
+            return True
+    return False
+
+
+def _location_fragment_has_number(tokens: Sequence[str]) -> bool:
+    return any(any(ch.isdigit() for ch in token) for token in tokens)
+
+
+def _location_name_already_contains_address(
+    location_name: str | None,
+    location_address: str | None,
+) -> bool:
+    name_norm = _normalize_location_fragment(location_name)
+    addr_norm = _normalize_location_fragment(location_address)
+    if not name_norm or not addr_norm:
+        return False
+    if addr_norm == name_norm:
+        return True
+    if len(addr_norm) >= 8 and addr_norm in name_norm:
+        return True
+
+    addr_tokens = addr_norm.split()
+    name_fragments = [str(location_name or "").strip()]
+    name_fragments.extend(
+        fragment.strip()
+        for fragment in str(location_name or "").split(",")
+        if fragment.strip()
+    )
+    for fragment in name_fragments:
+        fragment_norm = _normalize_location_fragment(fragment)
+        if not fragment_norm:
+            continue
+        if fragment_norm == addr_norm:
+            return True
+        if len(addr_norm) >= 8 and addr_norm in fragment_norm:
+            return True
+        fragment_tokens = fragment_norm.split()
+        shorter_tokens = fragment_tokens
+        longer_tokens = addr_tokens
+        if len(fragment_tokens) > len(addr_tokens):
+            shorter_tokens = addr_tokens
+            longer_tokens = fragment_tokens
+        if (
+            len(shorter_tokens) >= 2
+            and _location_fragment_has_number(shorter_tokens)
+            and _contains_token_subsequence(longer_tokens, shorter_tokens)
+        ):
+            return True
+    return False
+
+
+def _compose_event_location(
+    location_name: str | None,
+    location_address: str | None,
+    city: str | None,
+    *,
+    city_hashtag: bool,
+) -> str:
+    name = str(location_name or "").strip()
+    city_value = str(city or "").lstrip("#").strip()
+    address = str(location_address or "").strip()
+    if address and city_value:
+        address = strip_city_from_address(address, city_value) or ""
+
+    name_norm = _normalize_location_fragment(name)
+    address_norm = _normalize_location_fragment(address)
+    city_norm = _normalize_location_fragment(city_value)
+
+    parts: list[str] = []
+    if name:
+        parts.append(name)
+    if address and not _location_name_already_contains_address(name, address):
+        parts.append(address)
+
+    drop_city = False
+    if city_value:
+        if city_norm and len(city_norm) >= 4:
+            drop_city = city_norm in name_norm or city_norm in address_norm
+        if not drop_city and re.search(
+            r"(?i)\b(ул\.?|улица|просп\.?|пр-т|проспект|дом|д\.|корп\.?|корпус|кв\.?|\d)\b",
+            city_value,
+        ):
+            drop_city = True
+    if city_value and not drop_city:
+        parts.append(f"#{city_value}" if city_hashtag else city_value)
+
+    return ", ".join(part for part in parts if part)
 
 
 def normalize_event_type(
@@ -8403,7 +8516,7 @@ def _normalise_event_location_from_reference(event_obj: dict[str, Any]) -> None:
     if venue is None:
         return
 
-    event_obj["location_name"] = venue.canonical_line
+    event_obj["location_name"] = venue.name
     if venue.address:
         if (not addr_raw) or (_normalize_address_key(addr_raw, city=raw_city) == _normalize_address_key(venue.address, city=venue.city or raw_city)):
             event_obj["location_address"] = venue.address
@@ -8650,7 +8763,9 @@ async def _parse_event_via_gemma(
     full_prompt = (
         prompt
         + "\n\n"
-        + "Return ONLY valid JSON. No explanations. No markdown.\n\n"
+        + "Return ONLY JSON: either a JSON array of events or a JSON object with an `events` array.\n"
+        + "If the text is only an intro for attached posters/cards and the concrete event details are not present in the text itself, return [] as a valid empty JSON array.\n"
+        + "CRITICAL: No comments. No markdown. No trailing commas. No text outside JSON.\n\n"
         + user_msg
     )
     model = (os.getenv("EVENT_PARSE_GEMMA_MODEL", "gemma-3-27b-it") or "").strip() or "gemma-3-27b-it"
@@ -8683,7 +8798,9 @@ async def _parse_event_via_gemma(
         # Best-effort repair attempt (Gemma may occasionally emit a trailing comma / commentary).
         repair_prompt = (
             "Your previous answer was NOT valid JSON.\n"
-            "Return ONLY corrected JSON. No markdown. No explanations.\n"
+            "Return ONLY corrected JSON: either a JSON array of events or a JSON object with an `events` array.\n"
+            "If the source text itself has no concrete event details and only points to posters/cards/images, return [] as a valid empty JSON array.\n"
+            "No markdown. No explanations. No comments. No trailing commas. No text outside JSON.\n"
             "Do NOT change the meaning or drop fields; only fix formatting so it parses.\n\n"
             "Original input:\n"
             + (text or "")[:7000]
@@ -8699,6 +8816,37 @@ async def _parse_event_via_gemma(
         data = _event_parse_extract_json(raw2 or "")
     if data is None:
         logging.error("Invalid JSON from Gemma parse: %s", (raw or "")[:2000])
+        if (os.getenv("FOUR_O_TOKEN") or "").strip():
+            try:
+                await notify_llm_incident(
+                    "event_parse_gemma_fallback_4o",
+                    {
+                        "severity": "warning",
+                        "consumer": "event_parse",
+                        "requested_model": model,
+                        "model": model,
+                        "attempt_no": 2,
+                        "max_retries": 2,
+                        "next_model": "gpt-4o",
+                        "message": "Gemma parse JSON failed after repair; switching to 4o",
+                        "error": "bad gemma parse response",
+                    },
+                )
+            except Exception:
+                logging.exception("event_parse: failed to notify fallback incident")
+            try:
+                return await _parse_event_via_4o(
+                    text,
+                    source_channel,
+                    festival_names=festival_names,
+                    festival_alias_pairs=festival_alias_pairs,
+                    poster_texts=poster_texts,
+                    poster_summary=poster_summary,
+                    **extra,
+                )
+            except Exception:
+                logging.exception("event_parse: 4o fallback failed after gemma parse JSON error")
+                raise
         raise RuntimeError("bad gemma parse response")
     return _event_parse_normalize_parsed_events(data)
 
@@ -18117,14 +18265,12 @@ def format_event_md(
         if include_ics and ics:
             more_line += f" \U0001f4c5 [добавить в календарь]({ics})"
         lines.append(more_line)
-    loc = e.location_name
-    addr = e.location_address
-    if addr and e.city:
-        addr = strip_city_from_address(addr, e.city)
-    if addr:
-        loc += f", {addr}"
-    if e.city:
-        loc += f", {e.city}"
+    loc = _compose_event_location(
+        e.location_name,
+        e.location_address,
+        e.city,
+        city_hashtag=False,
+    )
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -18247,14 +18393,12 @@ def format_event_vk(
 
     # details link already appended to description above
 
-    loc = e.location_name
-    addr = e.location_address
-    if addr and e.city:
-        addr = strip_city_from_address(addr, e.city)
-    if addr:
-        loc += f", {addr}"
-    if e.city:
-        loc += f", #{e.city}"
+    loc = _compose_event_location(
+        e.location_name,
+        e.location_address,
+        e.city,
+        city_hashtag=True,
+    )
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -18267,7 +18411,8 @@ def format_event_vk(
     else:
         day_fmt = day
     lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
-    lines.append(loc)
+    if loc:
+        lines.append(loc)
 
     return "\n".join(lines)
 
@@ -18412,14 +18557,13 @@ def format_event_daily(
         if price:
             lines.append(f"Билеты {price}")
 
-    loc = html.escape(e.location_name)
-    addr = e.location_address
-    if addr and e.city:
-        addr = strip_city_from_address(addr, e.city)
-    if addr:
-        loc += f", {html.escape(addr)}"
-    if e.city:
-        loc += f", #{html.escape(e.city)}"
+    loc = _compose_event_location(
+        e.location_name,
+        e.location_address,
+        e.city,
+        city_hashtag=True,
+    )
+    loc_html = html.escape(loc) if loc else ""
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -18431,7 +18575,12 @@ def format_event_daily(
         day_fmt = f'<a href="{html.escape(weekend_url)}">{day}</a>'
     else:
         day_fmt = day
-    lines.append(f"<i>{day_fmt} {e.time} {loc}</i>")
+    location_line_parts = [day_fmt]
+    if e.time:
+        location_line_parts.append(e.time)
+    if loc_html:
+        location_line_parts.append(loc_html)
+    lines.append(f"<i>{' '.join(location_line_parts)}</i>")
 
     return "\n".join(lines)
 
@@ -18510,14 +18659,12 @@ def format_exhibition_md(e: Event) -> str:
         cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""
         lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
-    loc = e.location_name
-    addr = e.location_address
-    if addr and e.city:
-        addr = strip_city_from_address(addr, e.city)
-    if addr:
-        loc += f", {addr}"
-    if e.city:
-        loc += f", #{e.city}"
+    loc = _compose_event_location(
+        e.location_name,
+        e.location_address,
+        e.city,
+        city_hashtag=False,
+    )
     if e.end_date:
         end_part = e.end_date.split("..", 1)[0]
         d_end = parse_iso_date(end_part)
@@ -18526,7 +18673,10 @@ def format_exhibition_md(e: Event) -> str:
         else:
             logging.error("Invalid end date: %s", e.end_date)
             end = e.end_date
-        lines.append(f"_по {end}, {loc}_")
+        if loc:
+            lines.append(f"_по {end}, {loc}_")
+        else:
+            lines.append(f"_по {end}_")
     return "\n".join(lines)
 
 
