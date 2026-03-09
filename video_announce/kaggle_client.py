@@ -234,6 +234,42 @@ class KaggleClient:
         api = self._get_api()
         api.kernels_pull(kernel_ref, path=str(path), metadata=metadata)
 
+    def get_kernel_metadata(self, kernel_ref: str) -> dict:
+        if kernel_ref.startswith(LOCAL_KERNEL_PREFIX):
+            folder_name = kernel_ref[len(LOCAL_KERNEL_PREFIX):]
+            meta_path = KERNELS_ROOT_PATH / folder_name / "kernel-metadata.json"
+            if not meta_path.exists():
+                raise FileNotFoundError(f"kernel-metadata.json not found for {kernel_ref}")
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            self.kernels_pull(kernel_ref, tmp_path, metadata=True)
+            meta_candidates = sorted(tmp_path.rglob("kernel-metadata.json"))
+            if not meta_candidates:
+                raise FileNotFoundError(
+                    f"kernel-metadata.json not found after pulling {kernel_ref}"
+                )
+            return json.loads(meta_candidates[0].read_text(encoding="utf-8"))
+
+    def kernel_has_dataset_sources(
+        self,
+        kernel_ref: str,
+        expected_sources: Iterable[str],
+    ) -> tuple[bool, dict]:
+        meta = self.get_kernel_metadata(kernel_ref)
+        actual_sources = {
+            str(item).strip().lower()
+            for item in (meta.get("dataset_sources") or [])
+            if str(item).strip()
+        }
+        expected = {
+            str(item).strip().lower()
+            for item in expected_sources
+            if str(item).strip()
+        }
+        return expected.issubset(actual_sources), meta
+
     def deploy_kernel_update(self, kernel_ref: str, dataset_slug: str) -> str:
         """Deploy kernel with dataset sources updated.
         

@@ -521,6 +521,9 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_source_type_url ON event_source(source_type, source_url)"
             )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_source_imported_at ON event_source(imported_at)"
+            )
             # Smart Update часто проверяет идемпотентность по `source_url` без знания `event_id`.
             # Индексы (event_id, source_url) и (source_type, source_url) не ускоряют такой lookup,
             # поэтому держим отдельный индекс по source_url.

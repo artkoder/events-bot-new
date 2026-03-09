@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GENERAL_STATS_TZ = "Europe/Kaliningrad"
 _MB = 1024 * 1024
+_SOURCE_SHARE_BUCKETS: tuple[tuple[str, str, str], ...] = (
+    ("parse", "/parse", "es.source_type LIKE 'parser:%'"),
+    ("telegram", "telegram", "(es.source_type LIKE 'telegram%' OR es.source_type = 'tg')"),
+    ("vk", "vk", "es.source_type LIKE 'vk%'"),
+)
 
 
 @dataclass(slots=True)
@@ -213,6 +218,20 @@ def _sum_run_metric(runs: Sequence[Mapping[str, Any]], metric_key: str) -> int:
     return int(total)
 
 
+def _sum_run_metric_first(runs: Sequence[Mapping[str, Any]], metric_keys: Sequence[str]) -> int:
+    total = 0
+    keys = [str(key) for key in metric_keys if str(key).strip()]
+    for run in runs:
+        metrics = run.get("metrics")
+        if not isinstance(metrics, Mapping):
+            continue
+        for key in keys:
+            if key in metrics:
+                total += _parse_int(metrics.get(key))
+                break
+    return int(total)
+
+
 def _extract_city_example(details: Mapping[str, Any]) -> str | None:
     raw = details.get("raw")
     if not isinstance(raw, str):
@@ -221,6 +240,106 @@ def _extract_city_example(details: Mapping[str, Any]) -> str | None:
     if len(text) > 80:
         text = text[:79].rstrip() + "…"
     return text or None
+
+
+def _percent_int(part: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return int((float(part) * 100.0 / float(total)) + 0.5)
+
+
+async def _collect_source_share_metrics(
+    conn,
+    *,
+    start_raw: str,
+    end_raw: str,
+    today_iso: str,
+) -> dict[str, Any]:
+    period_total = await _fetch_int(
+        conn,
+        """
+        WITH touched_events AS (
+            SELECT e.id AS event_id
+            FROM event e
+            WHERE datetime(e.added_at) >= datetime(?) AND datetime(e.added_at) < datetime(?)
+            UNION
+            SELECT DISTINCT es.event_id
+            FROM event_source es
+            JOIN event e ON e.id = es.event_id
+            WHERE datetime(es.imported_at) >= datetime(?) AND datetime(es.imported_at) < datetime(?)
+              AND datetime(e.added_at) < datetime(?)
+        )
+        SELECT COUNT(*) FROM touched_events
+        """,
+        (start_raw, end_raw, start_raw, end_raw, start_raw),
+    )
+
+    future_total = await _fetch_int(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM event e
+        WHERE COALESCE(e.silent, 0) = 0
+          AND COALESCE(NULLIF(TRIM(e.lifecycle_status), ''), 'active') = 'active'
+          AND COALESCE(NULLIF(TRIM(e.end_date), ''), e.date) >= ?
+        """,
+        (today_iso,),
+    )
+
+    period_by_source: dict[str, dict[str, Any]] = {}
+    future_by_source: dict[str, dict[str, Any]] = {}
+    for key, label, source_condition in _SOURCE_SHARE_BUCKETS:
+        period_count = await _fetch_int(
+            conn,
+            f"""
+            WITH touched_events AS (
+                SELECT DISTINCT e.id AS event_id
+                FROM event e
+                JOIN event_source es ON es.event_id = e.id
+                WHERE datetime(e.added_at) >= datetime(?) AND datetime(e.added_at) < datetime(?)
+                  AND ({source_condition})
+                UNION
+                SELECT DISTINCT es.event_id
+                FROM event_source es
+                JOIN event e ON e.id = es.event_id
+                WHERE datetime(es.imported_at) >= datetime(?) AND datetime(es.imported_at) < datetime(?)
+                  AND datetime(e.added_at) < datetime(?)
+                  AND ({source_condition})
+            )
+            SELECT COUNT(*) FROM touched_events
+            """,
+            (start_raw, end_raw, start_raw, end_raw, start_raw),
+        )
+        future_count = await _fetch_int(
+            conn,
+            f"""
+            SELECT COUNT(DISTINCT e.id)
+            FROM event e
+            JOIN event_source es ON es.event_id = e.id
+            WHERE COALESCE(e.silent, 0) = 0
+              AND COALESCE(NULLIF(TRIM(e.lifecycle_status), ''), 'active') = 'active'
+              AND COALESCE(NULLIF(TRIM(e.end_date), ''), e.date) >= ?
+              AND ({source_condition})
+            """,
+            (today_iso,),
+        )
+        period_by_source[key] = {
+            "label": label,
+            "count": period_count,
+            "percent": _percent_int(period_count, period_total),
+        }
+        future_by_source[key] = {
+            "label": label,
+            "count": future_count,
+            "percent": _percent_int(future_count, future_total),
+        }
+
+    return {
+        "period_total_events": period_total,
+        "period_by_source": period_by_source,
+        "future_total_events": future_total,
+        "future_by_source": future_by_source,
+    }
 
 
 async def _collect_gemma_requests_count(
@@ -487,6 +606,7 @@ async def collect_general_stats(
     window = _build_window(tz_name=tz_value, now=now)
     start_raw = _utc_sql(window.start_utc)
     end_raw = _utc_sql(window.end_utc)
+    today_local_iso = window.end_local.date().isoformat()
 
     metrics: dict[str, Any] = {}
 
@@ -644,6 +764,12 @@ async def collect_general_stats(
             """,
             (start_raw, end_raw),
         )
+        source_share_metrics = await _collect_source_share_metrics(
+            conn,
+            start_raw=start_raw,
+            end_raw=end_raw,
+            today_iso=today_local_iso,
+        )
 
     vk_runs = await _fetch_ops_runs(db, kind="vk_auto_import", start_utc=window.start_utc, end_utc=window.end_utc)
     vk_queue_parsed = _sum_run_metric(vk_runs, "inbox_processed")
@@ -689,6 +815,8 @@ async def collect_general_stats(
         "sources_scanned": tg_sources_scanned,
         "messages_with_events": tg_messages_with_events,
         "sources_with_events": tg_sources_with_events,
+        "events_created": _sum_run_metric(tg_monitor_runs, "events_created"),
+        "events_updated": _sum_run_metric_first(tg_monitor_runs, ("events_updated", "events_merged")),
         "tg_monitoring_runs": tg_monitor_runs,
     }
     metrics["parse"] = {
@@ -702,6 +830,7 @@ async def collect_general_stats(
         "events_created": events_created,
         "events_updated": events_updated,
         "updated_sources_distribution": updated_distribution,
+        "source_share": source_share_metrics,
     }
     metrics["geo"] = {
         "new_cities_count": len(new_cities),
@@ -724,7 +853,7 @@ def _format_run_lines(
     runs: Sequence[Mapping[str, Any]],
     *,
     tz: ZoneInfo,
-    metric_keys: Sequence[str],
+    metric_keys: Sequence[str | tuple[str, Sequence[str]]],
     limit: int = 8,
 ) -> list[str]:
     if not runs:
@@ -758,11 +887,45 @@ def _format_run_lines(
                 parts.append(f"took={took_sec / 60.0:.1f}m")
             else:
                 parts.append(f"took={took_sec:.0f}s")
-        for key in metric_keys:
-            if key in metrics_map:
-                parts.append(f"{key}={_parse_int(metrics_map.get(key))}")
+        for spec in metric_keys:
+            if isinstance(spec, tuple):
+                label = str(spec[0] or "").strip()
+                keys = tuple(str(key) for key in (spec[1] or ()) if str(key).strip())
+            else:
+                label = str(spec or "").strip()
+                keys = (label,) if label else ()
+            if not label or not keys:
+                continue
+            for key in keys:
+                if key in metrics_map:
+                    parts.append(f"{label}={_parse_int(metrics_map.get(key))}")
+                    break
         out.append(" ".join(parts))
     return out
+
+
+def _format_source_share_lines(
+    payload: Mapping[str, Any] | None,
+    *,
+    total_key: str,
+    items_key: str,
+    line_label: str,
+) -> list[str]:
+    data = payload if isinstance(payload, Mapping) else {}
+    total = _parse_int(data.get(total_key))
+    lines = [f"- {line_label}: total_events={total}"]
+    items = data.get(items_key)
+    if not isinstance(items, Mapping) or not items:
+        lines.append("  - нет данных")
+        return lines
+    for source_key, label, _condition in _SOURCE_SHARE_BUCKETS:
+        item = items.get(source_key)
+        item_map = item if isinstance(item, Mapping) else {}
+        source_label = str(item_map.get("label") or label)
+        count = _parse_int(item_map.get("count"))
+        percent = _parse_int(item_map.get("percent"))
+        lines.append(f"  - {source_label}: {percent}% ({count}/{total})")
+    return lines
 
 
 def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
@@ -806,6 +969,8 @@ def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
             f"- sources_scanned: {_parse_int(tg.get('sources_scanned'))}",
             f"- messages_with_events: {_parse_int(tg.get('messages_with_events'))}",
             f"- sources_with_events: {_parse_int(tg.get('sources_with_events'))}",
+            f"- events_created: {_parse_int(tg.get('events_created'))}",
+            f"- events_updated: {_parse_int(tg.get('events_updated'))}",
             "- tg_monitoring runs:",
         ]
     )
@@ -813,7 +978,13 @@ def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
         _format_run_lines(
             tg.get("tg_monitoring_runs") or [],
             tz=tz,
-            metric_keys=("sources_scanned", "messages_processed", "messages_with_events"),
+            metric_keys=(
+                "sources_scanned",
+                "messages_processed",
+                "messages_with_events",
+                "events_created",
+                ("events_updated", ("events_updated", "events_merged")),
+            ),
         )
     )
 
@@ -856,6 +1027,26 @@ def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
     if isinstance(distribution, Mapping) and distribution:
         dist_parts = [f"{k}src={_parse_int(v)}" for k, v in sorted(distribution.items(), key=lambda item: int(item[0]))]
         lines.append(f"- updated_distribution: {', '.join(dist_parts)}")
+    source_share = events.get("source_share") or {}
+    if isinstance(source_share, Mapping):
+        lines.extend(
+            _format_source_share_lines(
+                source_share,
+                total_key="period_total_events",
+                items_key="period_by_source",
+                line_label="source_share_period",
+            )
+        )
+        lines.extend(
+            _format_source_share_lines(
+                source_share,
+                total_key="future_total_events",
+                items_key="future_by_source",
+                line_label="source_share_future_active",
+            )
+        )
+        if _parse_int(source_share.get("period_total_events")) > 0 or _parse_int(source_share.get("future_total_events")) > 0:
+            lines.append("- source_share_note: проценты могут пересекаться, одно событие может иметь несколько источников")
 
     lines.extend(
         [
