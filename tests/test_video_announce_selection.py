@@ -46,6 +46,40 @@ async def test_fetch_candidates_includes_fair_and_schedule_text(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fetch_candidates_skips_fair_with_inferred_end_date_before_target(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        inferred_fair = Event(
+            title="Weekend Fair",
+            description="d",
+            source_text="Каждую субботу ярмарка",
+            date="2026-01-03",
+            end_date="2026-02-03",
+            end_date_is_inferred=True,
+            time="08:00..15:00",
+            location_name="Market",
+            event_type="ярмарка",
+            photo_urls=["http://example.com/a.jpg"],
+            photo_count=1,
+        )
+        session.add(inferred_fair)
+        await session.commit()
+        await session.refresh(inferred_fair)
+        fair_id = inferred_fair.id
+
+    ctx = SelectionContext(
+        tz=timezone.utc,
+        target_date=date(2026, 1, 10),
+    )
+    events, schedule_map, _ = await selection.fetch_candidates(db, ctx)
+
+    assert all(e.id != fair_id for e in events)
+    assert fair_id not in schedule_map
+
+
+@pytest.mark.asyncio
 async def test_build_selection_random_order_requires_poster_ocr(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
