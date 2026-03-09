@@ -130,6 +130,11 @@ Guidelines:
   into events unless there is a concrete attendable event with explicit date + venue (and preferably time).
   If it's an initiative description with a program "запланировано/включает в себя" but without a specific event entry,
   return no events.
+- Do NOT create events out of giveaway/contest posts where a match, concert, or other event is mentioned only as the prize
+  ("разыгрываем билеты на ...", "главный приз — два билета ..."). If the post is mainly giveaway mechanics/results and
+  does not separately announce the attendable event itself, return no events.
+- If the text is only an intro for attached posters/cards/images (e.g. "листайте афиши", "смотрите карточки") and the
+  concrete event details are not present in the text itself, return no events instead of guessing from the wrapper text.
 - Do NOT treat administrative deadlines as event dates. If the only date in the text is a "до <date>" deadline
   (e.g. "подать заявку до 16 февраля", "утвердят до 1 марта") and there is no attendable event with date+venue,
   return no events.

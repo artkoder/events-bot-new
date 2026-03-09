@@ -69,6 +69,21 @@ _VK_PARSE_PREFILTER_ADMIN_RE = re.compile(
     r")\b",
     re.I | re.U,
 )
+_VK_PARSE_GIVEAWAY_RE = re.compile(
+    r"\b(розыгрыш|разыгрыва\w*|розыгра\w*|выигра\w*|конкурс|giveaway)\b",
+    re.I | re.U,
+)
+_VK_PARSE_GIVEAWAY_TICKETS_RE = re.compile(
+    r"\b(билет\w*|пригласительн\w*|абонемент\w*)\b",
+    re.I | re.U,
+)
+_VK_PARSE_GIVEAWAY_MECHANICS_RE = re.compile(
+    r"\b("
+    r"услови\w*|участв\w*|подпиш\w*|репост\w*|коммент\w*|"
+    r"отмет\w*|лайк\w*|победител\w*|итог\w*|приз\w*"
+    r")\b",
+    re.I | re.U,
+)
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -79,6 +94,24 @@ def _read_int_env(name: str, default: int) -> int:
         return int(raw)
     except Exception:
         return default
+
+
+def _vk_parse_should_add_giveaway_prize_hint(
+    text: str,
+    *,
+    poster_texts: Sequence[str] | None = None,
+) -> bool:
+    combined_parts: list[str] = [text or ""]
+    for block in list(poster_texts or [])[:2]:
+        if isinstance(block, str) and block.strip():
+            combined_parts.append(block)
+    combined = "\n".join(part for part in combined_parts if part and part.strip())
+    if not combined:
+        return False
+    norm = unicodedata.normalize("NFKC", combined).casefold().replace("ё", "е")
+    if not (_VK_PARSE_GIVEAWAY_RE.search(norm) and _VK_PARSE_GIVEAWAY_TICKETS_RE.search(norm)):
+        return False
+    return bool(_VK_PARSE_GIVEAWAY_MECHANICS_RE.search(norm))
 
 
 def _normalize_prompt_ocr_block(text: str) -> str:
@@ -1390,6 +1423,13 @@ async def build_event_drafts_from_vk(
             )
     except Exception:
         pass
+    if _vk_parse_should_add_giveaway_prize_hint(text, poster_texts=poster_texts):
+        llm_text += (
+            "\nЕсли это розыгрыш/конкурс и мероприятие упомянуто только как приз "
+            "(например билеты на матч/концерт), не создавай событие и верни `[]`. "
+            "Извлекай событие только если пост отдельно описывает само посещаемое "
+            "мероприятие, а не только механику розыгрыша."
+        )
     if location_hint:
         hint_clean = str(location_hint).strip()
         if hint_clean:
