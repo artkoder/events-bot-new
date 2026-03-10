@@ -11,7 +11,7 @@
 
 - Архитектура: `docs/architecture/overview.md`
 - Эксплуатация: `docs/operations/` (как запускать/поддерживать)
-- LLM: `docs/llm/` (промпты, формат запросов, классификатор тем)
+- LLM: `docs/llm/` (промпты, формат запросов, классификатор тем, `Smart Update lollipop` funnel map, `Smart Update lollipop` casebook)
 - Справочники: `docs/reference/` (локации, праздники, шаблоны)
 - Пайплайны/парсеры (каноника): `docs/features/source-parsing/` (в `docs/pipelines/` остаются redirect‑stub’ы для старых ссылок)
 - Фичи: `docs/features/`

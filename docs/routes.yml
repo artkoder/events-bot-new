@@ -24,6 +24,9 @@ sections:
     admin_actions: docs/llm/admin-actions.md
     request_guide: docs/llm/request-guide.md
     topics: docs/llm/topics.md
+    smart_update_lollipop_funnel: docs/llm/smart-update-lollipop-funnel.md
+    smart_update_lollipop_casebook: docs/llm/smart-update-lollipop-casebook.md
+    smart_update_lollipop_mixed_phase_prompts: docs/llm/smart-update-lollipop-mixed-phase-prompts.md
   reference:
     locations: docs/reference/locations.md
     location_flags: docs/reference/location-flags.md
@@ -51,6 +54,25 @@ sections:
       - docs/backlog/linear/EVE-55-gemma-integration.md
   reports:
     index: docs/reports/README.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_mixed_phase_series_post_consultation_synthesis_2026_03_10: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-mixed-phase-series-post-consultation-synthesis-2026-03-10.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_prioritize_lab_iter2_2026_03_10: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-prioritize-lab-iter2-2026-03-10.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_prioritize_evidence_pack_2026_03_10: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-prioritize-evidence-pack-2026-03-10.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_downstream_prompt_pack_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-downstream-prompt-pack-consultation-synthesis-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_evidence_pack_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-evidence-pack-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_lab_iter1_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-lab-iter1-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_iter1_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-iter1-consultation-synthesis-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_lab_iter2_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-lab-iter2-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_resolve_iter2_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-resolve-iter2-consultation-synthesis-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_lab_iter3_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-lab-iter3-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_linkage_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-linkage-consultation-synthesis-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_lab_iter4_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-lab-iter4-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_lab_iter5_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-lab-iter5-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_link_songlist_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-link-songlist-consultation-synthesis-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_merge_lab_iter6_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-merge-lab-iter6-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_dedup_lab_iter2_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-dedup-lab-iter2-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_dedup_iter2_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-dedup-iter2-consultation-synthesis-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_dedup_lab_iter3_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-dedup-lab-iter3-2026-03-09.md
+    smart_update_gemma_event_copy_v2_16_2_lollipop_family_facts_dedup_iter3_consultation_synthesis_2026_03_09: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-facts-dedup-iter3-consultation-synthesis-2026-03-09.md
   tools:
     index: docs/tools/README.md
     codex_cli: docs/tools/codex-cli.md
