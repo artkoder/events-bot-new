@@ -576,7 +576,7 @@ async def _load_top_items(
             sample=sample,
         )
 
-    # Build candidates: strictly above median on both metrics.
+    # Build candidates: strictly above median on at least one metric.
     candidates: list[_PostItem] = []
     skipped: dict[str, Any] = {
         "tg_available": bool(tg_ready),
@@ -632,7 +632,7 @@ async def _load_top_items(
             skipped["above_median_likes"] += 1
         if is_above_views and is_above_likes:
             skipped["above_median_both"] += 1
-        if not (is_above_views and is_above_likes):
+        if not (is_above_views or is_above_likes):
             skipped["skipped_not_above_median"] += 1
             return
         popularity = ""
@@ -809,7 +809,7 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
                 )
 
         if not items:
-            lines.append("Нет постов, которые выше медианы и имеют достаточную выборку для расчёта.")
+            lines.append("Нет постов, которые выше хотя бы одной из медиан и имеют достаточную выборку для расчёта.")
             if not bool(dbg.get("tg_available", True)):
                 lines.append("Платформа TG: таблицы метрик не найдены (возможен DB_INIT_MINIMAL или старый дамп).")
             if not bool(dbg.get("vk_available", True)):
@@ -872,7 +872,7 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
 
     lines: list[str] = [
         "📊 <b>Популярные посты → события</b>",
-        "Фильтр: views и likes строго выше медиан внутри канала/сообщества; медианы считаются по окну и платформе отдельно.",
+        "Фильтр: views или likes строго выше медианы внутри канала/сообщества; медианы считаются по окну и платформе отдельно.",
         "Примечание: метрики пишутся только для постов, где были извлечены события (events_extracted>0/forced/existing); отчёт ниже дополнительно требует импортов (events_imported>0).",
         "",
         "Окно 3 суток: берём снапшоты метрик <b>age_day=2</b> (посты опубликованы ~2–3 суток назад; метрики накопились за ~3 дня).",
