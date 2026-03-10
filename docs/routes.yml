@@ -24,12 +24,6 @@ sections:
     admin_actions: docs/llm/admin-actions.md
     request_guide: docs/llm/request-guide.md
     topics: docs/llm/topics.md
-    smart_update_lollipop_funnel: docs/llm/smart-update-lollipop-funnel.md
-    smart_update_lollipop_casebook: docs/llm/smart-update-lollipop-casebook.md
-    smart_update_lollipop_mixed_phase_prompts: docs/llm/smart-update-lollipop-mixed-phase-prompts.md
-    smart_update_lollipop_editorial_layout_prompts: docs/llm/smart-update-lollipop-editorial-layout-prompts.md
-    smart_update_lollipop_writer_pack_prompts: docs/llm/smart-update-lollipop-writer-pack-prompts.md
-    smart_update_lollipop_writer_final_prompts: docs/llm/smart-update-lollipop-writer-final-prompts.md
   reference:
     locations: docs/reference/locations.md
     location_flags: docs/reference/location-flags.md
@@ -57,27 +51,6 @@ sections:
       - docs/backlog/linear/EVE-55-gemma-integration.md
   reports:
     index: docs/reports/README.md
-    smart_update_lollipop_mixed_phase_series_post_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-mixed-phase-series-post-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_mixed_phase_interceptor_lab: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-mixed-phase-interceptor-lab-2026-03-10.md
-    smart_update_lollipop_editorial_layout_plan_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-editorial-layout-plan-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_editorial_layout_lab_iter1: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-editorial-layout-lab-iter1-2026-03-10.md
-    smart_update_lollipop_editorial_layout_lab_iter2: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-editorial-layout-lab-iter2-2026-03-10.md
-    smart_update_lollipop_editorial_layout_evidence_pack: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-editorial-layout-evidence-pack-2026-03-10.md
-    smart_update_lollipop_editorial_layout_postrun_gemini_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-editorial-layout-postrun-gemini-synthesis-2026-03-10.md
-    smart_update_lollipop_writer_pack_compose_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-writer-pack-compose-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_writer_pack_compose_lab_iter1: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-pack-compose-lab-iter1-2026-03-10.md
-    smart_update_lollipop_writer_pack_compose_lab_iter2: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-pack-compose-lab-iter2-2026-03-10.md
-    smart_update_lollipop_writer_pack_compose_evidence_pack: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-pack-compose-evidence-pack-2026-03-10.md
-    smart_update_lollipop_writer_pack_compose_postrun_gemini_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-pack-compose-postrun-gemini-synthesis-2026-03-10.md
-    smart_update_lollipop_writer_final_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-writer-final-4o-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_writer_final_lab_iter1: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-final-4o-lab-iter1-2026-03-10.md
-    smart_update_lollipop_writer_final_lab_iter2: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-final-4o-lab-iter2-2026-03-10.md
-    smart_update_lollipop_writer_final_evidence_pack: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-final-4o-evidence-pack-2026-03-10.md
-    smart_update_lollipop_writer_final_postrun_gemini_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-family-writer-final-4o-postrun-gemini-synthesis-2026-03-10.md
-    smart_update_lollipop_writer_retune_iter2_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-writer-retune-iter2-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_writer_retune_iter3_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-writer-retune-iter3-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_quality_compliance_and_split_consultation_synthesis: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-quality-compliance-and-split-consultation-synthesis-2026-03-10.md
-    smart_update_lollipop_pipeline_profiling: docs/reports/smart-update-gemma-event-copy-v2-16-2-lollipop-pipeline-profiling-2026-03-10.md
   tools:
     index: docs/tools/README.md
     codex_cli: docs/tools/codex-cli.md
