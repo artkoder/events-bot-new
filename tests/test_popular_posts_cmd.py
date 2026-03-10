@@ -160,12 +160,12 @@ async def test_popular_posts_includes_post_above_only_one_median(tmp_path, monke
                 (101, "club101", "Club 101"),
             )
             await conn.execute(
-                "INSERT INTO vk_inbox(id, group_id, post_id, source_url, status) VALUES(?, ?, ?, ?, ?)",
-                (1, 101, 1001, "https://vk.com/wall-101_1001", "imported"),
+                "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (1, 101, 1001, 2_000_000_000, "post 1001", 1, "imported"),
             )
             await conn.execute(
-                "INSERT INTO vk_inbox(id, group_id, post_id, source_url, status) VALUES(?, ?, ?, ?, ?)",
-                (2, 101, 1002, "https://vk.com/wall-101_1002", "imported"),
+                "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (2, 101, 1002, 2_000_000_010, "post 1002", 1, "imported"),
             )
             await conn.execute(
                 "INSERT INTO vk_inbox_import_event(id, inbox_id, event_id, created_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP)",
