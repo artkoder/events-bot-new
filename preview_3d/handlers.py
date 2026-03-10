@@ -7,9 +7,11 @@ import html
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -18,11 +20,12 @@ from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from db import Database
+from kaggle_registry import register_job, remove_job, list_jobs
 from models import Event, MonthPage, User
 from ops_run import finish_ops_run, start_ops_run
+from source_parsing.telegram.split_secrets import encrypt_secret
 from sqlmodel import select
 from video_announce.kaggle_client import KaggleClient, KERNELS_ROOT_PATH
-from kaggle_registry import register_job, remove_job, list_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,15 @@ KAGGLE_DATASET_SLUG_PREFIX = "preview3d"
 KAGGLE_POLL_INTERVAL_SECONDS = 20
 KAGGLE_TIMEOUT_SECONDS = 4 * 60 * 60  # 4 hours for CPU fallback scenarios
 KAGGLE_STARTUP_WAIT_SECONDS = 10
-KAGGLE_DATASET_WAIT_SECONDS = 15
+KAGGLE_DATASET_WAIT_SECONDS = int(os.getenv("PREVIEW3D_DATASET_WAIT", "30"))
+CONFIG_DATASET_CIPHER = "preview3d-runtime-cipher"
+CONFIG_DATASET_KEY = "preview3d-runtime-key"
+KEEP_DATASETS = (os.getenv("PREVIEW3D_KEEP_DATASETS") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Store active sessions (in production, use DB)
 _active_sessions: dict[int, dict] = {}
@@ -61,6 +72,184 @@ STATUS_LABELS = {
     "done": "готово",
     "error": "ошибка",
 }
+
+
+def _read_env_file_value(key: str) -> str | None:
+    path = Path(".env")
+    if not path.exists():
+        return None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            if name.strip() == key:
+                return value.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _get_env_value(key: str) -> str:
+    value = (os.getenv(key) or "").strip()
+    if value:
+        return value
+    return (_read_env_file_value(key) or "").strip()
+
+
+def _require_env_value(key: str, *, aliases: tuple[str, ...] = ()) -> str:
+    for candidate in (key, *aliases):
+        value = _get_env_value(candidate)
+        if value:
+            return value
+    alias_text = ", ".join(aliases)
+    if alias_text:
+        raise RuntimeError(f"{key} is missing (checked aliases: {alias_text})")
+    raise RuntimeError(f"{key} is missing")
+
+
+def _slugify(value: str, *, max_len: int = 60) -> str:
+    raw = (value or "").strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", "-", raw)
+    raw = raw.strip("-")
+    if not raw:
+        raw = uuid.uuid4().hex[:8]
+    if len(raw) > max_len:
+        raw = raw[:max_len].rstrip("-")
+    return raw
+
+
+def _build_dataset_slug(prefix: str, run_id: str) -> str:
+    safe_prefix = _slugify(prefix, max_len=40)
+    safe_run = _slugify(run_id, max_len=16)
+    slug = f"{safe_prefix}-{safe_run}" if safe_run else safe_prefix
+    return slug[:60].rstrip("-")
+
+
+def _create_dataset(
+    client: KaggleClient,
+    username: str,
+    slug_suffix: str,
+    title: str,
+    writer,
+) -> str:
+    slug = f"{username}/{slug_suffix}"
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        writer(tmp_path)
+        metadata = {
+            "title": title,
+            "id": slug,
+            "licenses": [{"name": "CC0-1.0"}],
+        }
+        (tmp_path / "dataset-metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            client.create_dataset(tmp_path)
+        except Exception:
+            logger.exception("preview3d.dataset_create_failed retry=version dataset=%s", slug)
+            try:
+                client.create_dataset_version(
+                    tmp_path,
+                    version_notes=f"refresh {slug_suffix}",
+                    quiet=True,
+                    convert_to_csv=False,
+                    dir_mode="zip",
+                )
+                return slug
+            except Exception:
+                logger.exception(
+                    "preview3d.dataset_version_failed retry=delete dataset=%s", slug
+                )
+            try:
+                client.delete_dataset(slug, no_confirm=True)
+            except Exception:
+                logger.exception("preview3d.dataset_delete_failed dataset=%s", slug)
+            client.create_dataset(tmp_path)
+    return slug
+
+
+def _build_preview3d_runtime_config_payload() -> dict[str, object]:
+    media_bucket = (
+        _get_env_value("SUPABASE_MEDIA_BUCKET")
+        or _get_env_value("SUPABASE_BUCKET")
+        or "events-ics"
+    ).strip()
+    preview_prefix = (_get_env_value("SUPABASE_PREVIEW3D_PREFIX") or "p3d").strip().strip("/")
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "env": {
+            "SUPABASE_MEDIA_BUCKET": media_bucket,
+            "SUPABASE_PREVIEW3D_PREFIX": preview_prefix or "p3d",
+        },
+    }
+
+
+def _build_preview3d_runtime_secrets_payload() -> str:
+    supabase_url = _require_env_value("SUPABASE_URL")
+    supabase_key = _require_env_value("SUPABASE_SERVICE_KEY", aliases=("SUPABASE_KEY",))
+    payload = {
+        "SUPABASE_URL": supabase_url,
+        "SUPABASE_SERVICE_KEY": supabase_key,
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def _prepare_preview3d_runtime_datasets(
+    *,
+    client: KaggleClient,
+    run_id: str,
+) -> tuple[str, str]:
+    config_payload = _build_preview3d_runtime_config_payload()
+    secrets_payload = _build_preview3d_runtime_secrets_payload()
+    encrypted, fernet_key = encrypt_secret(secrets_payload)
+    username = _require_kaggle_username()
+    slug_suffix = _slugify(run_id, max_len=16)
+
+    def write_cipher(path: Path) -> None:
+        (path / "config.json").write_text(
+            json.dumps(config_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (path / "secrets.enc").write_bytes(encrypted)
+
+    def write_key(path: Path) -> None:
+        (path / "fernet.key").write_bytes(fernet_key)
+
+    slug_cipher = await asyncio.to_thread(
+        _create_dataset,
+        client,
+        username,
+        _build_dataset_slug(CONFIG_DATASET_CIPHER, slug_suffix),
+        f"Preview3D Cipher {slug_suffix}",
+        write_cipher,
+    )
+    slug_key = await asyncio.to_thread(
+        _create_dataset,
+        client,
+        username,
+        _build_dataset_slug(CONFIG_DATASET_KEY, slug_suffix),
+        f"Preview3D Key {slug_suffix}",
+        write_key,
+    )
+    return slug_cipher, slug_key
+
+
+async def _cleanup_preview3d_datasets(dataset_slugs: list[str]) -> None:
+    if KEEP_DATASETS:
+        logger.info("preview3d.datasets_kept slugs=%s", dataset_slugs)
+        return
+    client = KaggleClient()
+    for slug in dataset_slugs:
+        if not slug:
+            continue
+        try:
+            await asyncio.to_thread(client.delete_dataset, slug, no_confirm=True)
+        except Exception:
+            logger.exception("preview3d.dataset_delete_failed slug=%s", slug)
 
 
 async def _is_authorized(db: Database, user_id: int) -> bool:
@@ -308,6 +497,12 @@ async def resume_preview3d_jobs(
         if not kernel_ref or kernel_ref in _preview3d_recovery_active:
             continue
         _preview3d_recovery_active.add(kernel_ref)
+        meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+        dataset_slugs = [
+            str(slug).strip()
+            for slug in (meta.get("dataset_slugs") or [])
+            if str(slug).strip()
+        ]
         try:
             try:
                 status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
@@ -315,12 +510,13 @@ async def resume_preview3d_jobs(
                 logger.exception("3di_recovery: status fetch failed kernel=%s", kernel_ref)
                 continue
             state = str(status.get("status") or "").lower()
-            meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
             owner_pid = meta.get("pid")
             if owner_pid == os.getpid():
                 continue
             if state in {"error", "failed", "cancelled"}:
                 await remove_job("preview3d", kernel_ref)
+                if dataset_slugs:
+                    await _cleanup_preview3d_datasets(dataset_slugs)
                 if notify_chat_id and bot:
                     await bot.send_message(
                         notify_chat_id,
@@ -373,6 +569,8 @@ async def resume_preview3d_jobs(
                     for event in updated_events:
                         await schedule_tasks(db, event, skip_vk_sync=True)
             await remove_job("preview3d", kernel_ref)
+            if dataset_slugs:
+                await _cleanup_preview3d_datasets(dataset_slugs)
             recovered += 1
             if notify_chat_id and bot:
                 await bot.send_message(
@@ -395,7 +593,7 @@ def _build_main_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🌐 All missing", callback_data=f"3di:all_missing{suffix}")],
         [InlineKeyboardButton(text="⚡️ Сгенерировать (текущий мес)", callback_data=f"3di:new{suffix}")],
         [InlineKeyboardButton(text="🔄 Перегенерировать все", callback_data=f"3di:all{suffix}")],
-        [InlineKeyboardButton(text="📅 Выбрать месяц", callback_data=f"3di:month_select{suffix}")],
+        [InlineKeyboardButton(text="📅 Выбрать месяц (без превью)", callback_data=f"3di:month_select{suffix}")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -522,35 +720,26 @@ async def _create_preview3d_dataset(payload: dict, session_id: int) -> str:
     return dataset_id
 
 
-async def _push_preview3d_kernel(client: KaggleClient, dataset_id: str) -> str:
+async def _push_preview3d_kernel(
+    client: KaggleClient,
+    dataset_sources: list[str],
+) -> str:
     kernel_path = KERNELS_ROOT_PATH / KAGGLE_KERNEL_FOLDER
     if not kernel_path.exists():
         raise FileNotFoundError(f"Kernel folder not found: {kernel_path}")
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        for item in kernel_path.iterdir():
-            dest = tmp_path / item.name
-            if item.is_dir():
-                shutil.copytree(item, dest)
-            else:
-                shutil.copy2(item, dest)
-        meta_path = tmp_path / "kernel-metadata.json"
-        meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
-        slug = meta_data.get("slug") or "preview-3d"
-        username = os.getenv("KAGGLE_USERNAME")
-        if username:
-            meta_data["id"] = f"{username}/{slug}"
-            meta_data["slug"] = slug
-            meta_data["title"] = meta_data.get("title") or "Preview 3D"
-        meta_data["dataset_sources"] = [dataset_id]
-        meta_data["enable_internet"] = True
-        meta_path.write_text(
-            json.dumps(meta_data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        api = client._get_api()
-        await asyncio.to_thread(api.kernels_push, str(tmp_path))
+    meta_path = kernel_path / "kernel-metadata.json"
+    meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+    slug = meta_data.get("slug") or "preview-3d"
+    username = (os.getenv("KAGGLE_USERNAME") or "").strip()
+    if username:
+        kernel_ref = f"{username}/{slug}"
+    else:
         kernel_ref = str(meta_data.get("id") or meta_data.get("slug") or slug)
+    await asyncio.to_thread(
+        client.push_kernel,
+        kernel_path=kernel_path,
+        dataset_sources=list(dataset_sources),
+    )
     await asyncio.sleep(KAGGLE_STARTUP_WAIT_SECONDS)
     return kernel_ref
 
@@ -652,6 +841,7 @@ async def _run_kaggle_render(
     message_id = session.get("message_id")
     kernel_ref = ""
     registered = False
+    dataset_slugs: list[str] = []
     try:
         year = month.split("-")[0]
         month_number = int(month.split("-")[1])
@@ -690,6 +880,7 @@ async def _run_kaggle_render(
             )
             dataset_id = await _create_preview3d_dataset(payload, session_id)
             session["kaggle_dataset"] = dataset_id
+            dataset_slugs = [dataset_id]
             await _set_session_status(
                 session_id, "dataset_wait", bot=bot, chat_id=chat_id, message_id=message_id
             )
@@ -698,7 +889,16 @@ async def _run_kaggle_render(
                 session_id, "pushing", bot=bot, chat_id=chat_id, message_id=message_id
             )
             client = KaggleClient()
-            kernel_ref = await _push_preview3d_kernel(client, dataset_id)
+            runtime_cipher, runtime_key = await _prepare_preview3d_runtime_datasets(
+                client=client,
+                run_id=str(run_id or session_id),
+            )
+            dataset_slugs.extend([runtime_cipher, runtime_key])
+            await _set_session_status(
+                session_id, "dataset_wait", bot=bot, chat_id=chat_id, message_id=message_id
+            )
+            await asyncio.sleep(KAGGLE_DATASET_WAIT_SECONDS)
+            kernel_ref = await _push_preview3d_kernel(client, dataset_slugs)
             session["kaggle_kernel_ref"] = kernel_ref
             try:
                 await register_job(
@@ -709,6 +909,7 @@ async def _run_kaggle_render(
                         "chat_id": chat_id,
                         "month": month,
                         "pid": os.getpid(),
+                        "dataset_slugs": dataset_slugs,
                     },
                 )
                 registered = True
@@ -865,6 +1066,8 @@ async def _run_kaggle_render(
                 parse_mode="HTML",
             )
     finally:
+        if dataset_slugs:
+            await _cleanup_preview3d_datasets(dataset_slugs)
         await finish_ops_run(
             db,
             run_id=ops_run_id,
@@ -971,7 +1174,7 @@ async def handle_3di_callback(
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text="📅 <b>Выберите месяц для генерации:</b>",
+            text="📅 <b>Выберите месяц для генерации событий без превью:</b>",
             reply_markup=_build_month_menu(is_multy=is_multy),
             parse_mode="HTML"
         )
@@ -1077,10 +1280,13 @@ async def handle_3di_callback(
     if base_data.startswith("3di:gen:"):
         month_key = base_data.split(":")[2]
         min_images = 2 if is_multy else 1
-        events = await _get_events_for_month(db, month_key, min_images=min_images)
+        events = await _get_events_without_preview(db, month_key, min_images=min_images)
         
         if not events:
-            await callback.answer(f"Нет событий ({min_images}+ изображений) в этом месяце", show_alert=True)
+            await callback.answer(
+                f"Нет событий без превью ({min_images}+ изображений) в этом месяце",
+                show_alert=True,
+            )
             return
         
         mode_str = "month:multy" if is_multy else "month"

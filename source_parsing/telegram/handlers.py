@@ -508,6 +508,8 @@ def _clean_url(value: str | None) -> str | None:
     raw = value.strip()
     if not raw:
         return None
+    if re.match(r"(?i)^tg://user\?id=\d+$", raw):
+        return raw
     if not re.match(r"https?://", raw):
         return None
     if re.match(r"^https?://t\.me/addlist/", raw):
@@ -536,6 +538,8 @@ def _coerce_url(value: str | None) -> str | None:
     raw = _TRAILING_URL_PUNCT_RE.sub("", raw).strip()
     if not raw:
         return None
+    if re.match(r"(?i)^tg://user\?id=\d+$", raw):
+        return raw
     if raw.lower().startswith(("http://", "https://")):
         return _clean_url(raw)
     if raw.lower().startswith(("t.me/", "vk.cc/", "clck.ru/")):
@@ -2324,6 +2328,10 @@ _TICKET_CONTACT_LINE_RE = re.compile(
 )
 _TG_HANDLE_IN_TEXT_RE = re.compile(r"(?i)@([a-z0-9_]{4,32})")
 _TG_LINK_IN_TEXT_RE = re.compile(r"(?i)(?:https?://)?t\.me/([a-z0-9_]{4,32})\b")
+_PHONE_IN_TEXT_RE = re.compile(
+    r"(?u)(?<!\d)(?:\+7|8)\s*\(?\d{3}\)?[\s-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)"
+)
+_EMAIL_IN_TEXT_RE = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 
 
 def _extract_ticket_link_from_text(text: str | None) -> str | None:
@@ -2354,6 +2362,37 @@ def _extract_ticket_link_from_text(text: str | None) -> str | None:
             if handle:
                 return f"https://t.me/{handle}"
     return None
+
+
+def _build_tg_user_link(username: str | None, user_id: Any) -> str | None:
+    uname = normalize_tg_username(username)
+    if uname:
+        return f"https://t.me/{uname}"
+    uid = _to_int(user_id)
+    if uid and uid > 0:
+        return f"tg://user?id={uid}"
+    return None
+
+
+def _infer_ticket_link_from_group_post_author(
+    message: dict[str, Any],
+    *,
+    text: str | None,
+) -> str | None:
+    source_type = str(message.get("source_type") or "").strip().lower()
+    if source_type not in {"group", "supergroup"}:
+        return None
+    author = message.get("post_author")
+    if not isinstance(author, dict):
+        return None
+    if not bool(author.get("is_user")):
+        return None
+    raw_text = str(text or "").strip()
+    if raw_text and (
+        _PHONE_IN_TEXT_RE.search(raw_text) or _EMAIL_IN_TEXT_RE.search(raw_text)
+    ):
+        return None
+    return _build_tg_user_link(author.get("username"), author.get("user_id"))
 
 
 def _norm_match(s: str | None) -> str:
@@ -2895,6 +2934,7 @@ def _build_candidate(
     if location_address:
         location_address = strip_city_from_address(location_address, city)
     ticket_link = _coerce_url(event_data.get("ticket_link")) or _coerce_url(source.default_ticket_link)
+    ticket_link_from_post_author = False
     ticket_price_min = _to_int(event_data.get("ticket_price_min"))
     ticket_price_max = _to_int(event_data.get("ticket_price_max"))
     ticket_status = event_data.get("ticket_status")
@@ -3062,6 +3102,24 @@ def _build_candidate(
             ticket_link = inferred_text_url
             logger.info(
                 "telegram: inferred missing ticket link from message urls source=%s message_id=%s title=%r ticket_link=%s",
+                username,
+                message_id,
+                title,
+                ticket_link,
+            )
+
+    if not ticket_link:
+        inferred_author_link = _infer_ticket_link_from_group_post_author(
+            message,
+            text="\n".join(
+                part for part in (message_text_s, event_source_text) if str(part or "").strip()
+            ),
+        )
+        if inferred_author_link:
+            ticket_link = inferred_author_link
+            ticket_link_from_post_author = True
+            logger.info(
+                "telegram: inferred missing ticket link from post author source=%s message_id=%s title=%r ticket_link=%s",
                 username,
                 message_id,
                 title,
@@ -3252,6 +3310,7 @@ def _build_candidate(
             else None,
             "tg_location_overridden_by_default": bool(location_overridden_by_default),
             "tg_city_overridden_by_default": bool(city_overridden_by_default),
+            "tg_ticket_link_from_post_author": bool(ticket_link_from_post_author),
         }
     )
 

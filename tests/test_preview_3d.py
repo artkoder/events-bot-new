@@ -1,10 +1,22 @@
+import json
+from pathlib import Path
+
 import pytest
 from aiogram import types
 from db import Database
 import main
 from main_part2 import event_to_nodes
 from models import Event, User
-from preview_3d.handlers import handle_3di_command, update_previews_from_results
+from preview_3d.handlers import (
+    _build_preview3d_runtime_config_payload,
+    _build_preview3d_runtime_secrets_payload,
+    _prepare_preview3d_runtime_datasets,
+    _push_preview3d_kernel,
+    handle_3di_command,
+    handle_3di_callback,
+    update_previews_from_results,
+)
+from source_parsing.telegram.split_secrets import decrypt_secret
 
 
 DENIED_TEXT = "\u274c \u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e \u043f\u0440\u0430\u0432"
@@ -13,6 +25,7 @@ DENIED_TEXT = "\u274c \u041d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u04
 class DummyBot:
     def __init__(self):
         self.messages = []
+        self.edits = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append(
@@ -22,6 +35,34 @@ class DummyBot:
                 "reply_markup": kwargs.get("reply_markup"),
             }
         )
+
+    async def edit_message_text(self, *, chat_id, message_id, text, **kwargs):
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": kwargs.get("reply_markup"),
+            }
+        )
+
+
+class DummyCallback:
+    def __init__(self, data: str, user_id: int = 1, chat_id: int = 1, message_id: int = 1):
+        self.data = data
+        self.from_user = type("FromUser", (), {"id": user_id})()
+        self.message = type(
+            "Message",
+            (),
+            {
+                "chat": type("Chat", (), {"id": chat_id})(),
+                "message_id": message_id,
+            },
+        )()
+        self.answers = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append({"text": text, "show_alert": show_alert})
 
 
 def _make_event(event_id: int, **overrides: object) -> Event:
@@ -214,3 +255,165 @@ async def test_get_new_events_gap(tmp_path):
     assert len(candidates_all) == 3
     ids = sorted([e.id for e in candidates_all])
     assert ids == [1, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_handle_3di_month_generation_uses_only_missing_previews(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        session.add(_make_event(1, date="2026-04-10", photo_urls=["http://img-1"], preview_3d_url=None))
+        session.add(
+            _make_event(
+                2,
+                date="2026-04-11",
+                photo_urls=["http://img-2"],
+                preview_3d_url="https://example.com/existing.webp",
+            )
+        )
+        await session.commit()
+
+    captured = {}
+
+    async def fake_start_generation(
+        db_arg,
+        bot_arg,
+        callback_arg,
+        events,
+        month,
+        mode,
+        start_kaggle_render,
+        operator_id,
+    ):
+        captured["event_ids"] = [event.id for event in events]
+        captured["month"] = month
+        captured["mode"] = mode
+        captured["operator_id"] = operator_id
+
+    monkeypatch.setattr("preview_3d.handlers._start_generation", fake_start_generation)
+
+    callback = DummyCallback("3di:gen:2026-04", user_id=1)
+    bot = DummyBot()
+
+    await handle_3di_callback(callback, db, bot)
+
+    assert captured == {
+        "event_ids": [1],
+        "month": "2026-04",
+        "mode": "month",
+        "operator_id": 1,
+    }
+    assert callback.answers == []
+
+
+def test_build_preview3d_runtime_payloads(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_KEY", "service-key")
+    monkeypatch.setenv("SUPABASE_MEDIA_BUCKET", "events-media")
+    monkeypatch.setenv("SUPABASE_PREVIEW3D_PREFIX", "p3d-custom")
+
+    config = _build_preview3d_runtime_config_payload()
+    secrets = json.loads(_build_preview3d_runtime_secrets_payload())
+
+    assert config["env"]["SUPABASE_MEDIA_BUCKET"] == "events-media"
+    assert config["env"]["SUPABASE_PREVIEW3D_PREFIX"] == "p3d-custom"
+    assert secrets == {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_KEY": "service-key",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prepare_preview3d_runtime_datasets_writes_config_and_encrypted_secrets(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "service-key")
+    monkeypatch.setenv("SUPABASE_MEDIA_BUCKET", "events-media")
+    monkeypatch.setenv("SUPABASE_PREVIEW3D_PREFIX", "p3d-custom")
+    monkeypatch.setenv("KAGGLE_USERNAME", "zigomaro")
+
+    captured: dict[str, dict[str, bytes | str]] = {}
+
+    def fake_create_dataset(client, username, slug_suffix, title, writer):
+        dataset_dir = tmp_path / slug_suffix
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        writer(dataset_dir)
+        files: dict[str, bytes | str] = {}
+        for child in dataset_dir.iterdir():
+            if child.suffix in {".json"}:
+                files[child.name] = child.read_text(encoding="utf-8")
+            else:
+                files[child.name] = child.read_bytes()
+        captured[slug_suffix] = files
+        return f"{username}/{slug_suffix}"
+
+    monkeypatch.setattr("preview_3d.handlers._create_dataset", fake_create_dataset)
+
+    slug_cipher, slug_key = await _prepare_preview3d_runtime_datasets(
+        client=object(),
+        run_id="run-123",
+    )
+
+    assert slug_cipher.startswith("zigomaro/preview3d-runtime-cipher")
+    assert slug_key.startswith("zigomaro/preview3d-runtime-key")
+
+    cipher_files = captured[Path(slug_cipher).name]
+    key_files = captured[Path(slug_key).name]
+    assert "fernet.key" not in cipher_files
+    assert list(key_files) == ["fernet.key"]
+    config = json.loads(str(cipher_files["config.json"]))
+    decrypted = decrypt_secret(
+        cipher_files["secrets.enc"],
+        key_files["fernet.key"],
+    )
+
+    assert config["env"]["SUPABASE_MEDIA_BUCKET"] == "events-media"
+    assert config["env"]["SUPABASE_PREVIEW3D_PREFIX"] == "p3d-custom"
+    assert json.loads(decrypted) == {
+        "SUPABASE_URL": "https://example.supabase.co",
+        "SUPABASE_SERVICE_KEY": "service-key",
+    }
+
+
+@pytest.mark.asyncio
+async def test_push_preview3d_kernel_uses_shared_kaggle_client(monkeypatch, tmp_path):
+    kernel_dir = tmp_path / "Preview3D"
+    kernel_dir.mkdir(parents=True, exist_ok=True)
+    (kernel_dir / "kernel-metadata.json").write_text(
+        json.dumps(
+            {
+                "id": "zigomaro/preview-3d",
+                "slug": "preview-3d",
+                "title": "Preview 3D",
+                "dataset_sources": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[dict[str, object]] = []
+
+    class DummyClient:
+        def push_kernel(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr("preview_3d.handlers.KERNELS_ROOT_PATH", tmp_path)
+    monkeypatch.setattr("preview_3d.handlers.KAGGLE_STARTUP_WAIT_SECONDS", 0)
+    monkeypatch.setenv("KAGGLE_USERNAME", "zigomaro")
+
+    kernel_ref = await _push_preview3d_kernel(
+        DummyClient(),
+        ["zigomaro/cipher", "zigomaro/key"],
+    )
+
+    assert kernel_ref == "zigomaro/preview-3d"
+    assert calls == [
+        {
+            "kernel_path": kernel_dir,
+            "dataset_sources": ["zigomaro/cipher", "zigomaro/key"],
+        }
+    ]

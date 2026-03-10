@@ -397,6 +397,30 @@ def test_action_post_does_not_get_default_one_month_end_date():
     assert candidate.end_date is None
 
 
+def test_fair_does_not_get_default_one_month_end_date():
+    candidate = EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/test/1",
+        title="Ярмарка выходного дня",
+        date="2026-03-07",
+        end_date=None,
+        time="08:00",
+        location_name="Площадь TEST",
+        city="Янтарный",
+        event_type="ярмарка",
+        source_text=(
+            "Еженедельно по субботам проходит ярмарка выходного дня. "
+            "7 марта с 08:00 до 15:00."
+        ),
+        raw_excerpt="Ярмарка 7 марта",
+    )
+
+    out = su._maybe_apply_default_end_date_for_long_event(candidate)
+    assert out is None
+    assert candidate.end_date is None
+    assert candidate.end_date_is_inferred is False
+
+
 @pytest.mark.asyncio
 async def test_single_day_event_misclassified_as_exhibition_does_not_get_default_end_date(
     tmp_path, monkeypatch

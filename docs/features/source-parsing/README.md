@@ -19,6 +19,15 @@
 - В ежедневных анонсах заголовок события должен вести на Telegraph страницу события (а не на Telegram/VK пост-источник).
 - Для каждого источника создаются записи `event_source` и “факты” в `event_source_fact`, чтобы было видно вклад каждого источника в мердж.
 
+### LLM-first guardrails для VK/TG parse
+
+- Для VK/TG draft extraction сохраняется LLM-first подход: массовые смысловые решения принимаются в prompt/parser, а не детерминированным “переписыванием” текста после разбора.
+- Отдельный targeted guard теперь добавляет в parse prompt узкий hint для giveaway/contest постов: если матч/концерт/другое событие упомянуто только как приз розыгрыша, parser должен вернуть `[]`, а не создавать pseudo-event.
+- Downstream Smart Update дублирует это как safety-net (`skipped_giveaway`), чтобы prize-only promo пост не проходил даже при неудачном upstream parse.
+- Для image-heavy intro posts (`листайте афиши`, `смотрите карточки`, weekly schedule wrapper без конкретных событий в тексте) parse prompt теперь явно разрешает вернуть `[]` как штатный результат, а не пытаться “додумать” события из обёртки.
+- Gemma parse path теперь жёстче требует чистый JSON (`[]` или объект с `events`) и, если Gemma после repair всё равно отдаёт битый JSON, переключается на fallback `4o` вместо немедленного падения.
+- Для VK multi-poster / schedule posts intake дополнительно схлопывает exact duplicate child drafts внутри одного parsed batch только при совпадении `date + explicit time + venue + normalized title`; это узкий safety-net против двойного извлечения одной и той же карточки из карусели/афиш.
+
 ### Каноничность сайта (/parse) при конфликтах
 
 Источник сайта/парсера считается **каноническим** (trust high):
