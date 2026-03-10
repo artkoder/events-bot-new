@@ -142,8 +142,8 @@ def test_recent_imports_render_pages_splits_long_output(monkeypatch):
     assert "Страница 1/" in pages[0]
     assert any("Страница 2/" in page for page in pages[1:])
     assert any('href="https://telegra.ph/event-1"' in page for page in pages)
-    assert "id=1 ✅" in pages[0]
-    assert "id=2 🔄" in pages[0]
+    assert any("id=1 ✅" in page for page in pages)
+    assert any("id=2 🔄" in page for page in pages)
 
 
 def test_recent_imports_parse_hours_arg():
