@@ -298,6 +298,18 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
                 "general_stats",
             ],
         },
+        "recent_imports": {
+            "command": "/recent_imports",
+            "risk": "safe",
+            "desc": "Показать события, которые были созданы или обновлены из Telegram, VK и /parse за последние часы.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": [
+                "какие события созданы или обновлены из телеграма, вк и parse за 24 часа",
+                "покажи последние импорты событий по источникам",
+                "recent_imports",
+                "recent_imports 48",
+            ],
+        },
         "popular_posts": {
             "command": "/popular_posts",
             "risk": "safe",
@@ -456,6 +468,16 @@ def _heuristic_proposals(request_text: str) -> list[_ActionProposal] | None:
     t = _norm_intent_text(request_text)
     if not t:
         return None
+
+    has_recent_imports_sources = (
+        any(word in t for word in ("телеграм", "telegram", "вк", "vk", "/parse", " parse", "parse "))
+        and any(word in t for word in ("создан", "обновлен", "обновлён", "импорт", "событи"))
+    )
+    has_recent_imports_window = any(
+        word in t for word in ("24 часа", "за сутки", "сутки", "последние сутки", "последние 24 часа")
+    )
+    if has_recent_imports_sources and has_recent_imports_window:
+        return [_ActionProposal(action_id="recent_imports", args={}, confidence=0.97)]
 
     has_stats_word = any(word in t for word in ("статист", "отчет", "отчёт", "сводк", "репорт"))
     if not has_stats_word:

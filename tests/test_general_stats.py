@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from db import Database
-from general_stats import collect_general_stats
+from general_stats import collect_general_stats, format_general_stats_message
 
 
 def _utc_sql(value: datetime) -> str:
@@ -136,6 +136,31 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
             "VALUES(5, 4, 'tg', 'u5', ?)",
             (out_before,),
         )
+        await conn.execute(
+            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
+            "VALUES(6, 2, 'parser:dramteatr', 'p1', ?)",
+            (in_window_1,),
+        )
+        await conn.execute(
+            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
+            "VALUES(7, 3, 'parser:qtickets', 'p2', ?)",
+            (in_window_2,),
+        )
+        await conn.execute(
+            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
+            "VALUES(8, 3, 'telegram', 'tg-created', ?)",
+            (in_window_2,),
+        )
+        await conn.execute(
+            "INSERT INTO event(id, title, description, date, time, location_name, source_text, added_at) "
+            "VALUES(5, 'PastEvent', 'd', '2026-02-10', '18:00', 'loc', 'src', ?)",
+            (out_before,),
+        )
+        await conn.execute(
+            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
+            "VALUES(9, 5, 'vk', 'past-vk', ?)",
+            (out_before,),
+        )
 
         await conn.execute(
             "INSERT INTO geo_city_region_cache(city_norm, details, created_at, updated_at) VALUES('newcity', ?, ?, ?)",
@@ -217,6 +242,24 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
                 json.dumps({"processed": 1, "success": 1, "failed": 0}, ensure_ascii=False),
             ),
         )
+        await conn.execute(
+            "INSERT INTO ops_run(kind, trigger, started_at, finished_at, status, metrics_json, details_json) "
+            "VALUES('tg_monitoring', 'scheduled', ?, ?, 'success', ?, '{}')",
+            (
+                in_window_2,
+                in_window_2,
+                json.dumps(
+                    {
+                        "sources_scanned": 2,
+                        "messages_processed": 3,
+                        "messages_with_events": 2,
+                        "events_created": 1,
+                        "events_merged": 2,
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
         await conn.commit()
 
     snapshot = await collect_general_stats(
@@ -237,10 +280,25 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert metrics["telegram"]["sources_scanned"] == 2
     assert metrics["telegram"]["messages_with_events"] == 2
     assert metrics["telegram"]["sources_with_events"] == 2
+    assert metrics["telegram"]["events_created"] == 1
+    assert metrics["telegram"]["events_updated"] == 2
+    assert len(metrics["telegram"]["tg_monitoring_runs"]) == 1
 
     assert metrics["events"]["events_created"] == 2
     assert metrics["events"]["events_updated"] == 2
     assert metrics["events"]["updated_sources_distribution"] == {2: 1, 3: 1}
+    source_share = metrics["events"]["source_share"]
+    assert source_share["period_total_events"] == 4
+    assert source_share["period_by_source"]["parse"]["count"] == 2
+    assert source_share["period_by_source"]["parse"]["percent"] == 50
+    assert source_share["period_by_source"]["telegram"]["count"] == 2
+    assert source_share["period_by_source"]["telegram"]["percent"] == 50
+    assert source_share["period_by_source"]["vk"]["count"] == 1
+    assert source_share["period_by_source"]["vk"]["percent"] == 25
+    assert source_share["future_total_events"] == 4
+    assert source_share["future_by_source"]["parse"]["count"] == 2
+    assert source_share["future_by_source"]["telegram"]["count"] == 2
+    assert source_share["future_by_source"]["vk"]["count"] == 1
 
     assert metrics["geo"]["new_cities_count"] == 1
     assert metrics["geo"]["new_cities"][0]["city_norm"] == "newcity"
@@ -254,6 +312,17 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert parse_breakdown["dramteatr"]["processed"] == 4
     assert parse_breakdown["dramteatr"]["new_events"] == 2
     assert parse_breakdown["qtickets"]["processed"] == 1
+
+    text = format_general_stats_message(snapshot)
+    assert "events_created: 1" in text
+    assert "events_updated: 2" in text
+    assert "events_created=1 events_updated=2" in text
+    assert "source_share_period: total_events=4" in text
+    assert "/parse: 50% (2/4)" in text
+    assert "telegram: 50% (2/4)" in text
+    assert "vk: 25% (1/4)" in text
+    assert "source_share_future_active: total_events=4" in text
+    assert "source_share_note: проценты могут пересекаться" in text
 
 
 @pytest.mark.asyncio

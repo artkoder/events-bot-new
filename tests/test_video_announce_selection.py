@@ -1,4 +1,6 @@
 from datetime import date, timedelta, timezone
+import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,6 +8,7 @@ from db import Database
 from models import Event, EventPoster
 import main
 from video_announce import selection
+from video_announce.custom_types import RenderPayload
 from video_announce.custom_types import SelectionContext
 
 
@@ -40,6 +43,40 @@ async def test_fetch_candidates_includes_fair_and_schedule_text(tmp_path):
     assert any(e.id == fair_id for e in events)
     expected = f"по {main.format_day_pretty(date(2026, 1, 10))} с 10:00 до 17:30"
     assert schedule_map[fair_id] == expected
+
+
+@pytest.mark.asyncio
+async def test_fetch_candidates_skips_fair_with_inferred_end_date_before_target(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        inferred_fair = Event(
+            title="Weekend Fair",
+            description="d",
+            source_text="Каждую субботу ярмарка",
+            date="2026-01-03",
+            end_date="2026-02-03",
+            end_date_is_inferred=True,
+            time="08:00..15:00",
+            location_name="Market",
+            event_type="ярмарка",
+            photo_urls=["http://example.com/a.jpg"],
+            photo_count=1,
+        )
+        session.add(inferred_fair)
+        await session.commit()
+        await session.refresh(inferred_fair)
+        fair_id = inferred_fair.id
+
+    ctx = SelectionContext(
+        tz=timezone.utc,
+        target_date=date(2026, 1, 10),
+    )
+    events, schedule_map, _ = await selection.fetch_candidates(db, ctx)
+
+    assert all(e.id != fair_id for e in events)
+    assert fair_id not in schedule_map
 
 
 @pytest.mark.asyncio
@@ -196,3 +233,69 @@ async def test_build_selection_auto_expands_for_min_posters(tmp_path):
     assert len(result.candidates) == 7
     max_date = max(date.fromisoformat(ev.date) for ev in result.candidates)
     assert max_date == base_date + timedelta(days=2)
+
+
+def test_payload_as_json_clamps_ongoing_longrun_intro_to_target_date():
+    fair = Event(
+        id=1,
+        title="Long Fair",
+        description="d",
+        source_text="s",
+        date="2026-03-07",
+        end_date="2026-04-07",
+        time="10:00..18:00",
+        location_name="Market",
+        city="Калининград",
+        event_type="ярмарка",
+        photo_urls=["https://example.com/fair.jpg"],
+        photo_count=1,
+        is_free=True,
+    )
+    lecture = Event(
+        id=2,
+        title="Lecture",
+        description="d",
+        source_text="s",
+        date="2026-03-12",
+        time="19:00",
+        location_name="Hall",
+        city="Калининград",
+        photo_urls=["https://example.com/lecture.jpg"],
+        photo_count=1,
+        is_free=False,
+    )
+    session = SimpleNamespace(
+        selection_params={
+            "target_date": "2026-03-10",
+            "dedup_schedule": {
+                "1": "по 7 апреля с 10:00 до 18:00",
+            },
+        }
+    )
+    items = [
+        SimpleNamespace(
+            session_id=1,
+            event_id=1,
+            position=1,
+            final_about="About fair",
+            final_description="",
+            poster_text=None,
+            final_title=None,
+        ),
+        SimpleNamespace(
+            session_id=1,
+            event_id=2,
+            position=2,
+            final_about="About lecture",
+            final_description="",
+            poster_text=None,
+            final_title=None,
+        ),
+    ]
+    payload = RenderPayload(session=session, items=items, events=[fair, lecture], scores={})
+
+    data = json.loads(selection.payload_as_json(payload, timezone.utc))
+
+    assert data["intro"]["date_start"] == "2026-03-10"
+    assert data["intro"]["date_end"] == "2026-03-12"
+    assert data["intro"]["date"] == "10 МАРТА - 12 МАРТА"

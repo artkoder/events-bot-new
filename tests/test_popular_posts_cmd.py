@@ -146,3 +146,57 @@ async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path)
         assert links["https://t.me/meowafisha/6823?single"].events[0].event_id == int(ev.id)
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_popular_posts_includes_post_above_only_one_median(tmp_path, monkeypatch):
+    monkeypatch.setenv("POST_POPULARITY_MIN_SAMPLE", "2")
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    try:
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "INSERT INTO vk_source(group_id, screen_name, name) VALUES(?, ?, ?)",
+                (101, "club101", "Club 101"),
+            )
+            await conn.execute(
+                "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (1, 101, 1001, 2_000_000_000, "post 1001", 1, "imported"),
+            )
+            await conn.execute(
+                "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (2, 101, 1002, 2_000_000_010, "post 1002", 1, "imported"),
+            )
+            await conn.execute(
+                "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
+                (1, 1),
+            )
+            await conn.execute(
+                "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
+                (2, 2),
+            )
+            await conn.execute(
+                "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (101, 1001, 0, "https://vk.com/wall-101_1001", 2_000_000_000, 2_000_000_100, 100, 10),
+            )
+            await conn.execute(
+                "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (101, 1002, 0, "https://vk.com/wall-101_1002", 2_000_000_010, 2_000_000_100, 110, 5),
+            )
+            await conn.commit()
+
+        monkeypatch.setattr(popular, "_utc_now_ts", lambda: 2_000_000_100)
+        items, dbg = await _load_top_items(db, window_days=1, age_day=0, limit=10)
+
+        assert len(items) == 2
+        assert {item.platform for item in items} == {"vk"}
+        assert {item.post_id for item in items} == {1001, 1002}
+        assert dbg["checked_posts"] == 2
+        assert dbg["above_median_views"] == 1
+        assert dbg["above_median_likes"] == 1
+        assert dbg["above_median_both"] == 0
+        assert dbg["skipped_not_above_median"] == 0
+    finally:
+        await db.close()
