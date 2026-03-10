@@ -372,6 +372,7 @@ async def _load_top_items(
     *,
     window_days: int,
     age_day: int,
+    latest_age_day_max: int | None = None,
     limit: int,
 ) -> tuple[list[_PostItem], dict[str, Any]]:
     now_ts = _utc_now_ts()
@@ -400,51 +401,110 @@ async def _load_top_items(
         )
         if tg_ready:
             try:
-                cur0 = await conn.execute(
-                    """
-                    SELECT
-                        COUNT(*) AS posts,
-                        COUNT(DISTINCT source_id) AS sources
-                    FROM (
-                        SELECT DISTINCT source_id, message_id
-                        FROM telegram_post_metric
-                        WHERE age_day = ?
-                          AND message_ts IS NOT NULL
-                          AND message_ts >= ?
+                if isinstance(latest_age_day_max, int) and latest_age_day_max >= 0:
+                    cur0 = await conn.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS posts,
+                            COUNT(DISTINCT source_id) AS sources
+                        FROM (
+                            SELECT source_id, message_id
+                            FROM telegram_post_metric
+                            WHERE age_day <= ?
+                              AND message_ts IS NOT NULL
+                              AND message_ts >= ?
+                            GROUP BY source_id, message_id
+                        )
+                        """,
+                        (int(latest_age_day_max), int(since_ts)),
                     )
-                    """,
-                    (int(age_day), int(since_ts)),
-                )
+                else:
+                    cur0 = await conn.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS posts,
+                            COUNT(DISTINCT source_id) AS sources
+                        FROM (
+                            SELECT DISTINCT source_id, message_id
+                            FROM telegram_post_metric
+                            WHERE age_day = ?
+                              AND message_ts IS NOT NULL
+                              AND message_ts >= ?
+                        )
+                        """,
+                        (int(age_day), int(since_ts)),
+                    )
                 row0 = await cur0.fetchone()
                 if row0:
                     tg_metrics_total = int(row0[0] or 0)
                     tg_metrics_sources = int(row0[1] or 0)
 
-                cur = await conn.execute(
-                    """
-                    SELECT
-                        m.source_id,
-                        m.message_id,
-                        COALESCE(m.source_url, '') AS source_url,
-                        COALESCE(m.message_ts, 0) AS message_ts,
-                        m.views,
-                        m.likes,
-                        COALESCE(s.events_imported, 0) AS events_imported,
-                        COALESCE(t.username, '') AS username,
-                        COALESCE(t.title, '') AS title
-                    FROM telegram_post_metric m
-                    JOIN telegram_scanned_message s
-                      ON s.source_id = m.source_id
-                     AND s.message_id = m.message_id
-                    JOIN telegram_source t
-                      ON t.id = m.source_id
-                    WHERE m.age_day = ?
-                      AND m.message_ts IS NOT NULL
-                      AND m.message_ts >= ?
-                      AND COALESCE(s.events_imported, 0) > 0
-                    """,
-                    (int(age_day), int(since_ts)),
-                )
+                if isinstance(latest_age_day_max, int) and latest_age_day_max >= 0:
+                    cur = await conn.execute(
+                        """
+                        WITH latest AS (
+                            SELECT
+                                source_id,
+                                message_id,
+                                MAX(age_day) AS max_age_day
+                            FROM telegram_post_metric
+                            WHERE age_day <= ?
+                              AND message_ts IS NOT NULL
+                              AND message_ts >= ?
+                            GROUP BY source_id, message_id
+                        )
+                        SELECT
+                            m.source_id,
+                            m.message_id,
+                            m.age_day,
+                            COALESCE(m.source_url, '') AS source_url,
+                            COALESCE(m.message_ts, 0) AS message_ts,
+                            m.views,
+                            m.likes,
+                            COALESCE(s.events_imported, 0) AS events_imported,
+                            COALESCE(t.username, '') AS username,
+                            COALESCE(t.title, '') AS title
+                        FROM telegram_post_metric m
+                        JOIN latest l
+                          ON l.source_id = m.source_id
+                         AND l.message_id = m.message_id
+                         AND l.max_age_day = m.age_day
+                        JOIN telegram_scanned_message s
+                          ON s.source_id = m.source_id
+                         AND s.message_id = m.message_id
+                        JOIN telegram_source t
+                          ON t.id = m.source_id
+                        WHERE COALESCE(s.events_imported, 0) > 0
+                        """,
+                        (int(latest_age_day_max), int(since_ts)),
+                    )
+                else:
+                    cur = await conn.execute(
+                        """
+                        SELECT
+                            m.source_id,
+                            m.message_id,
+                            m.age_day,
+                            COALESCE(m.source_url, '') AS source_url,
+                            COALESCE(m.message_ts, 0) AS message_ts,
+                            m.views,
+                            m.likes,
+                            COALESCE(s.events_imported, 0) AS events_imported,
+                            COALESCE(t.username, '') AS username,
+                            COALESCE(t.title, '') AS title
+                        FROM telegram_post_metric m
+                        JOIN telegram_scanned_message s
+                          ON s.source_id = m.source_id
+                         AND s.message_id = m.message_id
+                        JOIN telegram_source t
+                          ON t.id = m.source_id
+                        WHERE m.age_day = ?
+                          AND m.message_ts IS NOT NULL
+                          AND m.message_ts >= ?
+                          AND COALESCE(s.events_imported, 0) > 0
+                        """,
+                        (int(age_day), int(since_ts)),
+                    )
                 tg_rows = await cur.fetchall()
             except sqlite3.OperationalError as exc:
                 logger.info("popular_posts: tg query skipped: %s", exc)
@@ -461,21 +521,39 @@ async def _load_top_items(
         )
         if vk_ready:
             try:
-                cur0 = await conn.execute(
-                    """
-                    SELECT
-                        COUNT(*) AS posts,
-                        COUNT(DISTINCT group_id) AS sources
-                    FROM (
-                        SELECT DISTINCT group_id, post_id
-                        FROM vk_post_metric
-                        WHERE age_day = ?
-                          AND post_ts IS NOT NULL
-                          AND post_ts >= ?
+                if isinstance(latest_age_day_max, int) and latest_age_day_max >= 0:
+                    cur0 = await conn.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS posts,
+                            COUNT(DISTINCT group_id) AS sources
+                        FROM (
+                            SELECT group_id, post_id
+                            FROM vk_post_metric
+                            WHERE age_day <= ?
+                              AND post_ts IS NOT NULL
+                              AND post_ts >= ?
+                            GROUP BY group_id, post_id
+                        )
+                        """,
+                        (int(latest_age_day_max), int(since_ts)),
                     )
-                    """,
-                    (int(age_day), int(since_ts)),
-                )
+                else:
+                    cur0 = await conn.execute(
+                        """
+                        SELECT
+                            COUNT(*) AS posts,
+                            COUNT(DISTINCT group_id) AS sources
+                        FROM (
+                            SELECT DISTINCT group_id, post_id
+                            FROM vk_post_metric
+                            WHERE age_day = ?
+                              AND post_ts IS NOT NULL
+                              AND post_ts >= ?
+                        )
+                        """,
+                        (int(age_day), int(since_ts)),
+                    )
                 row0 = await cur0.fetchone()
                 if row0:
                     vk_metrics_total = int(row0[0] or 0)
@@ -483,50 +561,127 @@ async def _load_top_items(
 
                 vk_has_source = await _table_exists(conn, name="vk_source")
                 if vk_has_source:
-                    sql = """
-                        SELECT DISTINCT
-                            m.group_id,
-                            m.post_id,
-                            COALESCE(m.source_url, '') AS source_url,
-                            COALESCE(m.post_ts, 0) AS post_ts,
-                            m.views,
-                            m.likes,
-                            COALESCE(v.screen_name, '') AS screen_name,
-                            COALESCE(v.name, '') AS name
-                        FROM vk_post_metric m
-                        JOIN vk_inbox i
-                          ON i.group_id = m.group_id
-                         AND i.post_id = m.post_id
-                        JOIN vk_inbox_import_event ie
-                          ON ie.inbox_id = i.id
-                        LEFT JOIN vk_source v
-                          ON v.group_id = m.group_id
-                        WHERE m.age_day = ?
-                          AND m.post_ts IS NOT NULL
-                          AND m.post_ts >= ?
-                    """
+                    if isinstance(latest_age_day_max, int) and latest_age_day_max >= 0:
+                        sql = """
+                            WITH latest AS (
+                                SELECT
+                                    group_id,
+                                    post_id,
+                                    MAX(age_day) AS max_age_day
+                                FROM vk_post_metric
+                                WHERE age_day <= ?
+                                  AND post_ts IS NOT NULL
+                                  AND post_ts >= ?
+                                GROUP BY group_id, post_id
+                            )
+                            SELECT DISTINCT
+                                m.group_id,
+                                m.post_id,
+                                m.age_day,
+                                COALESCE(m.source_url, '') AS source_url,
+                                COALESCE(m.post_ts, 0) AS post_ts,
+                                m.views,
+                                m.likes,
+                                COALESCE(v.screen_name, '') AS screen_name,
+                                COALESCE(v.name, '') AS name
+                            FROM vk_post_metric m
+                            JOIN latest l
+                              ON l.group_id = m.group_id
+                             AND l.post_id = m.post_id
+                             AND l.max_age_day = m.age_day
+                            JOIN vk_inbox i
+                              ON i.group_id = m.group_id
+                             AND i.post_id = m.post_id
+                            JOIN vk_inbox_import_event ie
+                              ON ie.inbox_id = i.id
+                            LEFT JOIN vk_source v
+                              ON v.group_id = m.group_id
+                        """
+                    else:
+                        sql = """
+                            SELECT DISTINCT
+                                m.group_id,
+                                m.post_id,
+                                m.age_day,
+                                COALESCE(m.source_url, '') AS source_url,
+                                COALESCE(m.post_ts, 0) AS post_ts,
+                                m.views,
+                                m.likes,
+                                COALESCE(v.screen_name, '') AS screen_name,
+                                COALESCE(v.name, '') AS name
+                            FROM vk_post_metric m
+                            JOIN vk_inbox i
+                              ON i.group_id = m.group_id
+                             AND i.post_id = m.post_id
+                            JOIN vk_inbox_import_event ie
+                              ON ie.inbox_id = i.id
+                            LEFT JOIN vk_source v
+                              ON v.group_id = m.group_id
+                            WHERE m.age_day = ?
+                              AND m.post_ts IS NOT NULL
+                              AND m.post_ts >= ?
+                        """
                 else:
-                    sql = """
-                        SELECT DISTINCT
-                            m.group_id,
-                            m.post_id,
-                            COALESCE(m.source_url, '') AS source_url,
-                            COALESCE(m.post_ts, 0) AS post_ts,
-                            m.views,
-                            m.likes,
-                            '' AS screen_name,
-                            '' AS name
-                        FROM vk_post_metric m
-                        JOIN vk_inbox i
-                          ON i.group_id = m.group_id
-                         AND i.post_id = m.post_id
-                        JOIN vk_inbox_import_event ie
-                          ON ie.inbox_id = i.id
-                        WHERE m.age_day = ?
-                          AND m.post_ts IS NOT NULL
-                          AND m.post_ts >= ?
-                    """
-                cur2 = await conn.execute(sql, (int(age_day), int(since_ts)))
+                    if isinstance(latest_age_day_max, int) and latest_age_day_max >= 0:
+                        sql = """
+                            WITH latest AS (
+                                SELECT
+                                    group_id,
+                                    post_id,
+                                    MAX(age_day) AS max_age_day
+                                FROM vk_post_metric
+                                WHERE age_day <= ?
+                                  AND post_ts IS NOT NULL
+                                  AND post_ts >= ?
+                                GROUP BY group_id, post_id
+                            )
+                            SELECT DISTINCT
+                                m.group_id,
+                                m.post_id,
+                                m.age_day,
+                                COALESCE(m.source_url, '') AS source_url,
+                                COALESCE(m.post_ts, 0) AS post_ts,
+                                m.views,
+                                m.likes,
+                                '' AS screen_name,
+                                '' AS name
+                            FROM vk_post_metric m
+                            JOIN latest l
+                              ON l.group_id = m.group_id
+                             AND l.post_id = m.post_id
+                             AND l.max_age_day = m.age_day
+                            JOIN vk_inbox i
+                              ON i.group_id = m.group_id
+                             AND i.post_id = m.post_id
+                            JOIN vk_inbox_import_event ie
+                              ON ie.inbox_id = i.id
+                        """
+                    else:
+                        sql = """
+                            SELECT DISTINCT
+                                m.group_id,
+                                m.post_id,
+                                m.age_day,
+                                COALESCE(m.source_url, '') AS source_url,
+                                COALESCE(m.post_ts, 0) AS post_ts,
+                                m.views,
+                                m.likes,
+                                '' AS screen_name,
+                                '' AS name
+                            FROM vk_post_metric m
+                            JOIN vk_inbox i
+                              ON i.group_id = m.group_id
+                             AND i.post_id = m.post_id
+                            JOIN vk_inbox_import_event ie
+                              ON ie.inbox_id = i.id
+                            WHERE m.age_day = ?
+                              AND m.post_ts IS NOT NULL
+                              AND m.post_ts >= ?
+                        """
+                if isinstance(latest_age_day_max, int) and latest_age_day_max >= 0:
+                    cur2 = await conn.execute(sql, (int(latest_age_day_max), int(since_ts)))
+                else:
+                    cur2 = await conn.execute(sql, (int(age_day), int(since_ts)))
                 vk_rows = await cur2.fetchall()
             except sqlite3.OperationalError as exc:
                 logger.info("popular_posts: vk query skipped: %s", exc)
@@ -535,47 +690,55 @@ async def _load_top_items(
             vk_rows = []
 
     tg_sample: dict[int, set[int]] = {}
-    for source_id, message_id, _url, _ts, _v, _l, _imp, _u, _t in tg_rows:
+    tg_candidate_age_day: dict[tuple[int, int], int] = {}
+    for source_id, message_id, candidate_age_day, _url, _ts, _v, _l, _imp, _u, _t in tg_rows:
         try:
             sid = int(source_id)
             mid = int(message_id)
+            cad = int(candidate_age_day)
         except Exception:
             continue
         tg_sample.setdefault(sid, set()).add(mid)
+        tg_candidate_age_day[(sid, mid)] = cad
 
     vk_sample: dict[int, set[int]] = {}
-    for group_id, post_id, _url, _ts, _v, _l, _sn, _nm in vk_rows:
+    vk_candidate_age_day: dict[tuple[int, int], int] = {}
+    for group_id, post_id, candidate_age_day, _url, _ts, _v, _l, _sn, _nm in vk_rows:
         try:
             gid = int(group_id)
             pid = int(post_id)
+            cad = int(candidate_age_day)
         except Exception:
             continue
         vk_sample.setdefault(gid, set()).add(pid)
+        vk_candidate_age_day[(gid, pid)] = cad
 
-    # Baselines: same source + same age bucket over the popularity horizon
+    # Baselines: same source + same candidate age bucket over the popularity horizon
     # (default 90 days). The report window only controls which posts are candidates.
-    tg_baseline: dict[int, _Baseline] = {}
-    for sid in tg_sample:
+    tg_baseline: dict[tuple[int, int], _Baseline] = {}
+    for sid_mid, candidate_age_day in tg_candidate_age_day.items():
+        sid, _mid = sid_mid
         base = await load_telegram_popularity_baseline(
             db,
             source_id=int(sid),
-            age_day=int(age_day),
+            age_day=int(candidate_age_day),
             now_ts=int(now_ts),
         )
-        tg_baseline[sid] = _Baseline(
+        tg_baseline[sid_mid] = _Baseline(
             median_views=base.median_views,
             median_likes=base.median_likes,
             sample=int(base.sample),
         )
-    vk_baseline: dict[int, _Baseline] = {}
-    for gid in vk_sample:
+    vk_baseline: dict[tuple[int, int], _Baseline] = {}
+    for gid_pid, candidate_age_day in vk_candidate_age_day.items():
+        gid, _pid = gid_pid
         base = await load_vk_popularity_baseline(
             db,
             group_id=int(gid),
-            age_day=int(age_day),
+            age_day=int(candidate_age_day),
             now_ts=int(now_ts),
         )
-        vk_baseline[gid] = _Baseline(
+        vk_baseline[gid_pid] = _Baseline(
             median_views=base.median_views,
             median_likes=base.median_likes,
             sample=int(base.sample),
@@ -672,14 +835,14 @@ async def _load_top_items(
             )
         )
 
-    for source_id, message_id, url, ts, v, l, _imp, username, title in tg_rows:
+    for source_id, message_id, _candidate_age_day, url, ts, v, l, _imp, username, title in tg_rows:
         try:
             sid = int(source_id)
             mid = int(message_id)
             published_ts = int(ts or 0)
         except Exception:
             continue
-        base = tg_baseline.get(sid) or _Baseline(None, None, 0)
+        base = tg_baseline.get((sid, mid)) or _Baseline(None, None, 0)
         label = ""
         u = str(username or "").strip()
         t = str(title or "").strip()
@@ -706,14 +869,14 @@ async def _load_top_items(
             baseline=base,
         )
 
-    for group_id, post_id, url, ts, v, l, screen_name, name in vk_rows:
+    for group_id, post_id, _candidate_age_day, url, ts, v, l, screen_name, name in vk_rows:
         try:
             gid = int(group_id)
             pid = int(post_id)
             published_ts = int(ts or 0)
         except Exception:
             continue
-        base = vk_baseline.get(gid) or _Baseline(None, None, 0)
+        base = vk_baseline.get((gid, pid)) or _Baseline(None, None, 0)
         sn = str(screen_name or "").strip()
         nm = str(name or "").strip()
         label = nm or (f"vk:{sn}" if sn else f"vk:{gid}")
@@ -771,7 +934,7 @@ def _fmt_platform(platform: str) -> str:
 
 
 async def _send_popular_posts_report(message: Message, db: Database, *, limit: int = 10) -> None:
-    three_day, three_dbg = await _load_top_items(db, window_days=3, age_day=2, limit=limit)
+    three_day, three_dbg = await _load_top_items(db, window_days=3, age_day=2, latest_age_day_max=2, limit=limit)
     one_day, one_dbg = await _load_top_items(db, window_days=1, age_day=0, limit=limit)
 
     urls = [it.post_url for it in (three_day + one_day) if it.post_url]
@@ -878,7 +1041,7 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
         "Фильтр: views или likes строго выше медианы внутри канала/сообщества; медиана считается по тому же age_day за окно popularity horizon источника (обычно 90 дней), а в ТОП попадают посты из окна отчёта.",
         "Примечание: метрики пишутся только для постов, где были извлечены события (events_extracted>0/forced/existing); отчёт ниже дополнительно требует импортов (events_imported>0).",
         "",
-        "Окно 3 суток: берём снапшоты метрик <b>age_day=2</b> (посты опубликованы ~2–3 суток назад; метрики накопились за ~3 дня).",
+        "Окно 3 суток: берём <b>последний доступный</b> снапшот метрик для постов последних ~3 суток (`age_day=0..2`) и сравниваем его с медианой того же `age_day`.",
         "",
     ]
     lines.extend(_render_section("ТОП-10 за 3 суток", three_day, three_dbg))
