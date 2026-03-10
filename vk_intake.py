@@ -1193,6 +1193,141 @@ class PersistResult:
     smart_added_posters: int = 0
 
 
+def _vk_wall_source_ids_from_url(source_post_url: str | None) -> tuple[int | None, int | None]:
+    if not source_post_url:
+        return None, None
+    m = re.search(r"wall-?(\d+)_([0-9]+)", source_post_url)
+    if not m:
+        return None, None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _collapse_same_post_exact_drafts(drafts_in: list[EventDraft]) -> list[EventDraft]:
+    """Collapse obviously duplicated child drafts emitted from one VK multi-post.
+
+    Safety: collapse only when date + explicit time + venue + normalized title are
+    identical inside the same parsed draft set. This targets duplicated poster/card
+    extraction, not real parallel events from one schedule post.
+    """
+
+    if len(drafts_in) < 2:
+        return drafts_in
+
+    def _norm_text(value: str | None, *, keep_digits: bool = True) -> str:
+        text = unicodedata.normalize("NFKC", (value or "")).casefold().replace("ё", "е")
+        pattern = r"[^a-zа-я0-9]+" if keep_digits else r"[^a-zа-я]+"
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE).strip()
+        return re.sub(r"\s+", " ", text)
+
+    def _norm_title(value: str | None) -> str:
+        return _norm_text(value, keep_digits=True)
+
+    def _norm_location(value: str | None) -> str:
+        return _norm_text(value, keep_digits=True)
+
+    def _norm_link(value: str | None) -> str:
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        return raw.rstrip("/")
+
+    def _draft_score(draft: EventDraft) -> tuple[int, int, int, int]:
+        score = 0
+        score += min(len((_norm_title(draft.title) or "").split()), 8)
+        score += min(len(str(draft.description or "").split()), 20)
+        score += 4 if (draft.location_address or "").strip() else 0
+        score += 2 if (draft.city or "").strip() else 0
+        score += 2 if draft.links else 0
+        score += min(len(draft.poster_media or []), 3)
+        score += 1 if (draft.search_digest or "").strip() else 0
+        score += 1 if (draft.event_type or "").strip() else 0
+        score += 1 if draft.ticket_price_min is not None or draft.ticket_price_max is not None else 0
+        return score, len(draft.source_text or ""), len(draft.description or ""), len(draft.title or "")
+
+    def _poster_key(item: PosterMedia) -> tuple[str, str, str, str]:
+        return (
+            str(item.digest or ""),
+            str(item.supabase_url or ""),
+            str(item.catbox_url or ""),
+            str(item.name or ""),
+        )
+
+    def _merge_links(primary: list[str] | None, secondary: list[str] | None) -> list[str] | None:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for url in list(primary or []) + list(secondary or []):
+            norm = _norm_link(url)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            merged.append(url)
+        return merged or None
+
+    def _prefer_longer(current: str | None, candidate: str | None) -> str | None:
+        cur = (current or "").strip()
+        cand = (candidate or "").strip()
+        if len(cand) > len(cur):
+            return candidate
+        return current
+
+    groups: dict[tuple[str, str, str, str], list[EventDraft]] = {}
+    passthrough: list[EventDraft] = []
+    for draft in drafts_in:
+        date_key = str(draft.date or "").strip()
+        time_key = str(draft.time or "").strip()
+        title_key = _norm_title(draft.title)
+        venue_key = _norm_location(draft.venue or draft.location_address)
+        if not (date_key and time_key and title_key and venue_key):
+            passthrough.append(draft)
+            continue
+        groups.setdefault((date_key, time_key, venue_key, title_key), []).append(draft)
+
+    collapsed_any = False
+    out: list[EventDraft] = list(passthrough)
+    for _, group in groups.items():
+        if len(group) == 1:
+            out.append(group[0])
+            continue
+        collapsed_any = True
+        keep = max(group, key=_draft_score)
+        posters_by_key: dict[tuple[str, str, str, str], PosterMedia] = {
+            _poster_key(item): item for item in list(keep.poster_media or [])
+        }
+        for other in group:
+            if other is keep:
+                continue
+            keep.description = _prefer_longer(keep.description, other.description)
+            keep.source_text = _prefer_longer(keep.source_text, other.source_text)
+            keep.poster_summary = _prefer_longer(keep.poster_summary, other.poster_summary)
+            keep.search_digest = _prefer_longer(keep.search_digest, other.search_digest)
+            keep.location_address = _prefer_longer(keep.location_address, other.location_address)
+            keep.city = _prefer_longer(keep.city, other.city)
+            keep.event_type = keep.event_type or other.event_type
+            keep.emoji = keep.emoji or other.emoji
+            keep.festival = keep.festival or other.festival
+            keep.is_free = bool(keep.is_free or other.is_free)
+            keep.pushkin_card = bool(keep.pushkin_card or other.pushkin_card)
+            if keep.ticket_price_min is None:
+                keep.ticket_price_min = other.ticket_price_min
+            if keep.ticket_price_max is None:
+                keep.ticket_price_max = other.ticket_price_max
+            keep.links = _merge_links(keep.links, other.links)
+            keep.ocr_tokens_spent += int(other.ocr_tokens_spent or 0)
+            for poster in list(other.poster_media or []):
+                posters_by_key.setdefault(_poster_key(poster), poster)
+        keep.poster_media = list(posters_by_key.values())
+        keep.poster_summary = build_poster_summary(keep.poster_media)
+        out.append(keep)
+
+    if collapsed_any:
+        logger.info(
+            "vk_intake: collapsed same-post exact duplicate drafts dropped=%s kept=%s",
+            len(drafts_in) - len(out),
+            len(out),
+        )
+    return out
+
+
 async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
     if not urls:
         return []
@@ -2199,6 +2334,7 @@ async def build_event_drafts_from_vk(
             draft.reject_reason = recap_reason
 
     drafts = _maybe_collapse_program_schedule_drafts(drafts)
+    drafts = _collapse_same_post_exact_drafts(drafts)
 
     return drafts, festival_payload
 
@@ -3134,9 +3270,13 @@ async def persist_event_and_pages(
         else (draft.event_type or None)
     )
 
+    vk_source_chat_id, vk_source_message_id = _vk_wall_source_ids_from_url(source_post_url)
+
     candidate = EventCandidate(
         source_type="vk",
         source_url=source_post_url,
+        source_chat_id=vk_source_chat_id,
+        source_message_id=vk_source_message_id,
         source_text=draft.source_text or draft.title,
         title=draft.title,
         # Never default missing date/time to "today" or "00:00": it creates pseudo-events.

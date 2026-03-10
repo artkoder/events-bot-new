@@ -46,6 +46,7 @@ Smart Update по умолчанию строит публичный текст 
     - если явного имени нет, LLM должен предпочесть нейтральный формат вроде `<event_type> в <venue>`, а не промо-слоган;
     - deterministic grounding для `bundle.title` теперь требует не случайного одного токена, а более широкого пересечения с source text / raw_excerpt / OCR, чтобы не проходили fabricated titles вроде `8 марта — ...`, когда из источника реально извлекаются только дата и общий повод.
   - для multi-day событий используется пересечение диапазонов дат (`event.date..event.end_date` vs `candidate.date..candidate.end_date`), чтобы апдейты текущих выставок не создавали дублей.
+  - VK intake теперь прокидывает `post_id/group_id` из `wall-...` URL в `source_message_id/source_chat_id`, чтобы same-post idempotency могла сойтись ещё на раннем anchor-path даже до полного materialize `event_source`.
 - Мердж:
   - якорные поля (`date/time/location_name/location_address/end_date`) в целом не меняются автоматически;
     - исключение: `parser:<site>` может уточнять якоря при мердже;

@@ -155,6 +155,54 @@ async def test_same_post_longrun_exact_title_merges_same_source_time_noise(
 
 
 @pytest.mark.asyncio
+async def test_same_source_anchor_message_id_merges_without_event_source_row(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    source_url = "https://vk.com/wall-212233232_1680"
+    source_text = "14 марта в ОЦК ТеплоСеть пройдёт питчинг идей и клубов."
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="Питчинг идей и клубов в «ТеплоСети»",
+                date="2026-03-14",
+                time="18:00",
+                location_name="ОЦК ТеплоСеть",
+                city="Советск",
+                source_text=source_text,
+                source_post_url=source_url,
+                source_vk_post_url=source_url,
+                source_chat_id=212233232,
+                source_message_id=1680,
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url=source_url,
+        source_text=source_text,
+        raw_excerpt="Питчинг идей и клубов.",
+        title="Питчинг идей и клубов в ТеплоСети",
+        date="2026-03-14",
+        time="18:00",
+        location_name="ОЦК ТеплоСеть",
+        city="Советск",
+        source_chat_id=212233232,
+        source_message_id=1680,
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+
+@pytest.mark.asyncio
 async def test_cross_source_exact_match_merges_emoji_prefixed_titles_without_llm(
     tmp_path, monkeypatch
 ):
