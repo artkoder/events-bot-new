@@ -27,6 +27,8 @@ _MAX_TG_MESSAGE_LEN = 3800  # conservative: keep room for entities/HTML
 
 _TG_POST_URL_RE = re.compile(r"(?:https?://)?t\.me/(?:s/)?([^/\s]+)/(\d+)", re.IGNORECASE)
 _VK_WALL_PATH_RE = re.compile(r"^/wall-?(\d+)_([0-9]+)$", re.IGNORECASE)
+_POPULAR_POSTS_THREE_DAY_MAX_AGE = 2
+_POPULAR_POSTS_SEVEN_DAY_MAX_AGE = 6
 
 
 def _utc_now_ts() -> int:
@@ -934,10 +936,23 @@ def _fmt_platform(platform: str) -> str:
 
 
 async def _send_popular_posts_report(message: Message, db: Database, *, limit: int = 10) -> None:
-    three_day, three_dbg = await _load_top_items(db, window_days=3, age_day=2, latest_age_day_max=2, limit=limit)
+    seven_day, seven_dbg = await _load_top_items(
+        db,
+        window_days=7,
+        age_day=_POPULAR_POSTS_SEVEN_DAY_MAX_AGE,
+        latest_age_day_max=_POPULAR_POSTS_SEVEN_DAY_MAX_AGE,
+        limit=limit,
+    )
+    three_day, three_dbg = await _load_top_items(
+        db,
+        window_days=3,
+        age_day=_POPULAR_POSTS_THREE_DAY_MAX_AGE,
+        latest_age_day_max=_POPULAR_POSTS_THREE_DAY_MAX_AGE,
+        limit=limit,
+    )
     one_day, one_dbg = await _load_top_items(db, window_days=1, age_day=0, limit=limit)
 
-    urls = [it.post_url for it in (three_day + one_day) if it.post_url]
+    urls = [it.post_url for it in (seven_day + three_day + one_day) if it.post_url]
     telegraph_map = await _resolve_telegraph_map(db, source_urls=urls)
 
     def _render_section(title: str, items: list[_PostItem], dbg: dict[str, Any]) -> list[str]:
@@ -1041,9 +1056,17 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
         "Фильтр: views или likes строго выше медианы внутри канала/сообщества; медиана считается по тому же age_day за окно popularity horizon источника (обычно 90 дней), а в ТОП попадают посты из окна отчёта.",
         "Примечание: метрики пишутся только для постов, где были извлечены события (events_extracted>0/forced/existing); отчёт ниже дополнительно требует импортов (events_imported>0).",
         "",
-        "Окно 3 суток: берём <b>последний доступный</b> снапшот метрик для постов последних ~3 суток (`age_day=0..2`) и сравниваем его с медианой того же `age_day`.",
+        "Окно 7 суток: берём <b>последний доступный</b> снапшот метрик для постов последних ~7 суток (`age_day=0..6`) и сравниваем его с медианой того же `age_day`.",
         "",
     ]
+    lines.extend(_render_section("ТОП-10 за 7 суток", seven_day, seven_dbg))
+    lines.append("")
+    lines.extend(
+        [
+        "Окно 3 суток: берём <b>последний доступный</b> снапшот метрик для постов последних ~3 суток (`age_day=0..2`) и сравниваем его с медианой того же `age_day`.",
+        "",
+        ]
+    )
     lines.extend(_render_section("ТОП-10 за 3 суток", three_day, three_dbg))
     lines.append("")
     lines.append("Окно 24 часа: берём снапшоты метрик <b>age_day=0</b> (посты опубликованы в последние ~24 часа).")

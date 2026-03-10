@@ -313,7 +313,7 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
         "popular_posts": {
             "command": "/popular_posts",
             "risk": "safe",
-            "desc": "ТОП популярных постов (TG/VK), которые создали события: выше медианы внутри канала за 3 суток и за 24 часа.",
+            "desc": "ТОП популярных постов (TG/VK), которые создали события: выше медианы внутри канала за 7 суток, 3 суток и 24 часа.",
             "args_schema": {"args_text": {"type": "args_text", "required": False}},
             "examples": [
                 "покажи топ популярных постов",

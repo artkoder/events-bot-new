@@ -102,6 +102,47 @@ async def test_popular_posts_report_shows_above_median_breakdown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_popular_posts_report_includes_seven_day_block(monkeypatch):
+    class _Message:
+        def __init__(self) -> None:
+            self.chunks: list[str] = []
+
+        async def answer(self, text, **kwargs):  # noqa: ANN003
+            self.chunks.append(str(text))
+
+    async def _fake_load_top_items(_db, *, window_days, age_day, latest_age_day_max=None, limit):  # noqa: ANN001
+        return (
+            [],
+            {
+                "tg_available": True,
+                "vk_available": True,
+                "tg_total": 0,
+                "vk_total": 0,
+                "skipped_small_sample": 0,
+                "skipped_missing_median": 0,
+                "skipped_missing_metrics": 0,
+                "skipped_not_above_median": 0,
+                "checked_posts": 0,
+            },
+        )
+
+    async def _fake_resolve_telegraph_map(_db, *, source_urls):  # noqa: ANN001
+        return {}
+
+    monkeypatch.setattr(popular, "_load_top_items", _fake_load_top_items)
+    monkeypatch.setattr(popular, "_resolve_telegraph_map", _fake_resolve_telegraph_map)
+
+    message = _Message()
+    await popular._send_popular_posts_report(message, object(), limit=10)
+
+    assert message.chunks
+    text = "\n".join(message.chunks)
+    assert "Окно 7 суток" in text
+    assert "ТОП-10 за 7 суток" in text
+    assert "`age_day=0..6`" in text
+
+
+@pytest.mark.asyncio
 async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -320,6 +361,73 @@ async def test_popular_posts_three_day_uses_latest_available_snapshot(tmp_path, 
         assert items[0].baseline.sample == 3
         assert items[0].baseline.median_views == 60
         assert items[0].baseline.median_likes == 6
+        assert dbg["vk_total"] == 1
+        assert dbg["vk_metrics_total"] == 1
+        assert dbg["checked_posts"] == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_popular_posts_seven_day_uses_latest_available_snapshot_up_to_age6(tmp_path, monkeypatch):
+    monkeypatch.setenv("POST_POPULARITY_MIN_SAMPLE", "2")
+    monkeypatch.setenv("POST_POPULARITY_HORIZON_DAYS", "90")
+    monkeypatch.setenv("POST_POPULARITY_MAX_AGE_DAY", "6")
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    try:
+        now_ts = 2_000_000_000
+        post_ts = now_ts - 5 * 86400
+        hist1_ts = now_ts - 21 * 86400
+        hist2_ts = now_ts - 14 * 86400
+
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "INSERT INTO vk_source(group_id, screen_name, name) VALUES(?, ?, ?)",
+                (404, "gallery404", "Gallery 404"),
+            )
+            inbox_rows = [
+                (1, 404, 4001, hist1_ts, "old 1"),
+                (2, 404, 4002, hist2_ts, "old 2"),
+                (3, 404, 4003, post_ts, "week-window post"),
+            ]
+            for inbox_id, group_id, post_id, ts, text in inbox_rows:
+                await conn.execute(
+                    "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (inbox_id, group_id, post_id, ts, text, 1, "imported"),
+                )
+                await conn.execute(
+                    "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
+                    (inbox_id, inbox_id),
+                )
+            metrics = [
+                (404, 4001, 4, "https://vk.com/wall-404_4001", hist1_ts, hist1_ts + 4 * 86400, 80, 8),
+                (404, 4002, 4, "https://vk.com/wall-404_4002", hist2_ts, hist2_ts + 4 * 86400, 100, 10),
+                (404, 4003, 4, "https://vk.com/wall-404_4003", post_ts, now_ts, 260, 26),
+            ]
+            for row in metrics:
+                await conn.execute(
+                    "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+            await conn.commit()
+
+        monkeypatch.setattr(popular, "_utc_now_ts", lambda: now_ts)
+        items, dbg = await _load_top_items(
+            db,
+            window_days=7,
+            age_day=6,
+            latest_age_day_max=6,
+            limit=10,
+        )
+
+        assert len(items) == 1
+        assert items[0].platform == "vk"
+        assert items[0].post_id == 4003
+        assert items[0].baseline.sample == 3
+        assert items[0].baseline.median_views == 100
+        assert items[0].baseline.median_likes == 10
         assert dbg["vk_total"] == 1
         assert dbg["vk_metrics_total"] == 1
         assert dbg["checked_posts"] == 1

@@ -168,7 +168,7 @@ def compute_age_day(*, published_ts: int | None, collected_ts: int | None) -> in
 
 
 def _max_age_day() -> int:
-    return max(0, _env_int("POST_POPULARITY_MAX_AGE_DAY", 2))
+    return max(0, _env_int("POST_POPULARITY_MAX_AGE_DAY", 6))
 
 
 def normalize_age_day(age_day: int | None) -> int | None:

@@ -110,7 +110,7 @@ VK_AUTO_IMPORT_ALLOW_STALE_INBOX_TEXT_ON_FETCH_FAIL=1
 Каноника (общая для TG/VK): `docs/features/post-metrics/README.md` (таблицы, медианы, уровни `⭐/👍`, retention, ENV).
 
 Снапшоты сохраняются в `vk_post_metric` (ключ `(group_id, post_id, age_day)`), чтобы можно было анализировать динамику по дням после публикации.
-Метрики сохраняются только для `age_day <= POST_POPULARITY_MAX_AGE_DAY` (по умолчанию `2`), чтобы рост БД был ограничен.
+Метрики сохраняются только для `age_day <= POST_POPULARITY_MAX_AGE_DAY` (по умолчанию `6`), чтобы рост БД был ограничен и `/popular_posts` мог строить недельный ТОП без смешивания возрастов поста.
 
 Очистка старых метрик выполняется scheduler job `post_metrics_cleanup` (раз в сутки), retention по умолчанию `90` дней
 (настраивается через `POST_METRICS_RETENTION_DAYS`).

@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Changed
+- **Post Metrics / Popular Posts / Weekly Window**: `/popular_posts` now adds a `7-day` block that takes posts from the last week, uses the latest available snapshot inside `age_day=0..6`, and still compares each post only against the median of the same `age_day`, so weekly coverage improves without mixing different post ages into one baseline.
+- **Post Metrics / Capture Horizon**: the default `POST_POPULARITY_MAX_AGE_DAY` is now `6` instead of `2`, so Telegram/VK metric snapshots accumulate enough age buckets for the new weekly popularity window while keeping the same 90-day retention model.
 - **Post Metrics / Popular Posts**: `/popular_posts` now includes posts that are strictly above the per-source median on `views` or `likes` (not only on both), improving sparse-result windows while keeping the same diagnostic breakdown for `views/likes/оба`.
 - **Post Metrics / Baselines**: popularity baselines now stay strict by `age_day` over the `POST_POPULARITY_HORIZON_DAYS` history window instead of falling back to mixed `age_day<=...` buckets, and `/popular_posts` now compares report-window candidates against that 90-day same-age baseline instead of recomputing medians from the narrow report window itself.
 - **Post Metrics / Popular Posts Windows**: `/popular_posts` 3-day block now uses the latest available snapshot inside `age_day=0..2` for posts from the last 3 days, while still normalizing each post against the median of its own `age_day`; this removes the blind gap where strong posts disappeared after 24h but before an `age_day=2` snapshot existed.
