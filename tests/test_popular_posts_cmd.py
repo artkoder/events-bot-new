@@ -200,3 +200,62 @@ async def test_popular_posts_includes_post_above_only_one_median(tmp_path, monke
         assert dbg["skipped_not_above_median"] == 0
     finally:
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_popular_posts_uses_historical_same_age_baseline_outside_report_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("POST_POPULARITY_MIN_SAMPLE", "2")
+    monkeypatch.setenv("POST_POPULARITY_HORIZON_DAYS", "90")
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    try:
+        now_ts = 2_000_000_100
+        old_14d = now_ts - 14 * 86400
+        old_7d = now_ts - 7 * 86400
+        current_ts = now_ts - 100
+
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "INSERT INTO vk_source(group_id, screen_name, name) VALUES(?, ?, ?)",
+                (202, "gallery202", "Gallery 202"),
+            )
+            rows = [
+                (1, 202, 2001, old_14d, "old post 1"),
+                (2, 202, 2002, old_7d, "old post 2"),
+                (3, 202, 2003, current_ts, "current post"),
+            ]
+            for inbox_id, group_id, post_id, post_ts, text in rows:
+                await conn.execute(
+                    "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (inbox_id, group_id, post_id, post_ts, text, 1, "imported"),
+                )
+                await conn.execute(
+                    "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
+                    (inbox_id, inbox_id),
+                )
+            metrics = [
+                (202, 2001, 0, "https://vk.com/wall-202_2001", old_14d, old_14d + 100, 50, 5),
+                (202, 2002, 0, "https://vk.com/wall-202_2002", old_7d, old_7d + 100, 60, 6),
+                (202, 2003, 0, "https://vk.com/wall-202_2003", current_ts, now_ts, 200, 20),
+            ]
+            for row in metrics:
+                await conn.execute(
+                    "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    row,
+                )
+            await conn.commit()
+
+        monkeypatch.setattr(popular, "_utc_now_ts", lambda: now_ts)
+        items, dbg = await _load_top_items(db, window_days=1, age_day=0, limit=10)
+
+        assert len(items) == 1
+        assert items[0].platform == "vk"
+        assert items[0].post_id == 2003
+        assert items[0].baseline.sample == 3
+        assert items[0].baseline.median_views == 60
+        assert items[0].baseline.median_likes == 6
+        assert dbg["checked_posts"] == 1
+        assert dbg["skipped_small_sample"] == 0
+    finally:
+        await db.close()

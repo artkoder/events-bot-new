@@ -300,29 +300,6 @@ async def load_telegram_popularity_baseline(
             (int(source_id), int(age_day), int(since_ts)),
         )
         rows = await cur.fetchall()
-        # If the exact age bucket is too sparse (common on the first run), fall back to a
-        # per-channel baseline across all "recent" buckets. This keeps ⭐/👍 markers
-        # responsive even with a small sample.
-        min_sample = _env_int("POST_POPULARITY_MIN_SAMPLE", 2)
-        if len({int(r[0]) for r in rows if r and r[0] is not None}) < min_sample:
-            max_age = _max_age_day()
-            cur2 = await conn.execute(
-                """
-                SELECT m.message_id, MAX(m.views) AS v, MAX(m.likes) AS l
-                FROM telegram_post_metric m
-                JOIN telegram_scanned_message s
-                  ON s.source_id = m.source_id
-                 AND s.message_id = m.message_id
-                WHERE m.source_id=?
-                  AND m.age_day <= ?
-                  AND m.message_ts IS NOT NULL
-                  AND m.message_ts >= ?
-                  AND COALESCE(s.events_extracted, 0) > 0
-                GROUP BY m.message_id
-                """,
-                (int(source_id), int(max_age), int(since_ts)),
-            )
-            rows = await cur2.fetchall()
     views_vals: list[int] = []
     likes_vals: list[int] = []
     for _mid, v, l in rows:
@@ -346,64 +323,31 @@ async def load_telegram_popularity_overview(
     horizon_days: int | None = None,
     now_ts: int | None = None,
 ) -> PopularityOverview:
-    """Compute a per-source popularity baseline plus "days covered" for operator display.
-
-    The baseline logic matches `load_telegram_popularity_baseline` including its
-    fallback when the exact `age_day` bucket is too sparse.
-    """
+    """Compute an exact same-age-day popularity baseline plus "days covered"."""
 
     horizon_days = int(horizon_days or _env_int("POST_POPULARITY_HORIZON_DAYS", 90))
     now_ts = int(now_ts or _utc_now_ts())
     since_ts = now_ts - max(1, horizon_days) * 86400
 
-    async def _query_rows(*, fallback: bool) -> list[tuple[int, int, int | None, int | None]]:
-        async with db.raw_conn() as conn:
-            if not fallback:
-                cur = await conn.execute(
-                    """
-                    SELECT m.message_id, MAX(m.message_ts) AS ts, MAX(m.views) AS v, MAX(m.likes) AS l
-                    FROM telegram_post_metric m
-                    JOIN telegram_scanned_message s
-                      ON s.source_id = m.source_id
-                     AND s.message_id = m.message_id
-                    WHERE m.source_id=?
-                      AND m.age_day=?
-                      AND m.message_ts IS NOT NULL
-                      AND m.message_ts >= ?
-                      AND COALESCE(s.events_extracted, 0) > 0
-                    GROUP BY m.message_id
-                    """,
-                    (int(source_id), int(age_day), int(since_ts)),
-                )
-                return await cur.fetchall()
-
-            max_age = _max_age_day()
-            cur2 = await conn.execute(
-                """
-                SELECT m.message_id, MAX(m.message_ts) AS ts, MAX(m.views) AS v, MAX(m.likes) AS l
-                FROM telegram_post_metric m
-                JOIN telegram_scanned_message s
-                  ON s.source_id = m.source_id
-                 AND s.message_id = m.message_id
-                WHERE m.source_id=?
-                  AND m.age_day <= ?
-                  AND m.message_ts IS NOT NULL
-                  AND m.message_ts >= ?
-                  AND COALESCE(s.events_extracted, 0) > 0
-                GROUP BY m.message_id
-                """,
-                (int(source_id), int(max_age), int(since_ts)),
-            )
-            return await cur2.fetchall()
-
-    rows = await _query_rows(fallback=False)
-    min_sample = _env_int("POST_POPULARITY_MIN_SAMPLE", 2)
-    used_fallback = False
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            """
+            SELECT m.message_id, MAX(m.message_ts) AS ts, MAX(m.views) AS v, MAX(m.likes) AS l
+            FROM telegram_post_metric m
+            JOIN telegram_scanned_message s
+              ON s.source_id = m.source_id
+             AND s.message_id = m.message_id
+            WHERE m.source_id=?
+              AND m.age_day=?
+              AND m.message_ts IS NOT NULL
+              AND m.message_ts >= ?
+              AND COALESCE(s.events_extracted, 0) > 0
+            GROUP BY m.message_id
+            """,
+            (int(source_id), int(age_day), int(since_ts)),
+        )
+        rows = await cur.fetchall()
     unique_ids = {int(r[0]) for r in rows if r and r[0] is not None}
-    if len(unique_ids) < min_sample:
-        used_fallback = True
-        rows = await _query_rows(fallback=True)
-        unique_ids = {int(r[0]) for r in rows if r and r[0] is not None}
 
     views_vals: list[int] = []
     likes_vals: list[int] = []
@@ -425,7 +369,7 @@ async def load_telegram_popularity_overview(
         baseline=baseline,
         days_covered=int(len(day_keys)),
         horizon_days=int(horizon_days),
-        used_fallback=bool(used_fallback),
+        used_fallback=False,
     )
 
 
@@ -500,27 +444,6 @@ async def load_vk_popularity_baseline(
             (int(group_id), int(age_day), int(since_ts)),
         )
         rows = await cur.fetchall()
-        min_sample = _env_int("POST_POPULARITY_MIN_SAMPLE", 2)
-        if len({int(r[0]) for r in rows if r and r[0] is not None}) < min_sample:
-            max_age = _max_age_day()
-            cur2 = await conn.execute(
-                """
-                SELECT m.post_id, MAX(m.views) AS v, MAX(m.likes) AS l
-                FROM vk_post_metric m
-                JOIN vk_inbox i
-                  ON i.group_id = m.group_id
-                 AND i.post_id = m.post_id
-                JOIN vk_inbox_import_event ie
-                  ON ie.inbox_id = i.id
-                WHERE m.group_id=?
-                  AND m.age_day <= ?
-                  AND m.post_ts IS NOT NULL
-                  AND m.post_ts >= ?
-                GROUP BY m.post_id
-                """,
-                (int(group_id), int(max_age), int(since_ts)),
-            )
-            rows = await cur2.fetchall()
     views_vals: list[int] = []
     likes_vals: list[int] = []
     for _pid, v, l in rows:

@@ -94,7 +94,7 @@ async def test_load_telegram_popularity_overview_basic(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_telegram_popularity_overview_fallback_when_sparse(tmp_path, monkeypatch):
+async def test_load_telegram_popularity_overview_keeps_exact_age_bucket_when_sparse(tmp_path, monkeypatch):
     monkeypatch.setenv("POST_POPULARITY_MIN_SAMPLE", "2")
     monkeypatch.setenv("POST_POPULARITY_MAX_AGE_DAY", "2")
     monkeypatch.setenv("POST_POPULARITY_HORIZON_DAYS", "90")
@@ -107,7 +107,7 @@ async def test_load_telegram_popularity_overview_fallback_when_sparse(tmp_path, 
     day0 = now_ts - 3 * 86400 + 12 * 3600
     day1 = now_ts - 2 * 86400 + 12 * 3600
 
-    # Only one post in the exact age_day bucket -> fallback to age_day<=max_age.
+    # Only one post in the exact age_day bucket -> keep the exact bucket.
     await _seed_message(db, source_id=source_id, message_id=1, age_day=0, message_ts=day0, views=100, likes=10)
     await _seed_message(db, source_id=source_id, message_id=2, age_day=1, message_ts=day0 + 60, views=200, likes=20)
     await _seed_message(db, source_id=source_id, message_id=3, age_day=2, message_ts=day1, views=300, likes=30)
@@ -119,9 +119,8 @@ async def test_load_telegram_popularity_overview_fallback_when_sparse(tmp_path, 
         horizon_days=90,
         now_ts=now_ts,
     )
-    assert overview.used_fallback is True
-    assert overview.days_covered == 2
-    assert overview.baseline.sample == 3
-    assert overview.baseline.median_views == 200
-    assert overview.baseline.median_likes == 20
-
+    assert overview.used_fallback is False
+    assert overview.days_covered == 1
+    assert overview.baseline.sample == 1
+    assert overview.baseline.median_views == 100
+    assert overview.baseline.median_likes == 10

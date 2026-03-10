@@ -377,6 +377,12 @@ async def _load_top_items(
     now_ts = _utc_now_ts()
     since_ts = now_ts - max(1, int(window_days)) * 86400
     min_sample = max(2, _env_int("POST_POPULARITY_MIN_SAMPLE", 2))
+    from source_parsing.post_metrics import (
+        PopularityBaseline,
+        load_telegram_popularity_baseline,
+        load_vk_popularity_baseline,
+        popularity_marks,
+    )
 
     tg_rows: list[tuple] = []
     vk_rows: list[tuple] = []
@@ -528,52 +534,51 @@ async def _load_top_items(
         else:
             vk_rows = []
 
-    # Baselines: per-source medians inside the same window and bucket.
-    tg_views: dict[int, list[int]] = {}
-    tg_likes: dict[int, list[int]] = {}
     tg_sample: dict[int, set[int]] = {}
-    for source_id, message_id, _url, _ts, v, l, _imp, _u, _t in tg_rows:
+    for source_id, message_id, _url, _ts, _v, _l, _imp, _u, _t in tg_rows:
         try:
             sid = int(source_id)
             mid = int(message_id)
         except Exception:
             continue
         tg_sample.setdefault(sid, set()).add(mid)
-        if isinstance(v, int) and v >= 0:
-            tg_views.setdefault(sid, []).append(int(v))
-        if isinstance(l, int) and l >= 0:
-            tg_likes.setdefault(sid, []).append(int(l))
 
-    vk_views: dict[int, list[int]] = {}
-    vk_likes: dict[int, list[int]] = {}
     vk_sample: dict[int, set[int]] = {}
-    for group_id, post_id, _url, _ts, v, l, _sn, _nm in vk_rows:
+    for group_id, post_id, _url, _ts, _v, _l, _sn, _nm in vk_rows:
         try:
             gid = int(group_id)
             pid = int(post_id)
         except Exception:
             continue
         vk_sample.setdefault(gid, set()).add(pid)
-        if isinstance(v, int) and v >= 0:
-            vk_views.setdefault(gid, []).append(int(v))
-        if isinstance(l, int) and l >= 0:
-            vk_likes.setdefault(gid, []).append(int(l))
 
+    # Baselines: same source + same age bucket over the popularity horizon
+    # (default 90 days). The report window only controls which posts are candidates.
     tg_baseline: dict[int, _Baseline] = {}
-    for sid, ids in tg_sample.items():
-        sample = int(len(ids))
+    for sid in tg_sample:
+        base = await load_telegram_popularity_baseline(
+            db,
+            source_id=int(sid),
+            age_day=int(age_day),
+            now_ts=int(now_ts),
+        )
         tg_baseline[sid] = _Baseline(
-            median_views=_median_int(tg_views.get(sid, [])),
-            median_likes=_median_int(tg_likes.get(sid, [])),
-            sample=sample,
+            median_views=base.median_views,
+            median_likes=base.median_likes,
+            sample=int(base.sample),
         )
     vk_baseline: dict[int, _Baseline] = {}
-    for gid, ids in vk_sample.items():
-        sample = int(len(ids))
+    for gid in vk_sample:
+        base = await load_vk_popularity_baseline(
+            db,
+            group_id=int(gid),
+            age_day=int(age_day),
+            now_ts=int(now_ts),
+        )
         vk_baseline[gid] = _Baseline(
-            median_views=_median_int(vk_views.get(gid, [])),
-            median_likes=_median_int(vk_likes.get(gid, [])),
-            sample=sample,
+            median_views=base.median_views,
+            median_likes=base.median_likes,
+            sample=int(base.sample),
         )
 
     # Build candidates: strictly above median on at least one metric.
@@ -637,8 +642,6 @@ async def _load_top_items(
             return
         popularity = ""
         try:
-            from source_parsing.post_metrics import PopularityBaseline, popularity_marks
-
             popularity = popularity_marks(
                 views=int(views),
                 likes=int(likes),
@@ -872,7 +875,7 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
 
     lines: list[str] = [
         "📊 <b>Популярные посты → события</b>",
-        "Фильтр: views или likes строго выше медианы внутри канала/сообщества; медианы считаются по окну и платформе отдельно.",
+        "Фильтр: views или likes строго выше медианы внутри канала/сообщества; медиана считается по тому же age_day за окно popularity horizon источника (обычно 90 дней), а в ТОП попадают посты из окна отчёта.",
         "Примечание: метрики пишутся только для постов, где были извлечены события (events_extracted>0/forced/existing); отчёт ниже дополнительно требует импортов (events_imported>0).",
         "",
         "Окно 3 суток: берём снапшоты метрик <b>age_day=2</b> (посты опубликованы ~2–3 суток назад; метрики накопились за ~3 дня).",
