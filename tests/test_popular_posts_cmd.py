@@ -168,12 +168,12 @@ async def test_popular_posts_includes_post_above_only_one_median(tmp_path, monke
                 (2, 101, 1002, 2_000_000_010, "post 1002", 1, "imported"),
             )
             await conn.execute(
-                "INSERT INTO vk_inbox_import_event(id, inbox_id, event_id, created_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP)",
-                (1, 1, 1),
+                "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
+                (1, 1),
             )
             await conn.execute(
-                "INSERT INTO vk_inbox_import_event(id, inbox_id, event_id, created_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP)",
-                (2, 2, 2),
+                "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
+                (2, 2),
             )
             await conn.execute(
                 "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
@@ -190,13 +190,13 @@ async def test_popular_posts_includes_post_above_only_one_median(tmp_path, monke
         monkeypatch.setattr(popular, "_utc_now_ts", lambda: 2_000_000_100)
         items, dbg = await _load_top_items(db, window_days=1, age_day=0, limit=10)
 
-        assert len(items) == 1
-        assert items[0].platform == "vk"
-        assert items[0].post_id == 1002
+        assert len(items) == 2
+        assert {item.platform for item in items} == {"vk"}
+        assert {item.post_id for item in items} == {1001, 1002}
         assert dbg["checked_posts"] == 2
         assert dbg["above_median_views"] == 1
         assert dbg["above_median_likes"] == 1
         assert dbg["above_median_both"] == 0
-        assert dbg["skipped_not_above_median"] == 1
+        assert dbg["skipped_not_above_median"] == 0
     finally:
         await db.close()
