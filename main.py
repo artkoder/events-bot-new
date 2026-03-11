@@ -2766,7 +2766,12 @@ HELP_COMMANDS = [
     },
     {
         "usage": "/recent_imports [hours]",
-        "desc": "List events created or updated from Telegram, VK, and /parse for the last N hours (default 24)",
+        "desc": "List recent events created or updated from Telegram, VK, and /parse (default 24h)",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/popular_posts [N]",
+        "desc": "Top TG/VK posts above median with linked created events",
         "roles": {"superadmin"},
     },
     {

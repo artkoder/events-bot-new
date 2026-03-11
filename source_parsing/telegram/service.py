@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from db import Database
+from kaggle_registry import list_jobs, register_job, remove_job
 from models import TelegramSource, TelegramSourceForceMessage
 from ops_run import finish_ops_run, start_ops_run
 from source_parsing.telegram.deduplication import get_month_context_urls
@@ -106,10 +107,25 @@ KEEP_DATASETS = os.getenv("TG_MONITORING_KEEP_DATASETS", "").strip().lower() in 
 # Overlapping Kaggle kernels can reuse the same Telegram session concurrently and trigger
 # Telegram-side throttling / auth-key issues.
 _RUN_LOCK = asyncio.Lock()
+_TG_MONITOR_RECOVERY_ACTIVE: set[str] = set()
 
 
 class TgMonitoringAlreadyRunningError(RuntimeError):
     pass
+
+
+def _resolve_tg_monitor_ops_status(
+    report: TelegramMonitorReport,
+    *,
+    report_loaded: bool,
+) -> str:
+    if not report_loaded:
+        return "error"
+    if report.errors:
+        return "partial"
+    if int(report.messages_scanned or 0) == 0:
+        return "empty"
+    return "success"
 
 
 def _tg_monitor_lock_path() -> Path:
@@ -2511,7 +2527,8 @@ async def run_telegram_import_from_results(
         operator_id=operator_id,
         details={"run_id": run_id, "mode": "import_only", "results_path": str(results_path)},
     )
-    status = "success"
+    status = "error"
+    report_loaded = False
     report = TelegramMonitorReport(run_id=run_id)
     try:
         if _RUN_LOCK.locked():
@@ -2546,11 +2563,17 @@ async def run_telegram_import_from_results(
                         run_id=run_id,
                         send_progress=send_progress,
                     )
+                    report_loaded = True
+                    status = _resolve_tg_monitor_ops_status(report, report_loaded=report_loaded)
                     return report
             except TgMonitoringAlreadyRunningError:
                 status = "skipped"
                 report = TelegramMonitorReport(run_id=run_id, errors=["already_running_global_lock"])
                 return report
+    except asyncio.CancelledError:
+        status = "error"
+        report.errors.append("cancelled")
+        raise
     except Exception:
         status = "error"
         raise
@@ -2608,7 +2631,8 @@ async def run_telegram_dev_recreate_reimport(
         operator_id=operator_id,
         details={"run_id": run_id, "mode": "dev_recreate_reimport", "results_path": str(results_path)},
     )
-    status = "success"
+    status = "error"
+    report_loaded = False
     report = TelegramMonitorReport(run_id=run_id)
     try:
         if _RUN_LOCK.locked():
@@ -2661,11 +2685,17 @@ async def run_telegram_dev_recreate_reimport(
                         run_id=run_id,
                         send_progress=send_progress,
                     )
+                    report_loaded = True
+                    status = _resolve_tg_monitor_ops_status(report, report_loaded=report_loaded)
                     return report
             except TgMonitoringAlreadyRunningError:
                 status = "skipped"
                 report = TelegramMonitorReport(run_id=run_id, errors=["already_running_global_lock"])
                 return report
+    except asyncio.CancelledError:
+        status = "error"
+        report.errors.append("cancelled")
+        raise
     except Exception:
         status = "error"
         raise
@@ -2717,7 +2747,8 @@ async def run_telegram_monitor(
         operator_id=operator_id,
         details={"run_id": run_id},
     )
-    status = "success"
+    status = "error"
+    report_loaded = False
     report = TelegramMonitorReport(run_id=run_id)
     try:
         if _RUN_LOCK.locked():
@@ -2751,11 +2782,17 @@ async def run_telegram_monitor(
                         run_id=run_id,
                         send_progress=send_progress,
                     )
+                    report_loaded = True
+                    status = _resolve_tg_monitor_ops_status(report, report_loaded=report_loaded)
                     return report
             except TgMonitoringAlreadyRunningError:
                 status = "skipped"
                 report = TelegramMonitorReport(run_id=run_id, errors=["already_running_global_lock"])
                 return report
+    except asyncio.CancelledError:
+        status = "error"
+        report.errors.append("cancelled")
+        raise
     except Exception:
         status = "error"
         raise
@@ -2875,6 +2912,8 @@ async def _run_telegram_monitor_locked(
     dataset_cipher = ""
     dataset_key = ""
     expected_kernel_sources: list[str] = []
+    kernel_ref = ""
+    registered_recovery = False
     try:
         dataset_cipher, dataset_key = await _prepare_kaggle_datasets(
             client=client,
@@ -2913,6 +2952,20 @@ async def _run_telegram_monitor_locked(
             run_id=run_id,
             status_callback=_update_kaggle_status,
         )
+        try:
+            await register_job(
+                "tg_monitoring",
+                kernel_ref,
+                meta={
+                    "run_id": run_id,
+                    "chat_id": chat_id,
+                    "pid": os.getpid(),
+                    "dataset_slugs": [dataset_cipher, dataset_key],
+                },
+            )
+            registered_recovery = True
+        except Exception:
+            logger.warning("tg_monitor: failed to register recovery job", exc_info=True)
         await asyncio.sleep(KAGGLE_STARTUP_WAIT_SECONDS)
 
         status, status_data, duration = await _poll_kaggle_kernel(
@@ -2940,6 +2993,15 @@ async def _run_telegram_monitor_locked(
         )
         if status != "complete":
             failure = _extract_kaggle_failure_message(status_data)
+            if registered_recovery and kernel_ref:
+                try:
+                    await remove_job("tg_monitoring", kernel_ref)
+                    registered_recovery = False
+                except Exception:
+                    logger.warning(
+                        "tg_monitor: failed to remove recovery job after terminal kernel status",
+                        exc_info=True,
+                    )
             if _is_auth_key_duplicated_failure(status_data):
                 await _notify(_build_auth_key_duplicated_hint())
                 raise RuntimeError(
@@ -2990,10 +3052,92 @@ async def _run_telegram_monitor_locked(
             except Exception:
                 logger.exception("tg_monitor: failed to send report")
 
+        if registered_recovery and kernel_ref:
+            try:
+                await remove_job("tg_monitoring", kernel_ref)
+                registered_recovery = False
+            except Exception:
+                logger.warning("tg_monitor: failed to remove recovery job after import", exc_info=True)
+
         return report
     finally:
         if dataset_cipher or dataset_key:
             await _cleanup_datasets([dataset_cipher, dataset_key])
+
+
+async def resume_telegram_monitor_jobs(
+    db: Database,
+    bot: Any | None,
+    *,
+    chat_id: int | None = None,
+) -> int:
+    jobs = await list_jobs("tg_monitoring")
+    if not jobs:
+        return 0
+
+    notify_chat_id = chat_id
+    if notify_chat_id is None:
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if admin_chat_id:
+            try:
+                notify_chat_id = int(admin_chat_id)
+            except ValueError:
+                notify_chat_id = None
+
+    client = KaggleClient()
+    recovered = 0
+    for job in jobs:
+        kernel_ref = str(job.get("kernel_ref") or "").strip()
+        if not kernel_ref or kernel_ref in _TG_MONITOR_RECOVERY_ACTIVE:
+            continue
+        _TG_MONITOR_RECOVERY_ACTIVE.add(kernel_ref)
+        try:
+            meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+            owner_pid = meta.get("pid")
+            if owner_pid == os.getpid():
+                continue
+
+            run_id = str(meta.get("run_id") or "").strip() or uuid.uuid4().hex
+            try:
+                status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
+            except Exception:
+                logger.exception("tg_monitor_recovery: status fetch failed kernel=%s", kernel_ref)
+                continue
+
+            state = str(status.get("status") or "").lower()
+            if state in {"error", "failed", "cancelled"}:
+                await remove_job("tg_monitoring", kernel_ref)
+                if bot and notify_chat_id:
+                    await bot.send_message(
+                        int(notify_chat_id),
+                        f"⚠️ tg_monitor recovery: kernel {kernel_ref} завершился ошибкой",
+                    )
+                continue
+            if state != "complete":
+                continue
+
+            results_path = await _download_results(client, kernel_ref, run_id)
+            await run_telegram_import_from_results(
+                db,
+                results_path=results_path,
+                bot=bot,
+                chat_id=notify_chat_id,
+                run_id=run_id,
+                send_progress=bool(bot and notify_chat_id),
+                trigger="recovery_import",
+                operator_id=0,
+            )
+            await remove_job("tg_monitoring", kernel_ref)
+            recovered += 1
+            if bot and notify_chat_id:
+                await bot.send_message(
+                    int(notify_chat_id),
+                    f"✅ tg_monitor recovery: kernel {kernel_ref} обработан",
+                )
+        finally:
+            _TG_MONITOR_RECOVERY_ACTIVE.discard(kernel_ref)
+
+    return recovered
 
 
 async def telegram_monitor_scheduler(

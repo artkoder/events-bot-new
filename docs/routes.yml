@@ -95,6 +95,14 @@ features:
       - handlers/admin_assist_cmd.py
       - main.py
       - main_part2.py
+  recent_imports:
+    status: implemented
+    docs: docs/features/recent-imports/README.md
+    entrypoints:
+      - handlers/recent_imports_cmd.py
+      - handlers/admin_assist_cmd.py
+      - main.py
+      - main_part2.py
   telegram_monitoring:
     status: implemented
     docs: docs/features/telegram-monitoring/README.md

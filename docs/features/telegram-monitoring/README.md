@@ -136,6 +136,23 @@
 - После `kernels_push` сервер дополнительно ждёт, пока metadata notebook действительно начнёт ссылаться на ожидаемые временные datasets (`config cipher/key`), и только потом считает run “своим” и запускает основной polling.
 - Перед скачиванием `telegram_results.json` сервер ещё раз проверяет, что kernel всё ещё привязан к тем же datasets. Если notebook успел быть перепушен другим запуском, импорт прерывается с ошибкой вместо того, чтобы забрать чужой/stale output.
 
+## Recovery после рестарта бота
+
+- `tg_monitoring` регистрирует Kaggle kernel в общем `kaggle_registry` сразу после успешного `push`.
+- Scheduler `kaggle_recovery` на старте/по интервалу проверяет незавершённые `tg_monitoring` kernels:
+  - если kernel ещё работает в Kaggle, запись остаётся в реестре и будет проверена позже;
+  - если kernel завершился `complete`, бот заново скачивает `telegram_results.json` из Kaggle и запускает обычный server-import;
+  - если kernel завершился `failed/error/cancelled`, запись удаляется из реестра и оператор получает уведомление.
+- Это значит, что для восстановления **не требуется** сохранять `telegram_results.json` в `/data`: источником истины остаётся Kaggle output, а локальный `/tmp` используется только как временный download/cache путь.
+
+## Статусы `ops_run` для `tg_monitoring`
+
+- `success` — результаты Kaggle скачаны, `telegram_results.json` разобран, import завершён, `messages_scanned > 0`.
+- `empty` — результаты Kaggle скачаны и разобраны, но реальный отчёт пустой (`messages_scanned = 0`).
+- `partial` — отчёт разобран, но во время import накопились ошибки в `TelegramMonitorReport.errors`.
+- `error` — results не были получены/разобраны или run был прерван до завершения import.
+- Важно: `empty` выставляется **только** когда бот реально прочитал `telegram_results.json`. Пустой in-memory `TelegramMonitorReport` после рестарта/отмены больше не считается `success`.
+
 ## Надёжность импорта (SQLite lock)
 
 - Если на этапе server-import возникает `sqlite3.OperationalError: database is locked`, мониторинг не падает сразу:
