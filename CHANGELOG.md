@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Bot Startup / Recent Imports**: Removed a duplicate `recent_imports_router` registration in `create_app()`, which crashed the production webhook process during startup and made the bot stop responding to commands.
+
 ### Changed
 - **Post Metrics / Popular Posts**: `/popular_posts` now includes posts that are strictly above the per-source median on `views` or `likes` (not only on both), improving sparse-result windows while keeping the same diagnostic breakdown for `views/likes/оба`.
 - **Admin Reports / Recent Imports UI**: `/recent_imports` rows now start with `id`, then show a compact status icon (`✅` created, `🔄` updated), and only then the Telegraph-linked title, reducing visual noise in long source reports.
