@@ -79,6 +79,7 @@
 - **Smart Update / Gemma Event Copy Retrospective**: Expanded the canonical `baseline -> v2.14` retrospective with attributed `Opus` and `Gemini` evaluation signals from existing consultation rounds, explicitly separating external-model judgments from the final local synthesis.
 
 ### Fixed
+- **Telegram Monitoring / Recovery + Statuses**: `tg_monitoring` now registers running Kaggle kernels in the shared `kaggle_registry`, `kaggle_recovery` can resume completed kernels after bot restarts and re-import their `telegram_results.json`, and interrupted runs no longer fall through to false `success` with zero metrics; completed empty reports are now marked `empty` instead.
 - **3D Preview / Kaggle Runtime Attachments**: Preview3D now follows the same Kaggle split-secrets flow as Telegram Monitoring: separate cipher/key datasets, longer dataset propagation wait, and shared `KaggleClient.push_kernel(...)` handling for `dataset_sources`, so manual/prod `/3di` runs no longer fail at notebook startup when Kaggle attaches runtime datasets slowly.
 - **3D Preview / Scheduled `/3di`**: Preview3D Kaggle runs now receive Supabase runtime config and secrets through encrypted split datasets (`config.json` + `secrets.enc`/`fernet.key`) before render/upload, so scheduled night runs no longer finish with `previews_rendered=0` only because `SUPABASE_URL/SUPABASE_KEY` were missing inside Kaggle.
 - **VK Auto Import / Multi-Post Duplicates**: Exact duplicate child drafts from one VK multi-poster schedule post now collapse before persistence when `date + explicit time + venue + normalized title` match, and VK persistence derives `post_id/group_id` from `wall-...` URLs so same-post idempotency can converge earlier on retries/near-duplicates.
@@ -194,6 +195,8 @@
 - **Ops / Rebuild**: `/rebuild_event` now supports `--regen-desc` to regenerate fact-first descriptions from stored facts before enqueuing rebuild jobs.
 
 ### Fixed
+- **Admin Assistant / Coverage**: `/a` allowlist is now synced with the registered slash-command surface (including `/rebuild_event`, `/telegraph_cache_stats`, `/telegraph_cache_sanitize`, `/ik_poster`, `/start`, `/register`, `/assist_cancel`, and stateful `/cancel`), and explicit command-like inputs such as `rebuild_event 123` or `/recent_imports 48` now route deterministically before Gemma fallback.
+- **Admin Assistant / Recent Imports Routing**: `/a` now recognizes source-origin list requests like “события из телеграм и вк за сутки” as `/recent_imports` instead of drifting into the calendar-day `/events` date picker; `/help` also exposes `/recent_imports` and `/popular_posts` for better report discoverability.
 - **Kaggle Polling / `/tg` + `/v`**: Kaggle-driven runs now confirm notebook metadata is bound to the expected temporary dataset(s) before polling and re-check the binding before consuming terminal output, preventing stale/foreign notebook runs from being mistaken for the current Telegram monitor or video session.
 - **Telegraph Pages**: Removed the extra visual blank line between description subheadings (`h3/h4`) and the first text block on event/source Telegraph pages, while keeping normal paragraph spacing intact.
 - **Smart Update (fact-first)**: Improved facts-extraction prompt so short program lists (e.g., film lineups) are returned as individual facts and can appear in the generated `description`.

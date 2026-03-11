@@ -16830,6 +16830,8 @@ def create_app() -> web.Application:
     dp.include_router(admin_assist_router)
     from handlers.popular_posts_cmd import popular_posts_router
     dp.include_router(popular_posts_router)
+    from handlers.recent_imports_cmd import recent_imports_router
+    dp.include_router(recent_imports_router)
     from handlers.telegraph_cache_cmd import telegraph_cache_router
     dp.include_router(telegraph_cache_router)
     dp.include_router(tg_monitor_router)

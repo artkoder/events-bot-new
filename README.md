@@ -80,8 +80,9 @@ Telegraph posts use the short form "D месяц" (e.g. `2 июля`).
 Dates are shown as `DD.MM.YYYY` in bot messages. Telegraph pages and other
 public posts use the format "D месяц" (for example, "2 июля").
 
-See `docs/COMMANDS.md` for available bot commands, including `/events` to
-browse upcoming announcements. Ticket links in this view are shortened via
+See `docs/operations/commands.md` for available bot commands, including `/events` to
+browse upcoming announcements and `/recent_imports` to inspect the latest Telegram/VK/`/parse`
+imports over the past 24 hours. Ticket links in this view are shortened via
 vk.cc, and when a short key exists the bot adds a `Статистика VK: https://vk.com/cc?act=stats&key=…`
 line under the button row. The command accepts dates like `2025-07-10`,
 `10.07.2025` or `2 августа`.
@@ -419,7 +420,7 @@ A VK service (server) token helps keep read-only API traffic away from the user 
    - Avoid heavy requests at startup; warm caches lazily in background workers.
 
 ## Files
-- `docs/COMMANDS.md` – full list of bot commands.
+- `docs/operations/commands.md` – full list of bot commands.
 - `docs/USER_STORIES.md` – user stories.
 - `docs/ARCHITECTURE.md` – system architecture.
 - `docs/PROMPTS.md` – base prompt for model 4o (edit this for parsing rules).
@@ -441,7 +442,7 @@ only `edit_page(path=...)` accepts a `path` argument when updating existing page
 Editing an event lets you create or delete an ICS file for calendars. The file is uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_KEY` are set. Files are named `event-<id>-YYYY-MM-DD.ics` (see `main.py:_ics_filename`) and include a link back to the event. Set `SUPABASE_BUCKET` if you use a bucket name other than `events-ics`. Planned Storage split (ICS vs media) is documented in `docs/operations/supabase-storage.md`.
 Supabase export is enabled by default; set `SUPABASE_EXPORT_ENABLED=0` to disable pushing VK crawl telemetry into Supabase. The exporter writes group metadata to `vk_groups`, stores per-run counters in `vk_crawl_snapshots`, and upserts sampled misses in `vk_misses_sample`. The 60-day retention window (`SUPABASE_RETENTION_DAYS`, default: 60) deletes snapshots and miss samples older than the cutoff on each run.
 
-Miss logging always inserts rows when keyword detection and date parsing disagree (`kw_ok XOR has_date`); other misses follow probabilistic sampling controlled by `VK_MISSES_SAMPLE_RATE` (default: 0.1). Post bodies are never uploaded—only IDs, URLs, timestamps, counters, and match metadata—so sensitive text stays in VK. Operators can confirm that inserts flow through by querying the Supabase dashboards documented in [`docs/COMMANDS.md`](docs/COMMANDS.md) via `/usage_test` and `/stats`.
+Miss logging always inserts rows when keyword detection and date parsing disagree (`kw_ok XOR has_date`); other misses follow probabilistic sampling controlled by `VK_MISSES_SAMPLE_RATE` (default: 0.1). Post bodies are never uploaded—only IDs, URLs, timestamps, counters, and match metadata—so sensitive text stays in VK. Operators can confirm that inserts flow through by querying the Supabase dashboards documented in [`docs/operations/commands.md`](docs/operations/commands.md) via `/usage_test` and `/stats`.
 When a calendar file exists the Telegraph page shows a link right under the title image: "📅 Добавить в календарь".
 Events may note support for the Пушкинская карта, shown as a separate line in postings.
 Run `/exhibitions` to see all ongoing exhibitions (events with a start and end date).

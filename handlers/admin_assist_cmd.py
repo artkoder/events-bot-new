@@ -114,6 +114,28 @@ def _parse_iso_date(value: str) -> str:
 
 _TZ_OFFSET_RE = re.compile(r"^[+-]\d{2}:\d{2}$")
 _TIME_HHMM_RE = re.compile(r"^\d{2}:\d{2}$")
+_RECENT_HOURS_RE = re.compile(r"(?<!\d)(\d{1,3})\s*(?:ч|час(?:а|ов)?)\b")
+_INT_TOKEN_RE = re.compile(r"(?<!\d)(\d{1,9})(?!\d)")
+_DIRECT_COMMAND_TOKEN_RE = re.compile(r"^/?([A-Za-z0-9_]+)$")
+_DIRECT_COMMAND_LEAD_WORDS = {
+    "cmd",
+    "command",
+    "команда",
+    "команду",
+    "запусти",
+    "запустить",
+    "выполни",
+    "выполнить",
+    "сделай",
+    "сделать",
+    "открой",
+    "открыть",
+    "покажи",
+    "показать",
+    "дай",
+    "вызови",
+    "вызвать",
+}
 
 
 def _parse_tz_offset(value: str) -> str:
@@ -133,6 +155,40 @@ def _parse_time_hhmm(value: str) -> str:
     return cleaned
 
 
+def _extract_recent_hours_arg(value: str) -> int | None:
+    t = _norm_intent_text(value)
+    if not t:
+        return None
+    if any(phrase in t for phrase in ("за сутки", "последние сутки", "за день", "за 24", "24 часа", "24ч")):
+        return 24
+    match = _RECENT_HOURS_RE.search(t)
+    if not match:
+        return None
+    try:
+        hours = int(match.group(1))
+    except Exception:
+        return None
+    if 1 <= hours <= 720:
+        return hours
+    return None
+
+
+def _extract_first_int(value: str, *, min_value: int = 1, max_value: int = 999_999_999) -> int | None:
+    t = _norm_intent_text(value)
+    if not t:
+        return None
+    match = _INT_TOKEN_RE.search(t)
+    if not match:
+        return None
+    try:
+        number = int(match.group(1))
+    except Exception:
+        return None
+    if min_value <= number <= max_value:
+        return number
+    return None
+
+
 def _allowed_actions() -> dict[str, dict[str, Any]]:
     vk_miss_cmd = str(require_main_attr("VK_MISS_REVIEW_COMMAND") or "/vk_misses").strip() or "/vk_misses"
     # Keep the allowlist small and explicit. Add new actions here.
@@ -144,12 +200,53 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "args_schema": {},
             "examples": ["покажи команды", "что умеет бот"],
         },
+        "start": {
+            "command": "/start",
+            "risk": "safe",
+            "desc": "Показать статус и при первом запуске зарегистрировать первого superadmin.",
+            "args_schema": {},
+            "examples": ["start", "/start", "покажи стартовый статус"],
+        },
+        "register": {
+            "command": "/register",
+            "risk": "safe",
+            "desc": "Подать заявку на доступ модератора, если есть свободные слоты.",
+            "args_schema": {},
+            "examples": ["register", "/register", "подай заявку на доступ"],
+        },
         "menu": {
             "command": "/menu",
             "risk": "safe",
             "desc": "Показать главное меню с кнопками.",
             "args_schema": {},
             "examples": ["покажи меню", "кнопки"],
+        },
+        "requests": {
+            "command": "/requests",
+            "risk": "safe",
+            "desc": "Показать заявки на регистрацию с approve/reject кнопками.",
+            "args_schema": {},
+            "examples": ["покажи заявки", "новые регистрации", "requests"],
+        },
+        "addevent": {
+            "command": "/addevent",
+            "risk": "mutating",
+            "desc": "Добавить событие из свободного текста через LLM.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": [
+                "добавь событие концерт 2026-03-20 19:00 Янтарь Холл",
+                "addevent лекция завтра 18:30 библиотека",
+            ],
+        },
+        "addevent_raw": {
+            "command": "/addevent_raw",
+            "risk": "mutating",
+            "desc": "Добавить событие вручную без LLM через поля title|date|time|location.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": [
+                "addevent_raw Лекция|2026-03-20|19:00|Библиотека",
+                "добавь событие вручную title|date|time|location",
+            ],
         },
         "events": {
             "command": "/events",
@@ -158,12 +255,79 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "args_schema": {"date": {"type": "date_iso", "required": False}},
             "examples": ["покажи события на завтра", "события на 2026-02-24"],
         },
+        "edit": {
+            "command": "/edit",
+            "risk": "mutating",
+            "desc": "Открыть меню редактирования события по id.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": ["редактируй событие 123", "edit 123"],
+        },
+        "log": {
+            "command": "/log",
+            "risk": "safe",
+            "desc": "Показать лог источников события по id.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": ["лог события 123", "источники события 123", "log 123"],
+        },
+        "rebuild_event": {
+            "command": "/rebuild_event",
+            "risk": "mutating",
+            "desc": "Принудительно пересобрать пайплайн события по id; опционально перегенерировать описание.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": [
+                "пересобери событие 123",
+                "rebuild_event 123",
+                "rebuild_event 123 --regen-desc",
+            ],
+        },
         "exhibitions": {
             "command": "/exhibitions",
             "risk": "safe",
             "desc": "Показать активные выставки.",
             "args_schema": {},
             "examples": ["покажи выставки", "активные выставки"],
+        },
+        "fest": {
+            "command": "/fest",
+            "risk": "safe",
+            "desc": "Показать список фестивалей; можно открыть архив или страницу.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["покажи фестивали", "архив фестивалей", "fest archive 2"],
+        },
+        "digest": {
+            "command": "/digest",
+            "risk": "mutating",
+            "desc": "Открыть меню сборки дайджеста.",
+            "args_schema": {},
+            "examples": ["собери дайджест", "дайджест", "digest"],
+        },
+        "v": {
+            "command": "/v",
+            "risk": "mutating",
+            "desc": "Открыть меню видео-анонсов.",
+            "args_schema": {},
+            "examples": ["сделай видео анонс", "видеоанонс", "ролик по событиям"],
+        },
+        "3di": {
+            "command": "/3di",
+            "risk": "mutating",
+            "desc": "Открыть меню 3D-превью событий.",
+            "args_schema": {},
+            "examples": ["сделай 3д превью", "3d preview", "3di"],
+        },
+        "weekendimg": {
+            "command": "/weekendimg",
+            "risk": "mutating",
+            "desc": "Открыть flow загрузки обложки для страницы выходных или лендинга фестивалей.",
+            "args_schema": {},
+            "examples": ["обложка выходных", "обложка фестивалей", "weekendimg"],
+        },
+        "special": {
+            "command": "/special",
+            "risk": "mutating",
+            "desc": "Запустить генерацию праздничной Telegraph-страницы.",
+            "args_schema": {},
+            "examples": ["сделай праздничную страницу", "special page", "special"],
         },
         "pages": {
             "command": "/pages",
@@ -185,6 +349,13 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "desc": "Запуск парсинга внешних источников (театры и др.).",
             "args_schema": {"args_text": {"type": "args_text", "required": False}},
             "examples": ["запусти /parse", "parse check"],
+        },
+        "backfill_topics": {
+            "command": "/backfill_topics",
+            "risk": "mutating",
+            "desc": "Пересчитать темы будущих событий на горизонте N дней.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["пересчитай темы", "backfill topics 30 days", "backfill_topics 30"],
         },
         "vk": {
             "command": "/vk",
@@ -227,6 +398,48 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "desc": "Открыть поток разбора пропусков VK (miss-review).",
             "args_schema": {"args_text": {"type": "args_text", "required": False}},
             "examples": ["покажи пропуски vk", "vk_misses 20"],
+        },
+        "vk_requeue_imported": {
+            "command": "/vk_requeue_imported",
+            "risk": "mutating",
+            "desc": "Вернуть последние imported элементы своей VK review batch обратно в pending.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["верни последний импорт в очередь", "vk_requeue_imported 3"],
+        },
+        "vklink": {
+            "command": "/vklink",
+            "risk": "mutating",
+            "desc": "Привязать ссылку на VK-пост к событию.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": ["vklink 123 https://vk.com/wall-1_2", "привяжи vk ссылку к событию 123"],
+        },
+        "setchannel": {
+            "command": "/setchannel",
+            "risk": "mutating",
+            "desc": "Открыть выбор admin-канала для регистрации announcement/asset роли.",
+            "args_schema": {},
+            "examples": ["настроить канал", "добавить канал", "setchannel"],
+        },
+        "channels": {
+            "command": "/channels",
+            "risk": "safe",
+            "desc": "Показать список admin-каналов и их ролей.",
+            "args_schema": {},
+            "examples": ["покажи каналы", "список каналов", "channels"],
+        },
+        "regdailychannels": {
+            "command": "/regdailychannels",
+            "risk": "mutating",
+            "desc": "Выбрать каналы для daily-анонсов.",
+            "args_schema": {},
+            "examples": ["настрой daily каналы", "каналы для ежедневных анонсов", "regdailychannels"],
+        },
+        "daily": {
+            "command": "/daily",
+            "risk": "mutating",
+            "desc": "Открыть управление daily-анонсами.",
+            "args_schema": {},
+            "examples": ["ежедневные анонсы", "управление daily", "daily"],
         },
         "fest_queue": {
             "command": "/fest_queue",
@@ -298,6 +511,17 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
                 "general_stats",
             ],
         },
+        "recent_imports": {
+            "command": "/recent_imports",
+            "risk": "safe",
+            "desc": "Список событий, созданных или обновлённых из Telegram, VK и /parse за последние N часов (по умолчанию 24).",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": [
+                "покажи свежие импортированные события",
+                "события из телеграм и вк за сутки",
+                "recent_imports 48",
+            ],
+        },
         "popular_posts": {
             "command": "/popular_posts",
             "risk": "safe",
@@ -310,6 +534,20 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
                 "popular_posts",
                 "popular_posts 20",
             ],
+        },
+        "imp_groups_30d": {
+            "command": "/imp_groups_30d",
+            "risk": "safe",
+            "desc": "Показать импорт VK по группам за последние 30 дней.",
+            "args_schema": {},
+            "examples": ["импорт вк по группам", "статистика импорта vk по группам", "imp_groups_30d"],
+        },
+        "imp_daily_14d": {
+            "command": "/imp_daily_14d",
+            "risk": "safe",
+            "desc": "Показать дневную статистику импорта VK за 14 дней.",
+            "args_schema": {},
+            "examples": ["импорт вк по дням", "дневная статистика импорта", "imp_daily_14d"],
         },
         "status": {
             "command": "/status",
@@ -332,6 +570,41 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "args_schema": {"args_text": {"type": "args_text", "required": False}},
             "examples": ["last_errors", "last_errors 20"],
         },
+        "debug": {
+            "command": "/debug",
+            "risk": "safe",
+            "desc": "Показать диагностическую статистику очереди фоновых задач.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["покажи debug queue", "очередь фоновых задач", "debug queue"],
+        },
+        "queue_reap": {
+            "command": "/queue_reap",
+            "risk": "dangerous",
+            "desc": "Почистить/завершить зависшие записи в JobOutbox по фильтрам.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["queue_reap --type telegraph_build", "почисти зависшую очередь"],
+        },
+        "mem": {
+            "command": "/mem",
+            "risk": "safe",
+            "desc": "Показать использование памяти процесса.",
+            "args_schema": {},
+            "examples": ["память процесса", "использование памяти", "mem"],
+        },
+        "users": {
+            "command": "/users",
+            "risk": "safe",
+            "desc": "Показать список пользователей и ролей.",
+            "args_schema": {},
+            "examples": ["покажи пользователей", "роли пользователей", "users"],
+        },
+        "usage_test": {
+            "command": "/usage_test",
+            "risk": "safe",
+            "desc": "Диагностика логирования usage через ask_4o и Supabase.",
+            "args_schema": {},
+            "examples": ["проверь usage logging", "usage test", "usage_test"],
+        },
         "tz": {
             "command": "/tz",
             "risk": "mutating",
@@ -339,12 +612,68 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "args_schema": {"offset": {"type": "tz_offset", "required": True}},
             "examples": ["поставь таймзону +02:00", "tz +02:00"],
         },
+        "tourist_export": {
+            "command": "/tourist_export",
+            "risk": "safe",
+            "desc": "Выгрузить события с tourist_* полями в JSONL.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["туристический экспорт", "tourist_export period=2026-03", "выгрузи tourist jsonl"],
+        },
+        "dumpdb": {
+            "command": "/dumpdb",
+            "risk": "dangerous",
+            "desc": "Скачать SQL dump базы и telegraph token.",
+            "args_schema": {},
+            "examples": ["сделай дамп базы", "backup db", "dumpdb"],
+        },
+        "restore": {
+            "command": "/restore",
+            "risk": "dangerous",
+            "desc": "Запустить flow восстановления базы из прикреплённого dump файла.",
+            "args_schema": {},
+            "examples": ["восстанови базу", "restore database from dump", "restore"],
+        },
+        "telegraph_fix_author": {
+            "command": "/telegraph_fix_author",
+            "risk": "dangerous",
+            "desc": "Массово проставить автора на Telegraph-страницах.",
+            "args_schema": {},
+            "examples": ["почини автора telegraph", "telegraph fix author", "telegraph_fix_author"],
+        },
+        "festivals_fix_nav": {
+            "command": "/festivals_fix_nav",
+            "risk": "mutating",
+            "desc": "Пересобрать навигацию фестивалей и лендинг.",
+            "args_schema": {},
+            "examples": ["почини навигацию фестивалей", "пересобери лендинг фестивалей", "festivals_fix_nav"],
+        },
+        "festivals_nav_dedup": {
+            "command": "/festivals_nav_dedup",
+            "risk": "mutating",
+            "desc": "Алиас к пересборке навигации фестивалей и дедупликации ссылок.",
+            "args_schema": {},
+            "examples": ["dedup nav фестивалей", "festivals_nav_dedup"],
+        },
+        "ics_fix_nav": {
+            "command": "/ics_fix_nav",
+            "risk": "mutating",
+            "desc": "Починить навигацию ICS и календарных ссылок, опционально по месяцу.",
+            "args_schema": {"args_text": {"type": "args_text", "required": False}},
+            "examples": ["ics fix nav", "почини календарную навигацию", "ics_fix_nav 2026-03"],
+        },
         "vkgroup": {
             "command": "/vkgroup",
             "risk": "mutating",
             "desc": "Установить ID группы VK или выключить (off).",
             "args_schema": {"value": {"type": "vkgroup_value", "required": True}},
             "examples": ["выключи vkgroup", "vkgroup 12345"],
+        },
+        "captcha": {
+            "command": "/captcha",
+            "risk": "mutating",
+            "desc": "Отправить код VK captcha.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": ["captcha 1234", "введи капчу 1234"],
         },
         "vktime": {
             "command": "/vktime",
@@ -370,12 +699,54 @@ def _allowed_actions() -> dict[str, dict[str, Any]]:
             "args_schema": {},
             "examples": ["переключи загрузку картинок", "images"],
         },
+        "ask4o": {
+            "command": "/ask4o",
+            "risk": "safe",
+            "desc": "Отправить произвольный вопрос в 4o и получить сырой ответ.",
+            "args_schema": {"args_text": {"type": "args_text", "required": True}},
+            "examples": ["ask4o hello", "спроси 4o про формат события"],
+        },
+        "ocrtest": {
+            "command": "/ocrtest",
+            "risk": "mutating",
+            "desc": "Запустить сравнение OCR моделей для афиши.",
+            "args_schema": {},
+            "examples": ["сравни ocr афиши", "ocr test", "ocrtest"],
+        },
+        "kaggletest": {
+            "command": "/kaggletest",
+            "risk": "safe",
+            "desc": "Проверить авторизацию и доступность Kaggle API.",
+            "args_schema": {},
+            "examples": ["проверь kaggle", "kaggletest", "авторизация kaggle"],
+        },
         "ik_poster": {
             "command": "/ik_poster",
             "risk": "mutating",
             "desc": "ImageKit обработка афиш (Smart crop / GenFill).",
             "args_schema": {},
             "examples": ["обработай афишу imagekit", "ik_poster"],
+        },
+        "cancel": {
+            "command": "/cancel",
+            "risk": "safe",
+            "desc": "Отменить текущий stateful flow `/special`, если он запущен.",
+            "args_schema": {},
+            "examples": ["cancel", "/cancel", "отмени генерацию праздничной страницы"],
+        },
+        "assist_cancel": {
+            "command": "/assist_cancel",
+            "risk": "safe",
+            "desc": "Отменить текущую сессию admin assistant.",
+            "args_schema": {},
+            "examples": ["assist_cancel", "/assist_cancel", "отмени подбор команды"],
+        },
+        "update_button": {
+            "command": "/update_button",
+            "risk": "mutating",
+            "desc": "Обновить кнопку в закреплённом сообщении канала.",
+            "args_schema": {},
+            "examples": ["обнови кнопку в закрепе", "update_button"],
         },
     }
 
@@ -413,12 +784,19 @@ def _build_command_text(action_id: str, args: dict[str, Any]) -> str:
         tm = _parse_time_hhmm(str((args or {}).get("time") or ""))
         return f"{cmd} {kind} {tm}".strip()
 
+    args_schema = action.get("args_schema") or {}
+    args_text_schema = args_schema.get("args_text") or {}
+    args_text_required = bool(args_text_schema.get("required"))
     args_text = str((args or {}).get("args_text") or "").strip()
+    if action_id == "debug" and not args_text:
+        args_text = "queue"
     if action_id == "trace" and not args_text:
         raise ValueError("trace args_text is required")
     if args_text:
         args_text = _sanitize_args_text(args_text)
         return f"{cmd} {args_text}".strip()
+    if args_text_required:
+        raise ValueError(f"{action_id} args_text is required")
     return cmd
 
 
@@ -451,15 +829,71 @@ def _summarize_action(action_id: str, command_text: str) -> str:
     return command_text
 
 
+def _extract_direct_command_proposal(request_text: str) -> _ActionProposal | None:
+    raw = _trim_one_line(request_text, max_len=_ASSIST_MAX_REQUEST_LEN)
+    if not raw:
+        return None
+
+    parts = raw.split()
+    while parts and _norm_intent_text(parts[0]) in _DIRECT_COMMAND_LEAD_WORDS:
+        parts = parts[1:]
+    if not parts:
+        return None
+
+    match = _DIRECT_COMMAND_TOKEN_RE.match(parts[0].strip())
+    if not match:
+        return None
+    token = match.group(1).strip().lower()
+    if not token:
+        return None
+
+    actions = _allowed_actions()
+    action_id: str | None = None
+    for candidate_id, meta in actions.items():
+        cmd_token = str(meta.get("command") or "").strip().lstrip("/").lower()
+        if token in {candidate_id.lower(), cmd_token}:
+            action_id = candidate_id
+            break
+    if not action_id:
+        return None
+
+    tail = " ".join(parts[1:]).strip()
+    args: dict[str, Any] = {}
+    args_schema = actions[action_id].get("args_schema") or {}
+    if "args_text" in args_schema:
+        if tail:
+            args["args_text"] = tail
+    elif action_id == "events" and tail:
+        args["date"] = tail
+    elif action_id == "tz" and tail:
+        args["offset"] = tail
+    elif action_id == "vkgroup" and tail:
+        args["value"] = tail
+    elif action_id == "vktime" and tail:
+        kind, _, tm = tail.partition(" ")
+        if not kind or not tm:
+            return None
+        args["kind"] = kind
+        args["time"] = tm
+    elif tail:
+        return None
+
+    try:
+        _build_command_text(action_id, args)
+    except Exception:
+        return None
+    return _ActionProposal(action_id=action_id, args=args, confidence=0.99)
+
+
 def _heuristic_proposals(request_text: str) -> list[_ActionProposal] | None:
     """Return proposals without calling LLM for very common intents."""
     t = _norm_intent_text(request_text)
     if not t:
         return None
 
-    has_stats_word = any(word in t for word in ("статист", "отчет", "отчёт", "сводк", "репорт"))
-    if not has_stats_word:
-        return None
+    direct = _extract_direct_command_proposal(request_text)
+    if direct is not None:
+        return [direct]
 
     is_popular_posts_stats = (
         any(word in t for word in ("популяр", "топ"))
@@ -467,6 +901,146 @@ def _heuristic_proposals(request_text: str) -> list[_ActionProposal] | None:
     )
     if is_popular_posts_stats:
         return [_ActionProposal(action_id="popular_posts", args={}, confidence=0.95)]
+
+    event_id = _extract_first_int(t)
+
+    if (
+        event_id is not None
+        and any(phrase in t for phrase in ("лог события", "лог источ", "источники события", "source log"))
+    ):
+        return [_ActionProposal(action_id="log", args={"args_text": str(event_id)}, confidence=0.97)]
+
+    if (
+        event_id is not None
+        and any(phrase in t for phrase in ("редакт", "отредакт", "измени событие", "edit event"))
+        and "лог" not in t
+    ):
+        return [_ActionProposal(action_id="edit", args={"args_text": str(event_id)}, confidence=0.96)]
+
+    if event_id is not None and any(
+        phrase in t for phrase in ("пересобери событие", "пересобери event", "rebuild event", "rebuild_event")
+    ):
+        args_text = str(event_id)
+        if any(phrase in t for phrase in ("regen desc", "regen-desc", "перегенер", "обнови описание")):
+            args_text += " --regen-desc"
+        return [_ActionProposal(action_id="rebuild_event", args={"args_text": args_text}, confidence=0.97)]
+
+    if "дайджест" in t:
+        return [_ActionProposal(action_id="digest", args={}, confidence=0.94)]
+
+    if any(phrase in t for phrase in ("видео анонс", "видеоанонс", "video announce", "ролик по событиям")):
+        return [_ActionProposal(action_id="v", args={}, confidence=0.94)]
+
+    if any(phrase in t for phrase in ("3д", "3d", "превью 3д", "preview 3d")):
+        return [_ActionProposal(action_id="3di", args={}, confidence=0.94)]
+
+    if any(phrase in t for phrase in ("telegraph", "телеграф")) and any(
+        phrase in t for phrase in ("cache", "кэш", "кеш", "preview", "cached_page")
+    ):
+        if any(
+            phrase in t
+            for phrase in ("sanitize", "санитайз", "прогрей", "прогрев", "почини кэш", "enque", "перепроверь")
+        ):
+            return [_ActionProposal(action_id="telegraph_cache_sanitize", args={}, confidence=0.95)]
+        args: dict[str, Any] = {}
+        if "festival" in t or "фестив" in t:
+            args["args_text"] = "festival"
+        elif "month" in t or "месяц" in t:
+            args["args_text"] = "month"
+        elif "weekend" in t or "выходн" in t:
+            args["args_text"] = "weekend"
+        elif "event" in t or "событ" in t:
+            args["args_text"] = "event"
+        return [_ActionProposal(action_id="telegraph_cache_stats", args=args, confidence=0.94)]
+
+    if any(phrase in t for phrase in ("imagekit", "genfill", "smart crop", "smartcrop")) or (
+        "афиш" in t and any(phrase in t for phrase in ("обработ", "кроп", "постер"))
+    ):
+        return [_ActionProposal(action_id="ik_poster", args={}, confidence=0.93)]
+
+    if any(phrase in t for phrase in ("турист", "tourist")) and any(
+        phrase in t for phrase in ("экспорт", "jsonl", "выгруз")
+    ):
+        return [_ActionProposal(action_id="tourist_export", args={}, confidence=0.93)]
+
+    if any(phrase in t for phrase in ("пользовател", "роли пользователей", "список юзеров")):
+        return [_ActionProposal(action_id="users", args={}, confidence=0.93)]
+
+    if any(phrase in t for phrase in ("память", "memory usage", "rss")):
+        return [_ActionProposal(action_id="mem", args={}, confidence=0.93)]
+
+    if any(phrase in t for phrase in ("последние ошибки", "ошибки бота", "last errors")):
+        args: dict[str, Any] = {}
+        count = _extract_first_int(t, max_value=500)
+        if count is not None:
+            args["args_text"] = str(count)
+        return [_ActionProposal(action_id="last_errors", args=args, confidence=0.93)]
+
+    if all(phrase in t for phrase in ("импорт", "вк", "групп")):
+        return [_ActionProposal(action_id="imp_groups_30d", args={}, confidence=0.93)]
+
+    if all(phrase in t for phrase in ("импорт", "вк", "дн")) or "по дням" in t and "вк" in t:
+        return [_ActionProposal(action_id="imp_daily_14d", args={}, confidence=0.92)]
+
+    has_event_words = any(word in t for word in ("событ", "мероприят", "ивент"))
+    has_list_intent = any(
+        phrase in t
+        for phrase in ("список", "покажи", "какие", "что нового", "что создалось", "свеж")
+    )
+    has_source_origin = any(
+        phrase in t
+        for phrase in (
+            "из телеграм",
+            "из telegram",
+            "из tg",
+            "телеграм мониторинг",
+            "telegram monitoring",
+            "из вк",
+            "из vk",
+            "автоимпорт",
+            "авто импорт",
+            "auto import",
+            "мониторинг",
+            "/parse",
+            "парс",
+        )
+    )
+    has_recent_import_words = any(
+        phrase in t
+        for phrase in (
+            "импорт",
+            "импортир",
+            "создал",
+            "создан",
+            "создано",
+            "создалось",
+            "нового",
+            "свеж",
+        )
+    )
+    has_count_intent = any(word in t for word in ("сколько", "колич", "числ", "count"))
+    recent_hours = _extract_recent_hours_arg(t)
+
+    if (
+        not has_count_intent
+        and (has_source_origin or has_recent_import_words or recent_hours is not None)
+        and (has_event_words or has_list_intent)
+    ):
+        args: dict[str, Any] = {}
+        if recent_hours and recent_hours != 24:
+            args["args_text"] = str(recent_hours)
+        return [_ActionProposal(action_id="recent_imports", args=args, confidence=0.97)]
+
+    if (
+        has_count_intent
+        and (has_source_origin or has_recent_import_words or recent_hours is not None)
+        and any(word in t for word in ("событ", "импорт", "мониторинг", "автоимпорт", "создал"))
+    ):
+        return [_ActionProposal(action_id="general_stats", args={}, confidence=0.88)]
+
+    has_stats_word = any(word in t for word in ("статист", "отчет", "отчёт", "сводк", "репорт"))
+    if not has_stats_word:
+        return None
 
     # Disambiguation: /general_stats vs /stats
     if "general_stats" in t:

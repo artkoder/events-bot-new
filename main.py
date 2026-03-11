@@ -2765,6 +2765,16 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": "/recent_imports [hours]",
+        "desc": "List recent events created or updated from Telegram, VK, and /parse (default 24h)",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/popular_posts [N]",
+        "desc": "Top TG/VK posts above median with linked created events",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/status [job_id]",
         "desc": "Show uptime and job status",
         "roles": {"superadmin"},

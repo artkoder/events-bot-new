@@ -1,4 +1,6 @@
 import os
+import pathlib
+import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -7,6 +9,27 @@ import pytest
 
 import main  # noqa: F401  # ensure "main" module is loaded for require_main_attr()
 from handlers import admin_assist_cmd as assist
+
+
+def _registered_commands() -> set[str]:
+    root = pathlib.Path(__file__).resolve().parents[1]
+    paths = [
+        root / "main_part2.py",
+        root / "handlers" / "telegraph_cache_cmd.py",
+        root / "handlers" / "special_cmd.py",
+        root / "handlers" / "recent_imports_cmd.py",
+        root / "handlers" / "popular_posts_cmd.py",
+        root / "handlers" / "ik_poster_cmd.py",
+        root / "handlers" / "admin_assist_cmd.py",
+        root / "source_parsing" / "commands.py",
+        root / "source_parsing" / "telegram" / "commands.py",
+    ]
+    commands: set[str] = set()
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        commands.update(re.findall(r'Command\("([A-Za-z0-9_]+)"\)', text))
+    commands.add(main.VK_MISS_REVIEW_COMMAND.lstrip("/"))
+    return commands
 
 
 def test_build_command_events_date_optional():
@@ -44,6 +67,33 @@ def test_build_command_args_text_sanitized():
 def test_build_command_trace_requires_arg():
     with pytest.raises(ValueError):
         assist._build_command_text("trace", {})
+
+
+def test_build_command_rebuild_event_requires_arg():
+    assert assist._build_command_text("rebuild_event", {"args_text": "123 --regen-desc"}) == "/rebuild_event 123 --regen-desc"
+    with pytest.raises(ValueError):
+        assist._build_command_text("rebuild_event", {})
+
+
+def test_direct_command_proposal_preserves_explicit_command_and_args():
+    proposal = assist._extract_direct_command_proposal("запусти /rebuild_event 321 --regen-desc")
+    assert proposal is not None
+    assert proposal.action_id == "rebuild_event"
+    assert proposal.args == {"args_text": "321 --regen-desc"}
+
+
+def test_direct_command_proposal_for_simple_noarg_command():
+    proposal = assist._extract_direct_command_proposal("команда recent_imports")
+    assert proposal is not None
+    assert proposal.action_id == "recent_imports"
+    assert proposal.args == {}
+
+
+def test_allowlist_covers_registered_commands():
+    commands = _registered_commands()
+    allow = set(assist._allowed_actions().keys())
+    missing = commands - allow
+    assert missing == set()
 
 
 def test_validate_plan_proposals_ok():
@@ -107,3 +157,42 @@ def test_heuristic_routes_popular_posts():
     props = assist._heuristic_proposals("посмотреть статистику популярных постов")
     assert props, "expected heuristic proposals"
     assert props[0].action_id == "popular_posts"
+
+
+def test_heuristic_routes_recent_imports_for_source_list_query():
+    props = assist._heuristic_proposals("список событий созданных из телеграм и вк за сутки")
+    assert props, "expected heuristic proposals"
+    assert props[0].action_id == "recent_imports"
+    assert props[0].args == {}
+
+
+def test_heuristic_routes_recent_imports_with_explicit_hours():
+    props = assist._heuristic_proposals("покажи свежие импортированные события за 48 часов")
+    assert props, "expected heuristic proposals"
+    assert props[0].action_id == "recent_imports"
+    assert props[0].args == {"args_text": "48"}
+
+
+def test_heuristic_routes_telegraph_cache_stats():
+    props = assist._heuristic_proposals("покажи статистику кэша телеграф для событий")
+    assert props, "expected heuristic proposals"
+    assert props[0].action_id == "telegraph_cache_stats"
+    assert props[0].args == {"args_text": "event"}
+
+
+def test_heuristic_routes_telegraph_cache_sanitize():
+    props = assist._heuristic_proposals("прогрей кэш телеграф страниц")
+    assert props, "expected heuristic proposals"
+    assert props[0].action_id == "telegraph_cache_sanitize"
+
+
+def test_heuristic_routes_ik_poster():
+    props = assist._heuristic_proposals("обработай афишу через imagekit")
+    assert props, "expected heuristic proposals"
+    assert props[0].action_id == "ik_poster"
+
+
+def test_heuristic_keeps_count_queries_on_general_stats():
+    props = assist._heuristic_proposals("сколько событий создал бот из автоимпорта за сутки")
+    assert props, "expected heuristic proposals"
+    assert props[0].action_id == "general_stats"
