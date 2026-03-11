@@ -17,6 +17,7 @@
 - `docs/features/post-metrics/README.md` — статистика постов и популярность (TG/VK): медианы, уровни ⭐/👍, основа для ранжирования
 - `docs/features/ticket-sites-queue/README.md` — очередь обогащения событий по ссылкам на ticket‑сайты (pyramida/dom/qtickets)
 - `docs/features/admin-action-assistant/README.md` — ассистент админ‑команд: запрос «простыми словами» → команда + подтверждение
+- `docs/features/recent-imports/README.md` — отчёт `/recent_imports`: список событий, недавно созданных/обновлённых из Telegram, VK и `/parse`
 - `docs/features/telegraph-cache-sanitizer/README.md` — прогрев/проверка Telegram web preview (Instant View) для Telegraph страниц + очередь на пересборку “битых”
 
 ## Как добавлять новую фичу

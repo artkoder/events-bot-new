@@ -1,8 +1,10 @@
+import asyncio
 import os
 import sqlite3
 import time
 import json
 import base64
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from db import Database
+import kaggle_registry
 from models import Event, EventSource, JobOutbox, JobTask, TelegramScannedMessage, TelegramSource
 from source_parsing.telegram.handlers import TelegramMonitorReport
 import source_parsing.telegram.service as tg_service
@@ -70,6 +73,20 @@ async def test_send_event_details_reports_zero_changes():
     assert "Созданные события: 0" in text
     assert "Обновлённые события: 0" in text
     assert kwargs.get("parse_mode") == "HTML"
+
+
+def test_resolve_tg_monitor_ops_status_distinguishes_error_empty_and_success():
+    report = TelegramMonitorReport(run_id="r1")
+    assert tg_service._resolve_tg_monitor_ops_status(report, report_loaded=False) == "error"
+
+    empty_report = TelegramMonitorReport(run_id="r2", messages_scanned=0)
+    assert tg_service._resolve_tg_monitor_ops_status(empty_report, report_loaded=True) == "empty"
+
+    success_report = TelegramMonitorReport(run_id="r3", messages_scanned=4)
+    assert tg_service._resolve_tg_monitor_ops_status(success_report, report_loaded=True) == "success"
+
+    partial_report = TelegramMonitorReport(run_id="r4", messages_scanned=4, errors=["warn"])
+    assert tg_service._resolve_tg_monitor_ops_status(partial_report, report_loaded=True) == "partial"
 
 
 @pytest.mark.asyncio
@@ -250,6 +267,92 @@ def test_preview_friendly_tg_post_url_adds_single_query():
     )
     # Non-canonical forms remain unchanged.
     assert _preview_friendly_tg_post_url("https://t.me/s/klassster/17729") == "https://t.me/s/klassster/17729"
+
+
+@pytest.mark.asyncio
+async def test_run_telegram_monitor_marks_error_on_cancelled(monkeypatch):
+    finished: dict[str, object] = {}
+
+    async def fake_start_ops_run(*_args, **_kwargs):
+        return 777
+
+    async def fake_finish_ops_run(*_args, **kwargs):
+        finished.update(kwargs)
+
+    @asynccontextmanager
+    async def fake_global_lock(**_kwargs):
+        yield
+
+    async def fake_locked(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(tg_service, "start_ops_run", fake_start_ops_run)
+    monkeypatch.setattr(tg_service, "finish_ops_run", fake_finish_ops_run)
+    monkeypatch.setattr(tg_service, "_tg_monitor_global_lock", fake_global_lock)
+    monkeypatch.setattr(tg_service, "_run_telegram_monitor_locked", fake_locked)
+
+    with pytest.raises(asyncio.CancelledError):
+        await tg_service.run_telegram_monitor(db=None, bot=None, chat_id=None, run_id="cancel-me")
+
+    assert finished["status"] == "error"
+    assert finished["details"]["run_id"] == "cancel-me"
+    assert "cancelled" in finished["details"]["errors"]
+
+
+@pytest.mark.asyncio
+async def test_resume_telegram_monitor_jobs_imports_completed_kernel(monkeypatch, tmp_path):
+    monkeypatch.setattr(kaggle_registry, "_REGISTRY_PATH", tmp_path / "kaggle_jobs.json")
+    await kaggle_registry.register_job(
+        "tg_monitoring",
+        "owner/kernel",
+        meta={"run_id": "run-123", "pid": 999999, "chat_id": 12345},
+    )
+
+    imported: dict[str, object] = {}
+
+    class _DummyClient:
+        def get_kernel_status(self, kernel_ref):
+            assert kernel_ref == "owner/kernel"
+            return {"status": "complete"}
+
+    async def fake_download_results(_client, kernel_ref, run_id):
+        imported["downloaded"] = (kernel_ref, run_id)
+        path = tmp_path / "telegram_results.json"
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    async def fake_import(
+        _db,
+        *,
+        results_path,
+        bot=None,
+        chat_id=None,
+        run_id=None,
+        send_progress=False,
+        trigger="manual_import_only",
+        operator_id=None,
+    ):
+        imported["import"] = {
+            "results_path": str(results_path),
+            "chat_id": chat_id,
+            "run_id": run_id,
+            "send_progress": send_progress,
+            "trigger": trigger,
+            "operator_id": operator_id,
+        }
+        return TelegramMonitorReport(run_id=run_id, messages_scanned=1)
+
+    monkeypatch.setattr(tg_service, "KaggleClient", _DummyClient)
+    monkeypatch.setattr(tg_service, "_download_results", fake_download_results)
+    monkeypatch.setattr(tg_service, "run_telegram_import_from_results", fake_import)
+
+    recovered = await tg_service.resume_telegram_monitor_jobs(db=None, bot=None)
+
+    assert recovered == 1
+    assert imported["downloaded"] == ("owner/kernel", "run-123")
+    assert imported["import"]["run_id"] == "run-123"
+    assert imported["import"]["trigger"] == "recovery_import"
+    assert await kaggle_registry.list_jobs("tg_monitoring") == []
 
 
 @pytest.mark.asyncio
