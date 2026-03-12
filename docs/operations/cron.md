@@ -25,6 +25,7 @@ Defaults were adjusted to reduce overlaps between the most common heavy jobs:
 
 - nightly source parsing: `SOURCE_PARSING_TIME_LOCAL=04:30` (was `02:15`)
 - `/3di` morning run: `THREEDI_TIMES_LOCAL=05:30,15:15,17:15` (was `03:15,15:15,17:15`)
+- VK auto-import: `VK_AUTO_IMPORT_TIMES_LOCAL=06:15,10:15,12:00,18:30` with `VK_AUTO_IMPORT_LIMIT=15` by default, so queue draining relies on cadence instead of oversized single runs and stays away from the `08:00` daily announcement window and late-evening monitoring.
 
 If you see skip notifications in admin chat often, spread the schedules further instead of switching to “wait”: skipping is a safety net, not a planning tool.
 
@@ -47,6 +48,12 @@ If you see skip notifications in admin chat often, spread the schedules further 
   - events whose 3D preview was invalidated because the illustration set changed (Smart Update clears `preview_3d_url` when `photo_urls` change).
 - **Telegram monitoring** – scheduled daily import from Telegram sources (channels/groups) via Kaggle when enabled.
 - **kaggle recovery** – resumes in-flight Kaggle jobs after restarts.
+
+## Health Checks
+
+- Fly probes `GET /healthz` every 15 seconds.
+- `/healthz` no longer returns a blind static `ok`: it verifies that startup completed, the runtime heartbeat is fresh, required background tasks (`daily_scheduler`, `add_event_watch`, and `job_outbox_worker` when enabled) are alive, the bot session is open, and SQLite answers `SELECT 1`.
+- If any of those checks fail, `/healthz` returns `503` with a JSON payload describing the failing component. This lets Fly recycle machines that are still serving HTTP but stopped processing Telegram webhooks or scheduler loops correctly.
 
 ## Environment variables
 
@@ -80,9 +87,12 @@ If you see skip notifications in admin chat often, spread the schedules further 
 - `TICKET_SITES_QUEUE_INTERVAL_HOURS` – how often to rescan each URL after a successful run (default `24`).
 - `ENABLE_VK_AUTO_IMPORT` – enable VK inbox auto import job.
 - `VK_AUTO_IMPORT_TIMES_LOCAL` / `VK_AUTO_IMPORT_TZ` – VK auto-import schedule times in local time zone.
-- `VK_AUTO_IMPORT_LIMIT` – max number of VK inbox rows to process per scheduled run.
+- `VK_AUTO_IMPORT_LIMIT` – max number of VK inbox rows to process per scheduled run (default `15`).
 - `ENABLE_KAGGLE_RECOVERY` – enable background Kaggle recovery loop.
 - `KAGGLE_RECOVERY_INTERVAL_MINUTES` – recovery interval in minutes (default: 5).
 - `KAGGLE_JOBS_PATH` – path to Kaggle recovery registry JSON (default: `/data/kaggle_jobs.json`).
+- `RUNTIME_HEALTH_HEARTBEAT_SEC` – how often the in-process runtime heartbeat updates (default: `15` seconds).
+- `RUNTIME_HEALTH_STALE_SEC` – max allowed heartbeat age before `/healthz` turns unhealthy (default: `45` seconds, minimum `2x` heartbeat interval).
+- `RUNTIME_HEALTH_STARTUP_GRACE_SEC` – startup grace window before “not ready yet” becomes a failing `/healthz` condition (default: `120` seconds).
 
 To monitor real job durations, use the daily `/general_stats` report: it prints per-run `took=...` for `vk_auto_import` and `tg_monitoring` (and other ops-run instrumented jobs).

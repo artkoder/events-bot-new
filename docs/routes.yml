@@ -191,6 +191,14 @@ features:
       - scheduling.py
       - kaggle/TelegraphCacheProbe/telegraph_cache_probe.py
       - db.py
+  preview_3d:
+    status: implemented
+    docs: docs/features/preview-3d/README.md
+    entrypoints:
+      - preview_3d/handlers.py
+      - kaggle/Preview3D/preview_3d.ipynb
+      - scheduling.py
+      - main_part2.py
 
 artifacts:
   root: artifacts/

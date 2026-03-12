@@ -4986,8 +4986,163 @@ async def init_db_and_scheduler(
         app["job_outbox_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
     else:
         logging.info("SCHED skipping job_outbox_worker (ENABLE_JOB_OUTBOX_WORKER!=1)")
+    app["runtime_health_heartbeat"] = asyncio.create_task(_runtime_health_heartbeat(app))
+    _mark_runtime_health_tick(app, ready=True)
     gc.collect()
     logging.info("BOOT_OK pid=%s", os.getpid())
+
+
+def _runtime_health_heartbeat_interval_sec() -> float:
+    raw = (os.getenv("RUNTIME_HEALTH_HEARTBEAT_SEC") or "").strip()
+    try:
+        value = float(raw) if raw else 15.0
+    except ValueError:
+        value = 15.0
+    return max(5.0, value)
+
+
+def _runtime_health_stale_sec() -> float:
+    raw = (os.getenv("RUNTIME_HEALTH_STALE_SEC") or "").strip()
+    try:
+        value = float(raw) if raw else 45.0
+    except ValueError:
+        value = 45.0
+    return max(_runtime_health_heartbeat_interval_sec() * 2, value)
+
+
+def _runtime_health_startup_grace_sec() -> float:
+    raw = (os.getenv("RUNTIME_HEALTH_STARTUP_GRACE_SEC") or "").strip()
+    try:
+        value = float(raw) if raw else 120.0
+    except ValueError:
+        value = 120.0
+    return max(15.0, value)
+
+
+def _runtime_health_state(app: Mapping[str, Any]) -> dict[str, Any]:
+    existing = app.get("runtime_health")
+    if isinstance(existing, dict):
+        return existing
+    state = {
+        "boot_monotonic": _time.monotonic(),
+        "last_tick_monotonic": None,
+        "ready": False,
+    }
+    app["runtime_health"] = state
+    return state
+
+
+def _mark_runtime_health_tick(app: Mapping[str, Any], *, ready: bool | None = None) -> dict[str, Any]:
+    state = _runtime_health_state(app)
+    state["last_tick_monotonic"] = _time.monotonic()
+    if ready is not None:
+        state["ready"] = bool(ready)
+    return state
+
+
+async def _runtime_health_heartbeat(app: Mapping[str, Any]) -> None:
+    interval = _runtime_health_heartbeat_interval_sec()
+    while True:
+        _mark_runtime_health_tick(app)
+        await asyncio.sleep(interval)
+
+
+def _runtime_task_status(task: object | None) -> str:
+    if task is None:
+        return "missing"
+    done_fn = getattr(task, "done", None)
+    if not callable(done_fn):
+        return "unknown"
+    try:
+        done = bool(done_fn())
+    except Exception as exc:
+        return f"done_check_failed:{type(exc).__name__}"
+    if not done:
+        return "ok"
+    cancelled_fn = getattr(task, "cancelled", None)
+    if callable(cancelled_fn):
+        try:
+            if bool(cancelled_fn()):
+                return "cancelled"
+        except Exception as exc:
+            return f"cancel_check_failed:{type(exc).__name__}"
+    exception_fn = getattr(task, "exception", None)
+    if callable(exception_fn):
+        try:
+            exc = exception_fn()
+        except Exception as exc:
+            return f"exception_check_failed:{type(exc).__name__}"
+        if exc is not None:
+            return f"exception:{type(exc).__name__}"
+    return "finished"
+
+
+async def _runtime_health_report(
+    app: Mapping[str, Any],
+    db: Database,
+    bot: Bot,
+) -> tuple[int, dict[str, Any]]:
+    state = _runtime_health_state(app)
+    now = _time.monotonic()
+    boot_monotonic = float(state.get("boot_monotonic") or now)
+    boot_age_sec = max(0.0, now - boot_monotonic)
+    ready = bool(state.get("ready"))
+    last_tick_monotonic = state.get("last_tick_monotonic")
+    tick_age_sec = (
+        None
+        if last_tick_monotonic is None
+        else round(max(0.0, now - float(last_tick_monotonic)), 1)
+    )
+
+    issues: list[str] = []
+    tasks: dict[str, str] = {}
+    startup_grace_exceeded = (
+        not ready and boot_age_sec > _runtime_health_startup_grace_sec()
+    )
+    required_tasks = ["daily_scheduler", "add_event_watch"]
+    if "job_outbox_worker" in app:
+        required_tasks.append("job_outbox_worker")
+    for name in required_tasks:
+        status = _runtime_task_status(app.get(name))
+        tasks[name] = status
+        if status != "ok" and (ready or startup_grace_exceeded):
+            issues.append(f"{name}:{status}")
+
+    add_event_worker_status = _runtime_task_status(app.get("add_event_worker"))
+    if add_event_worker_status != "missing":
+        tasks["add_event_worker"] = add_event_worker_status
+
+    if ready:
+        if tick_age_sec is None or tick_age_sec > _runtime_health_stale_sec():
+            issues.append("heartbeat:stale")
+    elif startup_grace_exceeded:
+        issues.append("startup:not_ready")
+
+    session_closed = bool(getattr(getattr(bot, "session", None), "closed", False))
+    if session_closed:
+        issues.append("bot_session:closed")
+
+    db_status = "skipped"
+    if ready:
+        try:
+            async with db.raw_conn() as conn:
+                await conn.execute("SELECT 1")
+            db_status = "ok"
+        except Exception as exc:
+            db_status = f"error:{type(exc).__name__}"
+            issues.append(f"db:{type(exc).__name__}")
+
+    payload = {
+        "ok": not issues,
+        "ready": ready,
+        "boot_age_sec": round(boot_age_sec, 1),
+        "tick_age_sec": tick_age_sec,
+        "db": db_status,
+        "bot_session_closed": session_closed,
+        "tasks": tasks,
+        "issues": issues,
+    }
+    return (200 if not issues else 503), payload
 
 
 def _topic_labels_for_display(topics: Sequence[str] | None) -> list[str]:
@@ -16828,10 +16983,10 @@ def create_app() -> web.Application:
     dp.include_router(special_router)  # must be after db init
     from handlers.admin_assist_cmd import admin_assist_router
     dp.include_router(admin_assist_router)
-    from handlers.recent_imports_cmd import recent_imports_router
-    dp.include_router(recent_imports_router)
     from handlers.popular_posts_cmd import popular_posts_router
     dp.include_router(popular_posts_router)
+    from handlers.recent_imports_cmd import recent_imports_router
+    dp.include_router(recent_imports_router)
     from handlers.telegraph_cache_cmd import telegraph_cache_router
     dp.include_router(telegraph_cache_router)
     dp.include_router(tg_monitor_router)
@@ -17726,10 +17881,12 @@ def create_app() -> web.Application:
     # Store bot and dispatcher in app context for dev mode
     app["bot"] = bot
     app["dispatcher"] = dp
+    _runtime_health_state(app)
 
     async def health_handler(request: web.Request) -> web.Response:
         async with span("healthz"):
-            return web.Response(text="ok")
+            status, payload = await _runtime_health_report(app, db, bot)
+            return web.json_response(payload, status=status)
 
     app.router.add_get("/healthz", health_handler)
     app.router.add_get("/metrics", metrics_handler)
@@ -17739,6 +17896,10 @@ def create_app() -> web.Application:
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
+        if "runtime_health_heartbeat" in app:
+            app["runtime_health_heartbeat"].cancel()
+            with contextlib.suppress(Exception):
+                await app["runtime_health_heartbeat"]
         if "add_event_watch" in app:
             app["add_event_watch"].cancel()
             with contextlib.suppress(Exception):
@@ -18125,6 +18286,10 @@ async def run_dev_mode():
     finally:
         # Cleanup - use the on_shutdown from app
         await app["bot"].session.close()
+        if "runtime_health_heartbeat" in app:
+            app["runtime_health_heartbeat"].cancel()
+            with contextlib.suppress(Exception):
+                await app["runtime_health_heartbeat"]
         if "add_event_watch" in app:
             app["add_event_watch"].cancel()
             with contextlib.suppress(Exception):

@@ -40,3 +40,12 @@ def test_zakheim_aliases_normalize_to_one_location() -> None:
 def test_location_noise_prefixes_do_not_create_new_locations() -> None:
     assert su._normalize_location("Кинотеатр Сигнал") == "сигнал"
     assert su._normalize_location("Арт-пространство Сигнал") == "сигнал"
+
+
+def test_address_match_handles_long_and_short_venue_aliases() -> None:
+    assert su._address_matches(
+        "ул. Московская, 36А",
+        "Московская 36а",
+        city_a="Гусев",
+        city_b="Гусев",
+    )

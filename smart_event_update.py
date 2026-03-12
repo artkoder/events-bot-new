@@ -118,16 +118,6 @@ _CONGRATS_CONTEXT_RE = re.compile(
     r"\b(ближайш\w*|спектакл\w*|концерт\w*|мероприят\w*|событи\w*)\b",
     re.IGNORECASE,
 )
-_RECAP_CONTEXT_RE = re.compile(
-    r"(?iu)\b("
-    r"прошл[аоие]\w*\s+(?:встреч\w*|концерт\w*|лекци\w*|мастер-?класс\w*|мероприят\w*|событи\w*)|"
-    r"состоял(?:ась|ось|ся|и)?|"
-    r"отчет\w*|отчёт\w*|"
-    r"как\s+это\s+было|"
-    r"итоги\s+встреч\w*|"
-    r"прошедш\w*\s+событи\w*"
-    r")\b"
-)
 
 _CHANNEL_PROMO_STRIP_RE = re.compile(
     r"(?i)"
@@ -230,12 +220,6 @@ SMART_UPDATE_REWRITE_MAX_TOKENS = _env_int(
 # Default matches the operator expectation: > 6 months ahead requires more scrutiny.
 SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS = _env_int(
     "SMART_UPDATE_FAR_FUTURE_REVIEW_MONTHS", 6, lo=0, hi=24
-)
-
-# Creating one-off events this far into the future is high risk unless the source has
-# strong grounding (explicit year, official parser source, specific ticket flow, etc.).
-SMART_UPDATE_FAR_FUTURE_CREATE_MONTHS = _env_int(
-    "SMART_UPDATE_FAR_FUTURE_CREATE_MONTHS", 9, lo=0, hi=36
 )
 
 # Optional: allow light emoji usage in *full* public descriptions (Telegraph/body).
@@ -357,47 +341,6 @@ class SmartUpdateResult:
     queue_notes: list[str] = field(default_factory=list)
 
 
-@dataclass(slots=True)
-class FarFutureCreateAssessment:
-    applies: bool = False
-    strong_signals: list[str] = field(default_factory=list)
-    doubts: list[str] = field(default_factory=list)
-    blockers: list[str] = field(default_factory=list)
-
-    @property
-    def grounding_score(self) -> int:
-        weights = {
-            "explicit_year": 3,
-            "explicit_end_year": 1,
-            "parser_source": 3,
-            "specific_ticket": 1,
-        }
-        return sum(int(weights.get(sig, 0)) for sig in self.strong_signals)
-
-    @property
-    def strong_doubt_score(self) -> int:
-        base = 0
-        if self.applies and self.grounding_score < 3:
-            base += 3 - self.grounding_score
-        base += len(self.doubts)
-        base += len(self.blockers) * 3
-        return base
-
-    @property
-    def reject_create(self) -> bool:
-        return bool(self.applies and (self.blockers or self.grounding_score < 3))
-
-    @property
-    def reason(self) -> str:
-        if self.blockers:
-            return f"far_future:{self.blockers[0]}"
-        if self.applies and not self.strong_signals:
-            return "far_future:no_strong_signal"
-        if self.applies and self.grounding_score < 3:
-            return f"far_future:low_grounding_score:{self.grounding_score}"
-        return "far_future:allowed"
-
-
 MATCH_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -499,49 +442,12 @@ def _norm_space(text: str) -> str:
 _LOCATION_NOISE_PREFIXES_RE = re.compile(
     r"^(?:"
     r"кинотеатр|"
+    r"бар|bar|"
     r"арт[- ]?пространство|"
-    r"пространство|"
-    r"бар|"
-    r"bar"
+    r"пространство"
     r")\s+",
     re.IGNORECASE,
 )
-
-_IDENTITY_EXACT_TITLE_NONWORD_RE = re.compile(r"[^\w\s]+", re.UNICODE)
-_ADDRESS_TITLE_RE = re.compile(
-    r"^\s*[А-Яа-яA-Za-zЁё][^:]{0,40}\d+[,\s]+(?:\d+\s*)?(?:этаж|корпус|кв|помещение)?\s*$"
-)
-_GENERIC_TICKET_TITLE_TOKENS = {
-    "выставка",
-    "концерт",
-    "спектакль",
-    "лекция",
-    "мастер",
-    "класс",
-    "мастеркласс",
-    "мастер-класс",
-    "показ",
-    "экскурсия",
-    "встреча",
-    "вечер",
-    "программа",
-    "мероприятие",
-    "праздник",
-    "клуб",
-    "фильм",
-    "кино",
-    "музей",
-    "театр",
-    "галерея",
-    "дом",
-    "искусств",
-    "культура",
-}
-_DOORS_HINT_RE = re.compile(
-    r"\b(сбор гостей|сбор|doors open|door open|doors)\b",
-    re.IGNORECASE,
-)
-_START_HINT_RE = re.compile(r"\b(начало|старт|start)\b", re.IGNORECASE)
 
 
 def _strip_private_use(text: str | None) -> str | None:
@@ -3683,17 +3589,15 @@ def _giveaway_has_underlying_event_facts(text: str | None) -> bool:
             if not chunk:
                 continue
 
-            # Prize/contest sentences may mention a real event ("билеты на матч, который
-            # состоится..."), but that is not a standalone attendable announcement.
-            is_giveaway_context = bool(_GIVEAWAY_RE.search(chunk) or _GIVEAWAY_MECHANICS_RE.search(chunk))
-
-            if (_EVENT_INVITE_RE.search(chunk) or _EVENT_SIGNAL_RE.search(chunk)) and not is_giveaway_context:
+            if _EVENT_INVITE_RE.search(chunk) or _EVENT_SIGNAL_RE.search(chunk):
                 has_event_signal = True
+
+            is_mechanics = bool(_GIVEAWAY_MECHANICS_RE.search(chunk) and not _EVENT_HAPPENS_VERB_RE.search(chunk))
 
             if re.search(r"\b([01]?\d|2[0-3])[:.]([0-5]\d)\b", chunk):
                 if re.search(r"(?iu)\bдо\s+([01]?\d|2[0-3])[:.]([0-5]\d)\b", chunk):
                     continue
-                if is_giveaway_context:
+                if is_mechanics:
                     continue
                 has_time = True
 
@@ -3703,7 +3607,7 @@ def _giveaway_has_underlying_event_facts(text: str | None) -> bool:
             ):
                 if _DEADLINE_RE.search(chunk):
                     continue
-                if is_giveaway_context:
+                if is_mechanics:
                     continue
                 has_date = True
 
@@ -4480,6 +4384,60 @@ def _location_matches(a: str | None, b: str | None) -> bool:
     if na in nb or nb in na:
         return True
     return False
+
+
+_ADDRESS_NOISE_RE = re.compile(
+    r"(?iu)\b(?:ул(?:ица)?|пр(?:оспект|осп)?|пр-?т|пер(?:еулок)?|б-р|бульвар|пл(?:ощадь)?|наб(?:ережная)?)\.?\b"
+)
+
+
+def _normalize_address_for_match(value: str | None, city: str | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    norm = _normalize_location_compact(raw)
+    norm = norm.replace("-", " ").replace("—", " ")
+    norm = re.sub(r"[«»\"']", " ", norm)
+    norm = _ADDRESS_NOISE_RE.sub(" ", norm)
+    if city:
+        city_norm = _normalize_location_compact(city)
+        if city_norm:
+            norm = re.sub(
+                rf"(?iu)(?:,\s*|\s+)#?{re.escape(city_norm)}$",
+                "",
+                norm,
+            )
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
+def _address_matches(
+    a: str | None,
+    b: str | None,
+    *,
+    city_a: str | None = None,
+    city_b: str | None = None,
+) -> bool:
+    na = _normalize_address_for_match(a, city_a)
+    nb = _normalize_address_for_match(b, city_b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if na in nb or nb in na:
+        return True
+    return False
+
+
+def _event_candidate_location_matches(event: Event, candidate: "EventCandidate") -> bool:
+    if _location_matches(getattr(event, "location_name", None), candidate.location_name):
+        return True
+    return _address_matches(
+        getattr(event, "location_address", None),
+        candidate.location_address,
+        city_a=getattr(event, "city", None),
+        city_b=candidate.city,
+    )
 
 
 def _apply_soft_city_filter(stmt, city: str | None):
@@ -5434,124 +5392,6 @@ def _format_day_month_pairs(pairs: set[tuple[int, int]]) -> str:
     return ", ".join(f"{d:02d}/{m:02d}" for d, m in sorted(pairs, key=lambda x: (x[1], x[0])))
 
 
-def _text_mentions_same_date_with_explicit_year(text: str | None, *, target: date) -> bool:
-    raw = str(text or "")
-    if not raw:
-        return False
-
-    day = int(target.day)
-    month = int(target.month)
-    year = int(target.year)
-    normalized = unicodedata.normalize("NFKC", raw).casefold().replace("ё", "е")
-
-    num_re = re.compile(
-        rf"(?iu)\b(?:{day}[./-]{month}|{day:02d}[./-]{month:02d})[./-]{year}\b"
-    )
-    if num_re.search(normalized):
-        return True
-
-    month_words = [w for w, n in MONTHS_RU.items() if int(n) == month]
-    if month_words:
-        mon_alt = "|".join(map(re.escape, sorted(set(month_words), key=len, reverse=True)))
-        txt_re = re.compile(
-            rf"(?iu)\b{day}\s*(?:{mon_alt})\s*(?:{year})\b"
-        )
-        if txt_re.search(normalized):
-            return True
-    return False
-
-
-def _looks_like_far_future_recap_context(text: str | None) -> bool:
-    raw = str(text or "").strip()
-    if not raw:
-        return False
-    return bool(_RECAP_CONTEXT_RE.search(raw))
-
-
-def _assess_far_future_create_confidence(
-    *,
-    candidate: EventCandidate,
-    clean_title: str | None,
-    clean_source_text: str | None,
-    clean_raw_excerpt: str | None,
-    months_threshold: int,
-) -> FarFutureCreateAssessment:
-    start = _parse_iso_date(candidate.date)
-    if months_threshold <= 0 or not start:
-        return FarFutureCreateAssessment()
-
-    today = datetime.now(timezone.utc).date()
-    try:
-        from dateutil.relativedelta import relativedelta
-
-        far_cutoff = today + relativedelta(months=int(months_threshold))
-    except Exception:
-        far_cutoff = today + timedelta(days=31 * int(months_threshold))
-    if start < far_cutoff:
-        return FarFutureCreateAssessment()
-
-    out = FarFutureCreateAssessment(applies=True)
-    combined_text = "\n".join(
-        [
-            str(clean_title or ""),
-            str(clean_source_text or ""),
-            str(clean_raw_excerpt or ""),
-        ]
-    ).strip()
-    poster_text = "\n".join(
-        [
-            str(getattr(p, "ocr_title", "") or "").strip()
-            for p in (candidate.posters or [])
-            if str(getattr(p, "ocr_title", "") or "").strip()
-        ]
-        + [
-            str(getattr(p, "ocr_text", "") or "").strip()
-            for p in (candidate.posters or [])
-            if str(getattr(p, "ocr_text", "") or "").strip()
-        ]
-    ).strip()
-    all_text = "\n".join([combined_text, poster_text]).strip()
-
-    if _text_mentions_same_date_with_explicit_year(all_text, target=start):
-        out.strong_signals.append("explicit_year")
-    else:
-        out.doubts.append("missing_explicit_year")
-
-    end_date = _parse_iso_date(candidate.end_date) if candidate.end_date else None
-    if end_date and _text_mentions_same_date_with_explicit_year(all_text, target=end_date):
-        out.strong_signals.append("explicit_end_year")
-
-    source_type = str(candidate.source_type or "").strip().lower()
-    if source_type.startswith("parser:"):
-        out.strong_signals.append("parser_source")
-
-    ticket_norm = _normalize_url(candidate.ticket_link)
-    source_norm = _normalize_url(candidate.source_url)
-    if (
-        ticket_norm
-        and ticket_norm != source_norm
-        and not _is_generic_ticket_url(candidate.ticket_link)
-    ):
-        out.strong_signals.append("specific_ticket")
-
-    poster_pairs = _poster_day_month_pairs(candidate.posters)
-    if poster_pairs:
-        if (start.day, start.month) not in poster_pairs:
-            out.blockers.append(f"poster_date_mismatch:{_format_day_month_pairs(poster_pairs)}")
-    else:
-        out.doubts.append("no_poster_day_month")
-
-    if _looks_like_congrats_notice_not_event(clean_title, combined_text):
-        out.blockers.append("congrats_context")
-    elif _looks_like_promo_or_congrats(clean_title, clean_source_text, clean_raw_excerpt):
-        out.blockers.append("promo_or_congrats_context")
-
-    if _looks_like_far_future_recap_context(combined_text):
-        out.blockers.append("recap_context")
-
-    return out
-
-
 def _far_future_poster_date_mismatch_note(
     *,
     candidate_date: str | None,
@@ -5651,11 +5491,11 @@ def _maybe_apply_default_end_date_for_long_event(candidate: EventCandidate) -> s
         candidate.raw_excerpt or candidate.source_text,
         candidate.event_type,
     )
-    if not _is_long_event_type_value(inferred_type):
+    if inferred_type != "выставка":
         return None
     # Guardrail: event_type can be misclassified by upstream LLMs.
     # Apply a default 1-month end_date only when the source text looks like a long event
-    # (exhibition/fair/exposition) or contains explicit duration signals.
+    # (exhibition/exposition) or contains explicit duration signals.
     hay = "\n".join(
         [
             str(candidate.title or ""),
@@ -5772,62 +5612,15 @@ def _normalize_url(url: str | None) -> str | None:
     value = url.strip()
     if not value:
         return None
+    low = value.lower()
+    if low.startswith(("t.me/", "vk.cc/", "clck.ru/")):
+        value = f"https://{value}"
+        low = value.lower()
+    if low.startswith("http://"):
+        value = "https://" + value[len("http://") :]
     if value.startswith("http://") or value.startswith("https://"):
         value = value.rstrip("/")
     return value
-
-
-def _normalize_url_for_identity_compare(url: str | None) -> str | None:
-    raw = _normalize_url(url)
-    if not raw:
-        return None
-    candidate = raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
-    try:
-        from urllib.parse import urlsplit
-
-        parsed = urlsplit(candidate)
-    except Exception:
-        return raw
-    host = (parsed.netloc or "").lower()
-    path = (parsed.path or "").rstrip("/")
-    query = (parsed.query or "").strip()
-    normalized = f"{host}{path}"
-    if query:
-        normalized = f"{normalized}?{query}"
-    return normalized or raw
-
-
-def _is_generic_ticket_url(url: str | None) -> bool:
-    raw = str(url or "").strip()
-    if not raw:
-        return True
-    if not raw.startswith(("http://", "https://")):
-        raw = "https://" + raw
-    try:
-        from urllib.parse import urlparse
-
-        parsed = urlparse(raw)
-    except Exception:
-        return True
-    host = (parsed.netloc or "").lower()
-    path = (parsed.path or "").rstrip("/")
-
-    if host in {"clck.ru", "vk.cc", "vk.com"}:
-        return True
-    if host == "tickets.sobor-kaliningrad.ru" and "/scheme/" in path:
-        return True
-    if host == "t.me" and path.strip("/").endswith("_bot"):
-        return True
-    if not path or path == "/":
-        return True
-    if host == "signalcommunity.timepad.ru" and re.search(r"/event/\d+$", path):
-        return False
-    if host == "kaliningrad.tretyakovgallery.ru" and "/buy/event/" in path:
-        return False
-    if host == "payform.ru":
-        return False
-    segments = [seg for seg in path.split("/") if seg]
-    return len(segments) <= 1
 
 
 def _is_http_url(url: str | None) -> bool:
@@ -5841,8 +5634,6 @@ _VK_WALL_URL_RE = re.compile(
     r"^https?://(?:m\.)?vk\.com/wall-?\d+_\d+/?$",
     re.IGNORECASE,
 )
-_VK_WALL_SOURCE_FAMILY_RE = re.compile(r"^/wall(-?\d+)_\d+/?$", re.IGNORECASE)
-_TG_MESSAGE_SOURCE_FAMILY_RE = re.compile(r"^/([A-Za-z0-9_]+)/\d+/?$")
 
 
 def _is_vk_wall_url(url: str | None) -> bool:
@@ -6629,571 +6420,6 @@ async def _fetch_event_posters_map(
     return grouped
 
 
-async def _fetch_event_source_urls_map(
-    db: Database, event_ids: Sequence[int]
-) -> dict[int, set[str]]:
-    if not event_ids:
-        return {}
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(EventSource.event_id, EventSource.source_url).where(EventSource.event_id.in_(event_ids))
-        )
-        rows = list(result.all())
-    grouped: dict[int, set[str]] = {}
-    for event_id, source_url in rows:
-        try:
-            event_id_int = int(event_id)
-        except Exception:
-            continue
-        grouped.setdefault(event_id_int, set())
-        norm = _normalize_url(source_url)
-        if norm:
-            grouped[event_id_int].add(norm)
-    return grouped
-
-
-async def _count_active_events_for_source_url(
-    db: Database,
-    *,
-    source_url: str | None,
-) -> int:
-    norm = _normalize_url(source_url)
-    if not norm:
-        return 0
-    raw = str(source_url or "").strip()
-    variants = {x for x in {raw, norm} if x}
-    async with db.get_session() as session:
-        source_ids: set[int] = set()
-        stmt = (
-            select(EventSource.event_id)
-            .join(Event, Event.id == EventSource.event_id)
-            .where(Event.lifecycle_status == "active")
-            .where(EventSource.source_url.in_(variants))
-        )
-        rows = await session.execute(stmt)
-        for event_id in rows.scalars().all():
-            try:
-                source_ids.add(int(event_id))
-            except Exception:
-                continue
-
-        legacy_stmt = (
-            select(Event.id)
-            .where(Event.lifecycle_status == "active")
-            .where(
-                or_(
-                    Event.source_post_url.in_(variants),
-                    Event.source_vk_post_url.in_(variants),
-                )
-            )
-        )
-        legacy_rows = await session.execute(legacy_stmt)
-        for event_id in legacy_rows.scalars().all():
-            try:
-                source_ids.add(int(event_id))
-            except Exception:
-                continue
-    return len(source_ids)
-
-
-def _event_known_source_urls(ev: Event, source_urls_map: dict[int, set[str]]) -> set[str]:
-    urls = set(source_urls_map.get(int(getattr(ev, "id", 0) or 0), set()))
-    for raw in (
-        getattr(ev, "source_post_url", None),
-        getattr(ev, "source_vk_post_url", None),
-    ):
-        norm = _normalize_url(raw)
-        if norm:
-            urls.add(norm)
-    return urls
-
-
-async def _fetch_city_noise_exact_title_shortlist(
-    db: Database,
-    *,
-    candidate: EventCandidate,
-    cand_start: date,
-    cand_end: date,
-    exclude_event_ids: set[int],
-) -> list[Event]:
-    city_value = str(candidate.city or "").strip()
-    cand_title_exact = _normalize_title_for_identity_exact(candidate.title)
-    if not (city_value and candidate.location_name and cand_title_exact):
-        return []
-    is_canonical_site = str(candidate.source_type or "").startswith("parser:")
-    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
-    async with db.get_session() as session:
-        stmt = select(Event).where(
-            and_(
-                Event.date <= cand_end.isoformat(),
-                or_(
-                    and_(
-                        Event.end_date.is_(None),
-                        Event.date >= cand_start.isoformat(),
-                    ),
-                    Event.end_date >= cand_start.isoformat(),
-                ),
-            )
-        )
-        stmt = stmt.where(
-            Event.city.is_not(None),
-            Event.city != "",
-            Event.city != city_value,
-        )
-        res = await session.execute(stmt)
-        city_noise_events = list(res.scalars().all())
-
-    matches: list[Event] = []
-    for ev in city_noise_events:
-        ev_id = int(getattr(ev, "id", 0) or 0)
-        if ev_id and ev_id in exclude_event_ids:
-            continue
-        if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
-            continue
-        ev_title_exact = _normalize_title_for_identity_exact(getattr(ev, "title", None))
-        if ev_title_exact != cand_title_exact:
-            continue
-        if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
-            continue
-        matches.append(ev)
-    return matches
-
-
-async def _fetch_city_noise_copy_post_shortlist(
-    db: Database,
-    *,
-    candidate: EventCandidate,
-    cand_start: date,
-    cand_end: date,
-    exclude_event_ids: set[int],
-) -> list[Event]:
-    cand_ticket_norm = _normalize_url_for_identity_compare(candidate.ticket_link)
-    candidate_source_text = str(candidate.source_text or "").strip()
-    if not (cand_ticket_norm and candidate_source_text):
-        return []
-
-    async with db.get_session() as session:
-        stmt = select(Event).where(
-            and_(
-                Event.date <= cand_end.isoformat(),
-                or_(
-                    and_(
-                        Event.end_date.is_(None),
-                        Event.date >= cand_start.isoformat(),
-                    ),
-                    Event.end_date >= cand_start.isoformat(),
-                ),
-            )
-        )
-        res = await session.execute(stmt)
-        city_noise_events = list(res.scalars().all())
-
-    exact_matches: list[Event] = []
-    related_matches: list[Event] = []
-    for ev in city_noise_events:
-        ev_id = int(getattr(ev, "id", 0) or 0)
-        if ev_id and ev_id in exclude_event_ids:
-            continue
-        if str(getattr(ev, "date", "") or "").strip() != str(candidate.date or "").strip():
-            continue
-        if _has_explicit_time_conflict(candidate.time, getattr(ev, "time", None)):
-            continue
-        ev_ticket_norm = _normalize_url_for_identity_compare(getattr(ev, "ticket_link", None))
-        if not ev_ticket_norm or ev_ticket_norm != cand_ticket_norm:
-            continue
-        text_same, text_containment = _texts_same_or_copy_contained(
-            candidate_source_text,
-            getattr(ev, "source_text", None),
-        )
-        if not (text_same or text_containment):
-            continue
-        if (
-            _normalize_title_for_identity_exact(candidate.title)
-            == _normalize_title_for_identity_exact(getattr(ev, "title", None))
-        ):
-            exact_matches.append(ev)
-            continue
-        if not _titles_look_related(candidate.title, getattr(ev, "title", None)):
-            continue
-        if _guard_title_token_overlap(candidate.title, getattr(ev, "title", None)) < 3:
-            continue
-        related_matches.append(ev)
-
-    matches = exact_matches or related_matches
-    return matches
-
-
-def _source_family_key(url: str | None) -> str | None:
-    raw = _normalize_url(url)
-    if not raw:
-        return None
-    candidate = raw if raw.startswith(("http://", "https://")) else f"https://{raw}"
-    try:
-        from urllib.parse import urlsplit
-
-        parsed = urlsplit(candidate)
-    except Exception:
-        return None
-    host = (parsed.netloc or "").lower()
-    path = (parsed.path or "").strip()
-    if host.endswith("vk.com"):
-        match = _VK_WALL_SOURCE_FAMILY_RE.match(path)
-        if match:
-            return f"vk:{match.group(1)}"
-    if host == "t.me":
-        match = _TG_MESSAGE_SOURCE_FAMILY_RE.match(path)
-        if match:
-            return f"tg:{match.group(1).lower()}"
-    return None
-
-
-def _event_source_family_keys(ev: Event, source_urls_map: dict[int, set[str]]) -> set[str]:
-    keys: set[str] = set()
-    for source_url in _event_known_source_urls(ev, source_urls_map):
-        family_key = _source_family_key(source_url)
-        if family_key:
-            keys.add(family_key)
-    return keys
-
-
-def _text_contains_doors_start_pair(text: str | None, early_time: str, late_time: str) -> bool:
-    raw = str(text or "").strip()
-    if not raw or not early_time or not late_time:
-        return False
-    normalized = raw.casefold().replace("ё", "е").replace(".", ":")
-    doors_near = re.search(
-        rf"(?:{_DOORS_HINT_RE.pattern})[\s:,-]{{0,20}}{re.escape(early_time)}|{re.escape(early_time)}[\s:,-]{{0,20}}(?:{_DOORS_HINT_RE.pattern})",
-        normalized,
-        re.IGNORECASE,
-    )
-    start_near = re.search(
-        rf"(?:{_START_HINT_RE.pattern})[\s:,-]{{0,20}}{re.escape(late_time)}|{re.escape(late_time)}[\s:,-]{{0,20}}(?:{_START_HINT_RE.pattern})",
-        normalized,
-        re.IGNORECASE,
-    )
-    return bool(doors_near and start_near)
-
-
-@dataclass(slots=True)
-class _DeterministicPairSignals:
-    same_source_url: bool
-    exact_title: bool
-    title_related: bool
-    same_date: bool
-    venue_match: bool
-    time_conflict: bool
-    ticket_same: bool
-    both_tickets_present: bool
-    ticket_specific_same: bool
-    text_same: bool
-    text_containment: bool
-    source_url_event_count: int
-
-
-def _build_deterministic_pair_signals(
-    *,
-    candidate: EventCandidate,
-    ev: Event,
-    event_source_urls: set[str],
-    source_url_event_count: int,
-) -> _DeterministicPairSignals:
-    cand_source_norm = _normalize_url_for_identity_compare(candidate.source_url)
-    event_source_identities = {
-        norm for norm in (_normalize_url_for_identity_compare(url) for url in event_source_urls) if norm
-    }
-    same_source_url = bool(cand_source_norm and cand_source_norm in event_source_identities)
-    cand_ticket_norm = _normalize_url_for_identity_compare(candidate.ticket_link)
-    ev_ticket_norm = _normalize_url_for_identity_compare(getattr(ev, "ticket_link", None))
-    ticket_same = bool(cand_ticket_norm and ev_ticket_norm and cand_ticket_norm == ev_ticket_norm)
-    both_tickets_present = bool(str(candidate.ticket_link or "").strip() and str(getattr(ev, "ticket_link", None) or "").strip())
-    text_same, text_containment = _texts_same_or_contained(candidate.source_text, getattr(ev, "source_text", None))
-    return _DeterministicPairSignals(
-        same_source_url=same_source_url,
-        exact_title=bool(
-            _normalize_title_for_identity_exact(candidate.title)
-            and _normalize_title_for_identity_exact(candidate.title)
-            == _normalize_title_for_identity_exact(getattr(ev, "title", None))
-        ),
-        title_related=_titles_look_related(candidate.title, getattr(ev, "title", None)),
-        same_date=bool(str(candidate.date or "").strip() and str(candidate.date or "").strip() == str(getattr(ev, "date", "") or "").strip()),
-        venue_match=_location_matches(candidate.location_name, getattr(ev, "location_name", None)),
-        time_conflict=_has_explicit_time_conflict(candidate.time, getattr(ev, "time", None)),
-        ticket_same=ticket_same,
-        both_tickets_present=both_tickets_present,
-        ticket_specific_same=bool(
-            ticket_same
-            and both_tickets_present
-            and not _is_generic_ticket_url(candidate.ticket_link)
-            and not _is_generic_ticket_url(getattr(ev, "ticket_link", None))
-        ),
-        text_same=text_same,
-        text_containment=text_containment,
-        source_url_event_count=source_url_event_count,
-    )
-
-
-def _should_block_by_multi_event_source(
-    *,
-    signals: _DeterministicPairSignals,
-) -> bool:
-    return signals.same_source_url and signals.source_url_event_count >= 4 and not signals.exact_title
-
-
-def _should_block_by_generic_ticket_false_friend(
-    *,
-    candidate: EventCandidate,
-    ev: Event,
-    signals: _DeterministicPairSignals,
-) -> bool:
-    if not (
-        signals.same_date
-        and signals.venue_match
-        and not signals.time_conflict
-        and signals.ticket_same
-        and not signals.title_related
-    ):
-        return False
-    if not (
-        _is_generic_ticket_url(candidate.ticket_link)
-        and _is_generic_ticket_url(getattr(ev, "ticket_link", None))
-    ):
-        return False
-    return _guard_title_token_overlap(candidate.title, getattr(ev, "title", None)) == 0
-
-
-def _pick_unique_deterministic_match(matches: Sequence[Event]) -> Event | None:
-    if len(matches) == 1:
-        return matches[0]
-    if matches:
-        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in matches}
-        if len(sigs) == 1:
-            return _pick_best_duplicate_event(matches)
-    return None
-
-
-def _deterministic_same_post_exact_title_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-) -> Event | None:
-    matches = [
-        ev
-        for ev in events
-        if (ev.id or 0) in signals_map
-        and signals_map[int(ev.id or 0)].same_source_url
-        and signals_map[int(ev.id or 0)].exact_title
-        and signals_map[int(ev.id or 0)].same_date
-        and not signals_map[int(ev.id or 0)].time_conflict
-    ]
-    return _pick_unique_deterministic_match(matches)
-
-
-def _deterministic_same_post_longrun_exact_title_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-) -> Event | None:
-    cand_end_date = str(candidate.end_date or "").strip()
-    if not cand_end_date:
-        return None
-    matches = []
-    for ev in events:
-        sig = signals_map.get(int(ev.id or 0))
-        if sig is None:
-            continue
-        if not (sig.same_source_url and sig.exact_title and sig.same_date and sig.time_conflict):
-            continue
-        if str(getattr(ev, "end_date", "") or "").strip() != cand_end_date:
-            continue
-        if not (sig.text_same and sig.text_containment):
-            continue
-        matches.append(ev)
-    return _pick_unique_deterministic_match(matches)
-
-
-def _deterministic_broken_extraction_address_title_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-) -> Event | None:
-    matches = []
-    for ev in events:
-        sig = signals_map.get(int(ev.id or 0))
-        if sig is None:
-            continue
-        if not (sig.same_source_url and sig.same_date and not sig.time_conflict):
-            continue
-        if not (sig.text_same and sig.text_containment):
-            continue
-        if _title_looks_like_address(candidate.title) ^ _title_looks_like_address(getattr(ev, "title", None)):
-            matches.append(ev)
-    return _pick_unique_deterministic_match(matches)
-
-
-def _deterministic_specific_ticket_same_slot_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-) -> Event | None:
-    matches = []
-    for ev in events:
-        sig = signals_map.get(int(ev.id or 0))
-        if sig is None:
-            continue
-        if not (sig.same_date and sig.venue_match and not sig.time_conflict and sig.ticket_specific_same):
-            continue
-        if sig.same_source_url or sig.text_same or sig.text_containment:
-            matches.append(ev)
-    return _pick_unique_deterministic_match(matches)
-
-
-def _deterministic_doors_start_ticket_bridge_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-    posters_map: dict[int, list[EventPoster]],
-) -> Event | None:
-    cand_time = _normalize_time_for_match(candidate.time)
-    if not cand_time:
-        return None
-    candidate_text = "\n".join(
-        [str(candidate.source_text or "")] + [p.ocr_text or "" for p in candidate.posters]
-    ).strip()
-    matches = []
-    for ev in events:
-        sig = signals_map.get(int(ev.id or 0))
-        if sig is None:
-            continue
-        if not (sig.same_date and sig.time_conflict and sig.ticket_same and sig.title_related and sig.venue_match):
-            continue
-        if not (sig.both_tickets_present or sig.same_source_url):
-            continue
-        ev_time = _normalize_time_for_match(getattr(ev, "time", None))
-        if not ev_time:
-            continue
-        early, late = sorted([cand_time, ev_time])
-        ev_text = "\n".join(
-            [str(getattr(ev, "source_text", "") or "")]
-            + [p.ocr_text or "" for p in posters_map.get(int(ev.id or 0), [])]
-        ).strip()
-        if _text_contains_doors_start_pair(candidate_text, early, late) or _text_contains_doors_start_pair(ev_text, early, late):
-            matches.append(ev)
-    return _pick_unique_deterministic_match(matches)
-
-
-def _deterministic_cross_source_exact_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-) -> Event | None:
-    cand_time = _normalize_time_for_match(candidate.time)
-    if not cand_time:
-        return None
-    matches = []
-    for ev in events:
-        sig = signals_map.get(int(ev.id or 0))
-        if sig is None:
-            continue
-        if sig.same_source_url:
-            continue
-        if not (sig.exact_title and sig.same_date and sig.venue_match and not sig.time_conflict):
-            continue
-        ev_time = _normalize_time_for_match(getattr(ev, "time", None))
-        if ev_time and ev_time == cand_time:
-            matches.append(ev)
-    return _pick_unique_deterministic_match(matches)
-
-
-def _deterministic_copy_post_ticket_same_day_match(
-    candidate: EventCandidate,
-    events: Sequence[Event],
-    *,
-    signals_map: dict[int, _DeterministicPairSignals],
-) -> Event | None:
-    exact_matches = []
-    related_matches = []
-    for ev in events:
-        sig = signals_map.get(int(ev.id or 0))
-        if sig is None:
-            continue
-        if not (sig.same_date and not sig.time_conflict and sig.ticket_same):
-            continue
-        text_same, text_containment = _texts_same_or_copy_contained(
-            candidate.source_text,
-            getattr(ev, "source_text", None),
-        )
-        if not (text_same or text_containment):
-            continue
-        if sig.exact_title:
-            exact_matches.append(ev)
-            continue
-        if not sig.title_related:
-            continue
-        if _guard_title_token_overlap(candidate.title, getattr(ev, "title", None)) < 3:
-            continue
-        related_matches.append(ev)
-    return _pick_unique_deterministic_match(exact_matches or related_matches)
-
-
-def _cross_sibling_redirect_match(
-    candidate: EventCandidate,
-    *,
-    shortlist: Sequence[Event],
-    match_event: Event | None,
-    signals_map: dict[int, _DeterministicPairSignals],
-    source_urls_map: dict[int, set[str]],
-) -> Event | None:
-    if match_event is None or not shortlist:
-        return None
-    match_id = int(getattr(match_event, "id", 0) or 0)
-    if not match_id:
-        return None
-    current_sig = signals_map.get(match_id)
-    if current_sig is None:
-        return None
-    if current_sig.exact_title or current_sig.title_related:
-        return None
-    if not _title_has_meaningful_tokens(candidate.title):
-        return None
-    candidate_family = _source_family_key(candidate.source_url)
-    if not candidate_family:
-        return None
-    current_families = _event_source_family_keys(match_event, source_urls_map)
-    if candidate_family not in current_families:
-        return None
-
-    exact_matches: list[Event] = []
-    related_matches: list[Event] = []
-    for ev in shortlist:
-        ev_id = int(getattr(ev, "id", 0) or 0)
-        if not ev_id or ev_id == match_id:
-            continue
-        sig = signals_map.get(ev_id)
-        if sig is None:
-            continue
-        if candidate_family not in _event_source_family_keys(ev, source_urls_map):
-            continue
-        if not (sig.same_date and sig.venue_match and not sig.time_conflict):
-            continue
-        if sig.exact_title:
-            exact_matches.append(ev)
-            continue
-        if sig.title_related:
-            related_matches.append(ev)
-
-    if exact_matches:
-        return _pick_unique_deterministic_match(exact_matches)
-    if related_matches:
-        return _pick_unique_deterministic_match(related_matches)
-    return None
-
-
 def _poster_hashes(posters: Iterable[PosterCandidate]) -> set[str]:
     hashes: set[str] = set()
     for poster in posters:
@@ -7399,8 +6625,6 @@ async def _llm_match_or_create_bundle(
         "- Если `candidate.poster_titles` содержит крупный заголовок афиши и он относится к событию, используй его как основу.\n"
         "- Если в candidate.source_text/raw_excerpt/poster_texts есть явное собственное название (проект/тур/постановка/шоу), используй его как основу.\n"
         "- НЕ делай title в формате «<event_type> — <площадка>», если в данных есть имя/бренд события (пример: «ЕвроДэнс'90», а не «Концерт — Янтарь холл»).\n"
-        "- НЕ придумывай тематические, редакционные или идеологические заголовки; используй только конкретное название события из источника.\n"
-        "- Если явного имени события нет, используй нейтральный фактический формат вроде «<event_type> в <venue>», а не рекламный слоган.\n"
         "- Не экранируй кавычки обратным слэшем (не пиши `\\\"...\\\"`).\n\n"
         "Правила для bundle.description:\n"
         "- Напиши ПОЛНОЕ развернутое описание как культурный журналист.\n"
@@ -7432,8 +6656,7 @@ async def _llm_match_or_create_bundle(
         "Правила для bundle.short_description:\n"
         "- Ровно 1 законченное предложение на 12–16 слов.\n"
         "- Без многоточий и обрывов фраз.\n"
-        "- Не указывай дату/время/адрес/город/цены/ссылки.\n"
-        "- Описывай ЧТО происходит (формат, участники, жанр), а не тему, символизм или редакционную интерпретацию.\n\n"
+        "- Не указывай дату/время/адрес/город/цены/ссылки.\n\n"
         f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -8288,77 +7511,6 @@ def _normalize_text_for_grounding(text: str | None) -> str:
     return cleaned
 
 
-def _normalize_title_for_identity_exact(title: str | None) -> str:
-    if not title:
-        return ""
-    raw = _strip_private_use(title) or str(title)
-    raw = _ZERO_WIDTH_RE.sub("", raw)
-    raw = raw.casefold().replace("ё", "е")
-    raw = _IDENTITY_EXACT_TITLE_NONWORD_RE.sub(" ", raw)
-    raw = re.sub(r"\s+", " ", raw).strip()
-    return raw
-
-
-def _meaningful_guard_title_tokens(title: str | None) -> set[str]:
-    norm = _normalize_text_for_grounding(title)
-    if not norm:
-        return set()
-    return {
-        tok
-        for tok in norm.split()
-        if len(tok) >= 3 and tok not in _GENERIC_TICKET_TITLE_TOKENS and not tok.isdigit()
-    }
-
-
-def _guard_title_token_overlap(a: str | None, b: str | None) -> int:
-    return len(_meaningful_guard_title_tokens(a) & _meaningful_guard_title_tokens(b))
-
-
-def _title_looks_like_address(title: str | None) -> bool:
-    raw = str(title or "").strip()
-    if not raw:
-        return False
-    if _ADDRESS_TITLE_RE.match(raw):
-        return True
-    tokens = _meaningful_guard_title_tokens(raw)
-    return bool(re.search(r"\d", raw)) and len(tokens) <= 1
-
-
-def _texts_same_or_contained(a: str | None, b: str | None) -> tuple[bool, bool]:
-    na = _normalize_text_for_grounding(a)
-    nb = _normalize_text_for_grounding(b)
-    if not na or not nb:
-        return False, False
-    if na == nb:
-        return True, True
-    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if len(shorter) < 40:
-        return False, False
-    return False, shorter in longer
-
-
-def _normalize_text_for_copy_post_compare(text: str | None) -> str:
-    norm = _normalize_text_for_grounding(text)
-    if not norm:
-        return ""
-    norm = re.sub(r"\bhttps?\b", "", norm)
-    norm = re.sub(r"\s+", " ", norm).strip()
-    return norm
-
-
-def _texts_same_or_copy_contained(a: str | None, b: str | None) -> tuple[bool, bool]:
-    na = _normalize_text_for_copy_post_compare(a)
-    nb = _normalize_text_for_copy_post_compare(b)
-    if not na or not nb:
-        return False, False
-    if na == nb:
-        return True, True
-    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if len(shorter) < 40:
-        return False, False
-    return False, shorter in longer
-
-
 def _meaningful_title_tokens(title: str | None) -> set[str]:
     norm = _normalize_text_for_grounding(title)
     if not norm:
@@ -8426,16 +7578,10 @@ def _is_title_grounded_in_candidate_sources(
     if not tokens:
         # Titles like "концерт" still must exist in the source corpus.
         return title_norm in corpus_norm
-    grounded = 0
     for token in tokens:
         if _token_is_grounded(token, source_tokens):
-            grounded += 1
-    if grounded == 0:
-        return False
-    required = 1 if len(tokens) == 1 else min(2, len(tokens))
-    if grounded < required:
-        return False
-    return grounded * 2 >= len(tokens)
+            return True
+    return False
 
 
 def _is_generic_title_event_type_venue(
@@ -8713,7 +7859,7 @@ async def _match_existing_event_by_source_anchor(
         if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
             continue
         if candidate.location_name and getattr(ev, "location_name", None):
-            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         anchor_filtered.append(ev)
         ev_title = str(getattr(ev, "title", "") or "").strip()
@@ -8786,7 +7932,7 @@ async def _match_existing_event_by_event_source_url(
             continue
         ev_title = str(getattr(ev, "title", "") or "").strip()
         if candidate.location_name and getattr(ev, "location_name", None):
-            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         anchor_filtered.append(ev)
         if title_raw and ev_title and _title_has_meaningful_tokens(title_raw) and _title_has_meaningful_tokens(ev_title):
@@ -8827,7 +7973,7 @@ def _single_candidate_auto_match_ok(
         if candidate.date and getattr(event_db, "date", None) and candidate.date != event_db.date:
             return False
         if candidate.location_name and getattr(event_db, "location_name", None):
-            if not _location_matches(candidate.location_name, event_db.location_name):
+            if not _event_candidate_location_matches(event_db, candidate):
                 return False
         if _has_explicit_time_conflict(cand_time_anchor, event_time_anchor):
             return False
@@ -8891,7 +8037,7 @@ def _deterministic_exact_title_match(
         if str(getattr(ev, "date", "") or "").strip() != cand_date:
             continue
         if cand_loc and getattr(ev, "location_name", None):
-            if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         if _normalize_title_for_match(getattr(ev, "title", None)) != cand_title_norm:
             continue
@@ -8945,7 +8091,7 @@ def _deterministic_related_title_anchor_match(
             continue
         if str(getattr(ev, "date", "") or "").strip() != cand_date:
             continue
-        if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+        if not _event_candidate_location_matches(ev, candidate):
             continue
         if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
             continue
@@ -8961,6 +8107,220 @@ def _deterministic_related_title_anchor_match(
         if len(sigs) == 1:
             return _pick_best_duplicate_event(matches)
     return None
+
+
+def _event_has_source_url_hint(event: Event, source_url: str | None) -> bool:
+    source_norm = _normalize_url(source_url)
+    if not source_norm:
+        return False
+    return source_norm in {
+        _normalize_url(getattr(event, "source_post_url", None)),
+        _normalize_url(getattr(event, "source_vk_post_url", None)),
+    }
+
+
+def _source_texts_look_nearly_identical(a: str | None, b: str | None) -> bool:
+    left = _normalize_for_similarity(a, drop_structured=False)
+    right = _normalize_for_similarity(b, drop_structured=False)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    if len(left) >= 120 and left in right:
+        return True
+    if len(right) >= 120 and right in left:
+        return True
+    try:
+        from difflib import SequenceMatcher
+    except Exception:  # pragma: no cover
+        return False
+    return SequenceMatcher(None, left, right).ratio() >= 0.82
+
+
+def _time_to_minutes_for_match(value: str | None) -> int | None:
+    norm = _normalize_time_for_match(value)
+    if not norm:
+        return None
+    try:
+        hh, mm = norm.split(":", 1)
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _source_text_mentions_both_times(text: str | None, *times: str | None) -> bool:
+    raw = str(text or "").replace(".", ":").casefold()
+    wanted = [t for t in {_normalize_time_for_match(v) for v in times} if t]
+    if len(wanted) < 2:
+        return False
+    return all(t.casefold() in raw for t in wanted)
+
+
+def _deterministic_same_post_longrun_exact_title_match(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+) -> Event | None:
+    cand_title = _normalize_title_for_match(candidate.title)
+    cand_start, cand_end = _candidate_date_range(candidate)
+    if not cand_title or not cand_start or not cand_end or cand_start == cand_end:
+        return None
+    matches: list[Event] = []
+    for ev in events:
+        if not getattr(ev, "id", None):
+            continue
+        if not _event_has_source_url_hint(ev, candidate.source_url):
+            continue
+        if _normalize_title_for_match(getattr(ev, "title", None)) != cand_title:
+            continue
+        if candidate.location_name and getattr(ev, "location_name", None):
+            if not _event_candidate_location_matches(ev, candidate):
+                continue
+        ev_start, ev_end = _event_date_range(ev)
+        if not _ranges_overlap(cand_start, cand_end, ev_start, ev_end):
+            continue
+        ev_end_iso = str(getattr(ev, "end_date", "") or "").strip() or None
+        cand_end_iso = str(candidate.end_date or "").strip() or None
+        if cand_end_iso and ev_end_iso and cand_end_iso != ev_end_iso:
+            continue
+        matches.append(ev)
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in matches}
+        if len(sigs) == 1:
+            return _pick_best_duplicate_event(matches)
+    return None
+
+
+def _deterministic_ticket_source_anchor_match(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+) -> tuple[Event | None, str]:
+    cand_ticket = _normalize_url(candidate.ticket_link)
+    cand_date = str(candidate.date or "").strip()
+    cand_loc = str(candidate.location_name or "").strip()
+    cand_time = _candidate_anchor_time(candidate, is_canonical_site=False)
+    if not (cand_ticket and cand_date and cand_loc and cand_time):
+        return None, ""
+
+    slot_matches: list[Event] = []
+    bridge_matches: list[Event] = []
+    cand_minutes = _time_to_minutes_for_match(cand_time)
+    source_text = candidate.source_text or candidate.raw_excerpt
+    for ev in events:
+        if not getattr(ev, "id", None):
+            continue
+        if str(getattr(ev, "date", "") or "").strip() != cand_date:
+            continue
+        if not _event_candidate_location_matches(ev, candidate):
+            continue
+        if _normalize_url(getattr(ev, "ticket_link", None)) != cand_ticket:
+            continue
+        if not _source_texts_look_nearly_identical(source_text, getattr(ev, "source_text", None)):
+            continue
+        ev_time = _event_anchor_time(ev)
+        if ev_time == cand_time:
+            slot_matches.append(ev)
+            continue
+        ev_minutes = _time_to_minutes_for_match(ev_time)
+        if cand_minutes is None or ev_minutes is None:
+            continue
+        if abs(cand_minutes - ev_minutes) > 90:
+            continue
+        if not _source_text_mentions_both_times(source_text, cand_time, ev_time):
+            continue
+        if not re.search(r"(?iu)\b(сбор\s+гостей|doors|начал[оа]|start)\b", str(source_text or "")):
+            continue
+        bridge_matches.append(ev)
+
+    if len(slot_matches) == 1:
+        return slot_matches[0], "deterministic_specific_ticket_same_slot"
+    if slot_matches:
+        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in slot_matches}
+        if len(sigs) == 1:
+            return _pick_best_duplicate_event(slot_matches), "deterministic_specific_ticket_same_slot"
+    if len(bridge_matches) == 1:
+        return bridge_matches[0], "deterministic_doors_start_ticket_bridge"
+    if bridge_matches:
+        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in bridge_matches}
+        if len(sigs) == 1:
+            return _pick_best_duplicate_event(bridge_matches), "deterministic_doors_start_ticket_bridge"
+    return None, ""
+
+
+def _deterministic_copy_post_ticket_same_day_match(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+) -> Event | None:
+    cand_ticket = _normalize_url(candidate.ticket_link)
+    cand_date = str(candidate.date or "").strip()
+    source_text = candidate.source_text or candidate.raw_excerpt
+    if not (cand_ticket and cand_date and source_text):
+        return None
+    matches: list[Event] = []
+    for ev in events:
+        if not getattr(ev, "id", None):
+            continue
+        if str(getattr(ev, "date", "") or "").strip() != cand_date:
+            continue
+        if _normalize_url(getattr(ev, "ticket_link", None)) != cand_ticket:
+            continue
+        if not _source_texts_look_nearly_identical(source_text, getattr(ev, "source_text", None)):
+            continue
+        if not _titles_look_related(candidate.title, getattr(ev, "title", None)):
+            continue
+        matches.append(ev)
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        sigs = {_anchor_signature_for_duplicate_event(ev) for ev in matches}
+        if len(sigs) == 1:
+            return _pick_best_duplicate_event(matches)
+    return None
+
+
+async def _match_existing_event_by_city_noise_rescue(
+    db: Database,
+    candidate: EventCandidate,
+    *,
+    is_canonical_site: bool,
+) -> tuple[Event | None, str]:
+    cand_start, cand_end = _candidate_date_range(candidate)
+    if not cand_start or not cand_end:
+        return None, ""
+
+    async with db.get_session() as session:
+        stmt = select(Event).where(
+            and_(
+                Event.date <= cand_end.isoformat(),
+                or_(
+                    and_(
+                        Event.end_date.is_(None),
+                        Event.date >= cand_start.isoformat(),
+                    ),
+                    Event.end_date >= cand_start.isoformat(),
+                ),
+            )
+        )
+        res = await session.execute(stmt)
+        pool = list(res.scalars().all())
+
+    if not pool:
+        return None, ""
+
+    exact = _deterministic_exact_title_match(
+        candidate,
+        pool,
+        is_canonical_site=is_canonical_site,
+    )
+    if exact is not None:
+        return exact, "city_noise_exact_title_shortlist"
+
+    copy_post = _deterministic_copy_post_ticket_same_day_match(candidate, pool)
+    if copy_post is not None:
+        return copy_post, "city_noise_copy_post_shortlist"
+
+    return None, ""
 
 
 def _strip_foreign_schedule_sentences(text: str | None, *, event_title: str | None) -> str:
@@ -9627,8 +8987,6 @@ async def _smart_event_update_impl(
     async def _enqueue_ticket_sites_queue(session: Any, *, event_id: int) -> None:
         if not event_id:
             return
-        if not schedule_tasks:
-            return
         try:
             from ticket_sites_queue import (
                 enqueue_ticket_site_urls_in_session,
@@ -10103,26 +9461,6 @@ async def _smart_event_update_impl(
             force_silent_due_to_date_risk = True
             poster_filter_facts.append(note)
 
-    far_future_create_assessment = _assess_far_future_create_confidence(
-        candidate=candidate,
-        clean_title=clean_title,
-        clean_source_text=clean_source_text,
-        clean_raw_excerpt=clean_raw_excerpt,
-        months_threshold=SMART_UPDATE_FAR_FUTURE_CREATE_MONTHS,
-    )
-    if far_future_create_assessment.applies:
-        logger.info(
-            "smart_update.far_future_assessment source_type=%s source_url=%s title=%s grounding_score=%s strong_doubt_score=%s signals=%s doubts=%s blockers=%s",
-            candidate.source_type,
-            candidate.source_url,
-            _clip_title(clean_title),
-            far_future_create_assessment.grounding_score,
-            far_future_create_assessment.strong_doubt_score,
-            far_future_create_assessment.strong_signals,
-            far_future_create_assessment.doubts,
-            far_future_create_assessment.blockers,
-        )
-
     if check_source_url and candidate.source_url:
         timing = (os.getenv("SMART_UPDATE_DEBUG_TIMING") or "").strip().lower() in {"1", "true", "yes"}
         t0 = time.monotonic() if timing else 0.0
@@ -10196,16 +9534,34 @@ async def _smart_event_update_impl(
             res = await session.execute(stmt)
             shortlist = list(res.scalars().all())
 
-    if (not anchor_forced) and candidate.location_name:
+    is_canonical_site = str(candidate.source_type or "").startswith("parser:")
+    city_noise_rescued = False
+    if (not anchor_forced) and (not shortlist):
+        city_noise_match, city_noise_reason = await _match_existing_event_by_city_noise_rescue(
+            db,
+            candidate,
+            is_canonical_site=is_canonical_site,
+        )
+        if city_noise_match is not None:
+            shortlist = [city_noise_match]
+            city_noise_rescued = True
+            logger.info(
+                "smart_update.shortlist rescue=%s event_id=%s source_type=%s source_url=%s",
+                city_noise_reason,
+                getattr(city_noise_match, "id", None),
+                candidate.source_type,
+                candidate.source_url,
+            )
+
+    if (not anchor_forced) and (not city_noise_rescued) and candidate.location_name:
         shortlist = [
-            ev for ev in shortlist if _location_matches(ev.location_name, candidate.location_name)
+            ev for ev in shortlist if _event_candidate_location_matches(ev, candidate)
         ]
 
     # Time is an anchor field, but for canonical site/parser imports we allow time corrections:
     # matching must work even if a Telegram-first event had a wrong/empty time.
-    is_canonical_site = str(candidate.source_type or "").startswith("parser:")
     cand_time_norm = _candidate_anchor_time(candidate, is_canonical_site=is_canonical_site)
-    if (not anchor_forced) and cand_time_norm and (not is_canonical_site):
+    if (not anchor_forced) and (not city_noise_rescued) and cand_time_norm and (not is_canonical_site):
         time_filtered: list[Event] = []
         for ev in shortlist:
             ev_time_anchor = _event_anchor_time(ev)
@@ -10214,64 +9570,15 @@ async def _smart_event_update_impl(
         if time_filtered:
             shortlist = time_filtered
 
-    if not anchor_forced:
-        city_noise_matches = await _fetch_city_noise_exact_title_shortlist(
-            db,
-            candidate=candidate,
-            cand_start=cand_start,
-            cand_end=cand_end,
-            exclude_event_ids={int(getattr(ev, "id", 0) or 0) for ev in shortlist if getattr(ev, "id", None)},
-        )
-        if city_noise_matches:
-            shortlist_by_id: dict[int, Event] = {
-                int(ev.id): ev for ev in shortlist if getattr(ev, "id", None)
-            }
-            appended = 0
-            for ev in city_noise_matches:
-                ev_id = int(getattr(ev, "id", 0) or 0)
-                if ev_id and ev_id not in shortlist_by_id:
-                    shortlist_by_id[ev_id] = ev
-                    appended += 1
-            if appended:
-                shortlist = list(shortlist_by_id.values())
-                logger.info(
-                    "smart_update.shortlist_expand type=city_noise_exact_title added=%s source_url=%s title=%s city=%s",
-                    appended,
-                    candidate.source_url,
-                    _clip_title(candidate.title),
-                    candidate.city,
-                )
-
-        copy_post_matches = await _fetch_city_noise_copy_post_shortlist(
-            db,
-            candidate=candidate,
-            cand_start=cand_start,
-            cand_end=cand_end,
-            exclude_event_ids={int(getattr(ev, "id", 0) or 0) for ev in shortlist if getattr(ev, "id", None)},
-        )
-        if copy_post_matches:
-            shortlist_by_id: dict[int, Event] = {
-                int(ev.id): ev for ev in shortlist if getattr(ev, "id", None)
-            }
-            appended = 0
-            for ev in copy_post_matches:
-                ev_id = int(getattr(ev, "id", 0) or 0)
-                if ev_id and ev_id not in shortlist_by_id:
-                    shortlist_by_id[ev_id] = ev
-                    appended += 1
-            if appended:
-                shortlist = list(shortlist_by_id.values())
-                logger.info(
-                    "smart_update.shortlist_expand type=city_noise_copy_post added=%s source_url=%s title=%s city=%s",
-                    appended,
-                    candidate.source_url,
-                    _clip_title(candidate.title),
-                    candidate.city,
-                )
-
     # If the candidate has no explicit time, try to shrink the shortlist to the only
     # title-related event (helps prevent duplicates when time is missing but the match is obvious).
-    if (not anchor_forced) and (not cand_time_norm) and candidate.location_name and len(shortlist) > 1:
+    if (
+        (not anchor_forced)
+        and (not city_noise_rescued)
+        and (not cand_time_norm)
+        and candidate.location_name
+        and len(shortlist) > 1
+    ):
         related = [
             ev
             for ev in shortlist
@@ -10281,62 +9588,27 @@ async def _smart_event_update_impl(
         if len(related) == 1:
             shortlist = related
 
+    if (not anchor_forced) and (not shortlist) and (not city_noise_rescued):
+        city_noise_match, city_noise_reason = await _match_existing_event_by_city_noise_rescue(
+            db,
+            candidate,
+            is_canonical_site=is_canonical_site,
+        )
+        if city_noise_match is not None:
+            shortlist = [city_noise_match]
+            city_noise_rescued = True
+            logger.info(
+                "smart_update.shortlist rescue=%s event_id=%s source_type=%s source_url=%s",
+                city_noise_reason,
+                getattr(city_noise_match, "id", None),
+                candidate.source_type,
+                candidate.source_url,
+            )
+
     posters_map: dict[int, list[EventPoster]] = {}
     if shortlist:
         event_ids = [ev.id for ev in shortlist if ev.id]
         posters_map = await _fetch_event_posters_map(db, event_ids)
-        source_urls_map = await _fetch_event_source_urls_map(db, event_ids)
-    else:
-        source_urls_map = {}
-
-    source_url_event_count = 0
-    if candidate.source_url:
-        try:
-            source_url_event_count = await _count_active_events_for_source_url(
-                db,
-                source_url=candidate.source_url,
-            )
-        except Exception:
-            logger.warning("smart_update: source_url event count failed", exc_info=True)
-            source_url_event_count = 0
-
-    if shortlist:
-        blocked: list[Event] = []
-        filtered_shortlist: list[Event] = []
-        for ev in shortlist:
-            signals = _build_deterministic_pair_signals(
-                candidate=candidate,
-                ev=ev,
-                event_source_urls=_event_known_source_urls(ev, source_urls_map),
-                source_url_event_count=source_url_event_count,
-            )
-            if _should_block_by_multi_event_source(signals=signals):
-                blocked.append(ev)
-                logger.info(
-                    "smart_update.shortlist_block type=multi_event_source event_id=%s source_url=%s candidate_title=%s existing_title=%s source_url_event_count=%s",
-                    getattr(ev, "id", None),
-                    candidate.source_url,
-                    _clip_title(candidate.title),
-                    _clip_title(getattr(ev, "title", None)),
-                    source_url_event_count,
-                )
-                continue
-            if _should_block_by_generic_ticket_false_friend(
-                candidate=candidate,
-                ev=ev,
-                signals=signals,
-            ):
-                blocked.append(ev)
-                logger.info(
-                    "smart_update.shortlist_block type=generic_ticket_false_friend event_id=%s ticket_link=%s candidate_title=%s existing_title=%s",
-                    getattr(ev, "id", None),
-                    candidate.ticket_link,
-                    _clip_title(candidate.title),
-                    _clip_title(getattr(ev, "title", None)),
-                )
-                continue
-            filtered_shortlist.append(ev)
-        shortlist = filtered_shortlist
 
     allow_parallel = _allow_parallel_events(candidate.location_name)
     candidate_poster_texts = [p.ocr_text for p in candidate.posters if p.ocr_text]
@@ -10383,118 +9655,14 @@ async def _smart_event_update_impl(
             match_event = None
             match_reason = ""
 
-        deterministic_signals_map = {
-            int(ev.id or 0): _build_deterministic_pair_signals(
-                candidate=candidate,
-                ev=ev,
-                event_source_urls=_event_known_source_urls(ev, source_urls_map),
-                source_url_event_count=source_url_event_count,
-            )
-            for ev in shortlist
-            if getattr(ev, "id", None)
-        }
-
-        if match_event is None:
-            same_post = _deterministic_same_post_exact_title_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-            )
-            if same_post is not None:
-                match_event = same_post
-                match_reason = "same_post_exact_title"
-                logger.info(
-                    "smart_update.match type=same_post_exact_title event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
-        if match_event is None:
-            longrun = _deterministic_same_post_longrun_exact_title_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-            )
-            if longrun is not None:
-                match_event = longrun
-                match_reason = "same_post_longrun_exact_title"
-                logger.info(
-                    "smart_update.match type=same_post_longrun_exact_title event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
-        if match_event is None:
-            broken = _deterministic_broken_extraction_address_title_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-            )
-            if broken is not None:
-                match_event = broken
-                match_reason = "broken_extraction_address_title"
-                logger.info(
-                    "smart_update.match type=broken_extraction_address_title event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
-        if match_event is None:
-            specific_ticket = _deterministic_specific_ticket_same_slot_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-            )
-            if specific_ticket is not None:
-                match_event = specific_ticket
-                match_reason = "specific_ticket_same_slot"
-                logger.info(
-                    "smart_update.match type=specific_ticket_same_slot event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
-        if match_event is None:
-            copy_post_ticket = _deterministic_copy_post_ticket_same_day_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-            )
-            if copy_post_ticket is not None:
-                match_event = copy_post_ticket
-                match_reason = "copy_post_ticket_same_day"
-                logger.info(
-                    "smart_update.match type=copy_post_ticket_same_day event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
-        if match_event is None:
-            doors_start = _deterministic_doors_start_ticket_bridge_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-                posters_map=posters_map,
-            )
-            if doors_start is not None:
-                match_event = doors_start
-                match_reason = "doors_start_ticket_bridge"
-                logger.info(
-                    "smart_update.match type=doors_start_ticket_bridge event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
-        if match_event is None:
-            cross_source_exact = _deterministic_cross_source_exact_match(
-                candidate,
-                shortlist,
-                signals_map=deterministic_signals_map,
-            )
-            if cross_source_exact is not None:
-                match_event = cross_source_exact
-                match_reason = "cross_source_exact_match"
-                logger.info(
-                    "smart_update.match type=cross_source_exact_match event_id=%s",
-                    getattr(match_event, "id", None),
-                )
-
         candidate_hashes = _poster_hashes(candidate.posters)
+        ticket_norm = _normalize_url(candidate.ticket_link)
+
         strong_matches: dict[int, int] = {}
+        if ticket_norm:
+            for ev in shortlist:
+                if _normalize_url(ev.ticket_link) == ticket_norm and ev.id:
+                    strong_matches[ev.id] = strong_matches.get(ev.id, 0) + 3
         if candidate_hashes:
             for ev in shortlist:
                 hashes = {p.poster_hash for p in posters_map.get(ev.id or 0, [])}
@@ -10509,6 +9677,33 @@ async def _smart_event_update_impl(
             candidate.source_type,
             candidate.source_url,
         )
+        if match_event is None:
+            longrun = _deterministic_same_post_longrun_exact_title_match(
+                candidate,
+                shortlist,
+            )
+            if longrun is not None:
+                match_event = longrun
+                match_reason = "deterministic_same_post_longrun_exact_title"
+                logger.info(
+                    "smart_update.match type=deterministic_same_post_longrun_exact_title event_id=%s",
+                    getattr(match_event, "id", None),
+                )
+
+        if match_event is None:
+            ticket_anchor_match, ticket_anchor_reason = _deterministic_ticket_source_anchor_match(
+                candidate,
+                shortlist,
+            )
+            if ticket_anchor_match is not None:
+                match_event = ticket_anchor_match
+                match_reason = ticket_anchor_reason
+                logger.info(
+                    "smart_update.match type=%s event_id=%s",
+                    match_reason,
+                    getattr(match_event, "id", None),
+                )
+
         if strong_matches and match_event is None:
             best = max(strong_matches.items(), key=lambda item: item[1])
             match_event = next((ev for ev in shortlist if ev.id == best[0]), None)
@@ -10648,29 +9843,6 @@ async def _smart_event_update_impl(
                 match_reason,
             )
 
-        redirected_match = _cross_sibling_redirect_match(
-            candidate,
-            shortlist=shortlist,
-            match_event=match_event,
-            signals_map=deterministic_signals_map,
-            source_urls_map=source_urls_map,
-        )
-        if redirected_match is not None and getattr(redirected_match, "id", None) != getattr(
-            match_event, "id", None
-        ):
-            logger.warning(
-                "smart_update.match_redirect type=cross_sibling source_type=%s source_url=%s from_event_id=%s from_title=%s to_event_id=%s to_title=%s candidate_title=%s",
-                candidate.source_type,
-                candidate.source_url,
-                getattr(match_event, "id", None),
-                _clip_title(getattr(match_event, "title", None)),
-                getattr(redirected_match, "id", None),
-                _clip_title(getattr(redirected_match, "title", None)),
-                _clip_title(candidate.title),
-            )
-            match_event = redirected_match
-            match_reason = "cross_sibling_guard"
-
     # Guard: if the matched existing event is semantically unrelated by title, treat it as "no match"
     # and create a new event instead of performing a catastrophic merge.
     #
@@ -10682,12 +9854,13 @@ async def _smart_event_update_impl(
             getattr(match_event, "title", None)
         ):
             if not _titles_look_related(candidate.title, getattr(match_event, "title", None)):
-                safe_single = match_reason in {
-                    "specific_ticket_same_slot",
-                    "broken_extraction_address_title",
+                narrow_reason = str(match_reason or "").strip().lower()
+                safe_single = narrow_reason in {
+                    "deterministic_specific_ticket_same_slot",
+                    "deterministic_doors_start_ticket_bridge",
                 }
                 try:
-                    if not safe_single and len(shortlist) == 1:
+                    if (not safe_single) and len(shortlist) == 1:
                         safe_single = _single_candidate_auto_match_ok(
                             candidate,
                             match_event,
@@ -10762,25 +9935,6 @@ async def _smart_event_update_impl(
                         getattr(match_event, "id", None),
                         prev_reason,
                     )
-
-    if match_event is None and far_future_create_assessment.reject_create:
-        logger.info(
-            "smart_update.reject reason=%s source_type=%s source_url=%s title=%s grounding_score=%s strong_doubt_score=%s signals=%s doubts=%s blockers=%s",
-            far_future_create_assessment.reason,
-            candidate.source_type,
-            candidate.source_url,
-            _clip_title(clean_title),
-            far_future_create_assessment.grounding_score,
-            far_future_create_assessment.strong_doubt_score,
-            far_future_create_assessment.strong_signals,
-            far_future_create_assessment.doubts,
-            far_future_create_assessment.blockers,
-        )
-        return SmartUpdateResult(
-            status="rejected_far_future_low_confidence",
-            reason=far_future_create_assessment.reason,
-            queue_notes=list(queue_notes or []),
-        )
 
     if match_event is None:
         normalized_event_type = _normalize_event_type_value(

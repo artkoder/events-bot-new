@@ -14,6 +14,7 @@
 - LLM: `docs/llm/` (промпты, формат запросов, классификатор тем)
 - Справочники: `docs/reference/` (локации, праздники, шаблоны)
 - Пайплайны/парсеры (каноника): `docs/features/source-parsing/` (в `docs/pipelines/` остаются redirect‑stub’ы для старых ссылок)
+- 3D previews (`/3di`): `docs/features/preview-3d/README.md`
 - Фичи: `docs/features/`
 - Бэклог (не реализовано): `docs/backlog/`
 - Отчёты и планы: `docs/reports/`
