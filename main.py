@@ -1545,6 +1545,7 @@ _ADD_EVENT_LAST_DEQUEUE_TS: float = 0.0
 
 
 async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
+    global _ADD_EVENT_LAST_DEQUEUE_TS
     worker: asyncio.Task = app["add_event_worker"]
     STALL_GUARD_SECS = int(os.getenv("STALL_GUARD_SECS", str(ADD_EVENT_TIMEOUT + 30)))
     while True:
@@ -1582,7 +1583,7 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
                     stalled_for,
                 )
                 worker.cancel()
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await worker
                 worker = asyncio.create_task(add_event_queue_worker(db, bot))
                 app["add_event_worker"] = worker
