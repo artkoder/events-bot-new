@@ -10,6 +10,14 @@
 - **Ops / Location Repair**: added `scripts/fix_molodezhny_locations.py` for the targeted prod backfill of youth-center events that were stored with `city='МОЛОДЕЖНЫЙ'`, with optional Telegraph rebuild after the DB fix.
 - **Location Reference / Aliases**: added `docs/reference/location-aliases.md` for data-driven venue aliases and typo handling on top of `docs/reference/locations.md`.
 
+### Fixed
+- **Bot Startup / Recent Imports**: Removed a duplicate `recent_imports_router` registration in `create_app()`, which crashed the production webhook process during startup and made the bot stop responding to commands.
+- **Runtime Health / Fly Auto-Recovery**: `/healthz` now validates startup readiness, runtime heartbeat freshness, required background tasks, bot-session openness, and a live SQLite ping instead of returning a blind static `ok`, so Fly can mark “HTTP alive but Telegram/scheduler broken” instances unhealthy and recycle them automatically.
+- **Smart Update / Address-Based Venue Rescue**: deterministic shortlist/match now keeps exact-title cross-source candidates together when venue names differ only as short alias vs official long form but the normalized `location_address` matches, preventing live duplicates like the same Gusev museum show imported from Telegram and VK into separate events.
+- **VK Auto Queue / Stale Legacy Statuses**: stale `vk_inbox.status='importing'` rows are now requeued to `pending` together with stale `locked` rows, so legacy interrupted imports do not disappear from the modern auto-import scheduler.
+- **Telegram Monitoring / Multi-event Poster Fallback**: when a multi-event Telegram post arrives without `posters[]` from upstream, server-side public-page fallback now scrapes the post images from `t.me/s/...`, reuses image-only photos across all split events, and still applies OCR-based filtering when the scraped posters contain readable event text.
+- **Add Event Watcher / Stall Guard**: `_watch_add_event_worker()` now updates `_ADD_EVENT_LAST_DEQUEUE_TS` through the intended module-level state instead of crashing with `UnboundLocalError`, so the queue watcher can keep restarting a stalled add-event worker instead of failing its own health check.
+
 ### Changed
 - **Qtickets / Source Parsing**: parser-backed `/parse` events now send structured site facts (`date`, `time`, `venue`, `ticket status`, `prices`, `url`) into the LLM draft builder before Smart Update, preventing mass downstream failures on sparse Qtickets descriptions while keeping the Qtickets Playwright parser itself unchanged.
 - **Guide Excursions Monitoring / Runtime Path**: current MVP runtime now uses a pragmatic local Telethon scan/import path with Bot API publication, keeps guide data out of the regular `event` surfaces, and falls back to Telethon media download when Bot API cannot forward media from public source channels into the digest bundle.
