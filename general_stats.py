@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from models import Setting
 from ops_run import finish_ops_run, start_ops_run
@@ -736,9 +737,19 @@ def _format_run_lines(
         if isinstance(started, datetime):
             started_txt = started.astimezone(tz).strftime("%Y-%m-%d %H:%M")
         status = str(run.get("status") or "unknown")
+        trigger = str(run.get("trigger") or "manual")
         metrics = run.get("metrics")
         metrics_map = metrics if isinstance(metrics, Mapping) else {}
-        parts = [f"- {started_txt}", f"status={status}"]
+        details = run.get("details")
+        details_map = details if isinstance(details, Mapping) else {}
+        parts = [f"- {started_txt}", f"status={status}", f"trigger={trigger}"]
+
+        skip_reason = str(details_map.get("skip_reason") or "").strip()
+        if skip_reason:
+            parts.append(f"reason={skip_reason}")
+        blocked_by = str(details_map.get("blocked_by_kind") or "").strip()
+        if blocked_by:
+            parts.append(f"blocked_by={blocked_by}")
 
         took_sec = None
         try:
@@ -1033,7 +1044,7 @@ async def general_stats_scheduler(
     run_id: str | None = None,
 ) -> None:
     operator_chat_id = _parse_chat_id(os.getenv("OPERATOR_CHAT_ID"), env_name="OPERATOR_CHAT_ID")
-    admin_chat_id = _parse_chat_id(os.getenv("ADMIN_CHAT_ID"), env_name="ADMIN_CHAT_ID")
+    admin_chat_id = await resolve_superadmin_chat_id(db)
     targets = [chat_id for chat_id in (operator_chat_id, admin_chat_id) if chat_id is not None]
     if not targets:
         logger.warning("general_stats: no valid target chat IDs configured")

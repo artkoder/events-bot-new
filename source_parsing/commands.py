@@ -20,6 +20,7 @@ import asyncio
 from aiogram import Bot, types
 from aiogram.filters import Command
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from ops_run import finish_ops_run, start_ops_run
 from models import User
@@ -447,7 +448,7 @@ async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None
             await _update_source_parsing_guard()
         
         # Send report to admin chat if configured
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        admin_chat_id = await resolve_superadmin_chat_id(db)
         if admin_chat_id and (result.stats_by_source or result.errors):
             bot_username = None
             try:
@@ -531,7 +532,7 @@ async def source_parsing_scheduler_if_changed(
         elif should_update_guard:
             await _update_source_parsing_guard()
 
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        admin_chat_id = await resolve_superadmin_chat_id(db)
         if admin_chat_id and (result.stats_by_source or result.errors):
             bot_username = None
             try:

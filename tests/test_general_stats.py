@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from db import Database
-from general_stats import collect_general_stats
+from general_stats import collect_general_stats, format_general_stats_message
 
 
 def _utc_sql(value: datetime) -> str:
@@ -281,6 +281,42 @@ async def test_collect_general_stats_uses_half_open_window(tmp_path):
 
     snapshot = await collect_general_stats(db, tz_name="Europe/Kaliningrad", now=now_local)
     assert snapshot.metrics["vk"]["vk_posts_added"] == 1
+
+
+@pytest.mark.asyncio
+async def test_format_general_stats_message_shows_trigger_and_skip_reason(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    tz = ZoneInfo("Europe/Kaliningrad")
+    now_local = datetime(2026, 2, 16, 7, 30, tzinfo=tz)
+    start_utc = (now_local - timedelta(hours=24)).astimezone(timezone.utc)
+    in_window = _utc_sql(start_utc + timedelta(hours=1))
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO ops_run(kind, trigger, started_at, finished_at, status, metrics_json, details_json) "
+            "VALUES('vk_auto_import', 'scheduled', ?, ?, 'skipped', '{}', ?)",
+            (
+                in_window,
+                in_window,
+                json.dumps(
+                    {
+                        "skip_reason": "heavy_busy",
+                        "blocked_by_kind": "tg_monitoring",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await conn.commit()
+
+    snapshot = await collect_general_stats(db, tz_name="Europe/Kaliningrad", now=now_local)
+    text = format_general_stats_message(snapshot)
+
+    assert "trigger=scheduled" in text
+    assert "reason=heavy_busy" in text
+    assert "blocked_by=tg_monitoring" in text
 
 
 class _FakeSupabaseResponse:

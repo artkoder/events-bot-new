@@ -29,6 +29,10 @@ Defaults were adjusted to reduce overlaps between the most common heavy jobs:
 
 If you see skip notifications in admin chat often, spread the schedules further instead of switching to “wait”: skipping is a safety net, not a planning tool.
 
+Skipped heavy-job attempts are now also written to `ops_run.status='skipped'` (with a reason), so `/general_stats` can show that the scheduler tried to start a job but skipped it before the job body ran.
+
+For admin-facing scheduled reports, the bot now resolves the target chat from the superadmin row in SQLite first; `ADMIN_CHAT_ID` is only a bootstrap/legacy fallback.
+
 ## Jobs
 
 - **partner reminders** – reminds inactive partners after 09:00 local time.

@@ -20,6 +20,7 @@ import ssl
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from kaggle_registry import list_jobs, register_job, remove_job
 from models import TelegramSource, TelegramSourceForceMessage
@@ -2959,12 +2960,7 @@ async def resume_telegram_monitor_jobs(
 
     notify_chat_id = chat_id
     if notify_chat_id is None:
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-        if admin_chat_id:
-            try:
-                notify_chat_id = int(admin_chat_id)
-            except ValueError:
-                notify_chat_id = None
+        notify_chat_id = await resolve_superadmin_chat_id(db)
 
     client = KaggleClient()
     recovered = 0
@@ -3028,8 +3024,7 @@ async def telegram_monitor_scheduler(
     *,
     run_id: str | None = None,
 ) -> None:
-    admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-    chat_id = int(admin_chat_id) if admin_chat_id and admin_chat_id.isdigit() else None
+    chat_id = await resolve_superadmin_chat_id(db)
     try:
         await run_telegram_monitor(
             db,

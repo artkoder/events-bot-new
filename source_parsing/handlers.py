@@ -18,6 +18,7 @@ from urllib.parse import urlparse, urljoin
 from aiogram import Bot
 from sqlalchemy import select
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from ops_run import finish_ops_run, start_ops_run
 from source_parsing.kaggle_runner import run_kaggle_kernel
@@ -2004,12 +2005,7 @@ async def resume_source_parsing_jobs(
         return 0
     notify_chat_id = chat_id
     if notify_chat_id is None:
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-        if admin_chat_id:
-            try:
-                notify_chat_id = int(admin_chat_id)
-            except ValueError:
-                notify_chat_id = None
+        notify_chat_id = await resolve_superadmin_chat_id(db)
     client = KaggleClient()
     recovered = 0
     for job in parse_jobs:

@@ -21,6 +21,7 @@ from aiohttp import ClientSession, ClientTimeout
 from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from kaggle_registry import register_job, remove_job, list_jobs
 from models import Event, MonthPage, User
@@ -714,12 +715,7 @@ async def resume_preview3d_jobs(
         return 0
     notify_chat_id = chat_id
     if notify_chat_id is None:
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-        if admin_chat_id:
-            try:
-                notify_chat_id = int(admin_chat_id)
-            except ValueError:
-                notify_chat_id = None
+        notify_chat_id = await resolve_superadmin_chat_id(db)
     client = KaggleClient()
     recovered = 0
     for job in jobs:

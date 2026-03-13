@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -28,6 +29,65 @@ class DummyBot:
         class Me:
             username = "eventsbotTestBot"
         return Me()
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_import_scheduler_uses_db_superadmin_when_env_missing(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            'INSERT INTO "user"(user_id, username, is_superadmin, blocked) VALUES(?, ?, 1, 0)',
+            (185169715, "max"),
+        )
+        await conn.commit()
+
+    monkeypatch.setenv("ENABLE_VK_AUTO_IMPORT", "1")
+    monkeypatch.delenv("ADMIN_CHAT_ID", raising=False)
+
+    captured: dict[str, object] = {}
+
+    async def fake_run(_db, _bot, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(vk_auto_queue, "run_vk_auto_import", fake_run)
+
+    bot = DummyBot()
+    await vk_auto_queue.vk_auto_import_scheduler(db, bot, run_id="sched-missing-admin")
+
+    assert captured["chat_id"] == 185169715
+    assert captured["trigger"] == "scheduled"
+    assert captured["operator_id"] == 0
+    assert captured["run_id"] == "sched-missing-admin"
+    assert bot.messages == []
+
+
+@pytest.mark.asyncio
+async def test_vk_auto_import_scheduler_records_missing_superadmin_chat_skip(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    monkeypatch.setenv("ENABLE_VK_AUTO_IMPORT", "1")
+    monkeypatch.delenv("ADMIN_CHAT_ID", raising=False)
+
+    bot = DummyBot()
+    await vk_auto_queue.vk_auto_import_scheduler(db, bot, run_id="sched-missing-admin")
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT trigger, status, details_json FROM ops_run WHERE kind='vk_auto_import' ORDER BY id ASC"
+        )
+        row = await cur.fetchone()
+
+    assert row is not None
+    trigger, status, details_raw = row
+    details = json.loads(details_raw)
+    assert trigger == "scheduled"
+    assert status == "skipped"
+    assert details["skip_reason"] == "missing_superadmin_chat"
+    assert details["run_id"] == "sched-missing-admin"
+    assert bot.messages == []
 
 
 @pytest.mark.asyncio

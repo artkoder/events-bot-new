@@ -26,8 +26,8 @@
 ### 1.2. Куда отправляется отчёт
 
 - **По расписанию**: отправляется в оба чата:
-  - операторский (`OPERATOR_CHAT_ID`)
-  - админский (`ADMIN_CHAT_ID`)
+  - операторский (`OPERATOR_CHAT_ID`), если задан
+  - чат superadmin из базы (`user.is_superadmin=1`); `ADMIN_CHAT_ID` используется только как legacy fallback, если superadmin ещё не зарегистрирован в БД
 - **Вручную** (`/general_stats`): отправляется **в тот чат**, откуда вызвана команда.
 
 ### 1.3. Права доступа
@@ -47,7 +47,7 @@
 Поведение:
 - `max_instances=1`, `coalesce=True`, `misfire_grace_time=30`
 - если `ENABLE_GENERAL_STATS!=1` — тихо не запускаем
-- если включено, но `ADMIN_CHAT_ID`/`OPERATOR_CHAT_ID` невалидны — логируем warning и отправляем в доступный чат (или пропускаем, если обоих нет).
+- если включено, но `OPERATOR_CHAT_ID` невалиден и chat superadmin не удалось получить ни из БД, ни из `ADMIN_CHAT_ID` fallback — логируем warning и пропускаем плановую отправку.
 
 ## 3) Что должно попасть в отчёт (метрики за `start_local..end_local`)
 
@@ -209,6 +209,12 @@
 6) География (новые города)  
 7) Фестивали/очередь  
 8) Тех.метрики (Gemma, bucket size)
+
+Для блоков `vk_auto_import runs`, `tg_monitoring runs`, `/parse runs`, `/3di runs`:
+
+- каждая строка должна печатать `status=...` и `trigger=...` (`scheduled|manual|...`);
+- если запуск завершился как `skipped`, в строке нужно показывать `reason=...`;
+- для scheduler skip из-за общего heavy guard дополнительно показываем `blocked_by=...` (какая тяжёлая операция занимала слот).
 
 ## 7) /help
 
