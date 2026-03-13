@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from main_part2 import event_to_nodes
 from models import Event, User
 from preview_3d.handlers import (
     _build_month_batch_menu,
+    _build_preview3d_payload,
     _build_preview3d_runtime_config_payload,
     _build_preview3d_runtime_secrets_payload,
     _prepare_preview3d_runtime_datasets,
@@ -100,6 +102,16 @@ def test_event_to_nodes_falls_back_to_photo_urls():
     nodes = event_to_nodes(event, show_image=True)
     assert nodes[0]["tag"] == "figure"
     assert nodes[0]["children"][0]["attrs"]["src"] == "https://example.com/photo.jpg"
+
+
+def test_event_to_nodes_show_3d_only_disables_raw_photo_fallback():
+    event = _make_event(
+        1,
+        photo_urls=["https://example.com/photo.jpg"],
+        preview_3d_url=None,
+    )
+    nodes = event_to_nodes(event, show_image=True, show_3d_only=True)
+    assert nodes[0]["tag"] == "h4"
 
 
 def test_build_month_batch_menu_offers_50_and_all():
@@ -234,6 +246,57 @@ async def test_update_previews_from_results_handles_skip(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_preview3d_payload_preflight_prunes_dead_urls_and_skips_empty_events(
+    monkeypatch,
+):
+    event_ok = _make_event(
+        1,
+        photo_urls=[
+            "https://example.com/alive-1.jpg",
+            "https://example.com/dead-1.jpg",
+        ],
+    )
+    event_dead = _make_event(
+        2,
+        photo_urls=["https://example.com/dead-2.jpg"],
+    )
+
+    async def fake_probe(urls):
+        assert sorted(urls) == sorted(
+            [
+                "https://example.com/alive-1.jpg",
+                "https://example.com/dead-1.jpg",
+                "https://example.com/dead-2.jpg",
+            ]
+        )
+        return {
+            "https://example.com/alive-1.jpg": True,
+            "https://example.com/dead-1.jpg": False,
+            "https://example.com/dead-2.jpg": False,
+        }
+
+    monkeypatch.setattr("preview_3d.handlers._probe_preview3d_image_urls", fake_probe)
+
+    payload, skipped_count, removed_dead_urls, skipped_event_ids = await _build_preview3d_payload(
+        [event_ok, event_dead],
+        min_images=1,
+    )
+
+    assert payload == {
+        "events": [
+            {
+                "event_id": 1,
+                "title": "Event 1",
+                "images": ["https://example.com/alive-1.jpg"],
+            }
+        ]
+    }
+    assert skipped_count == 1
+    assert removed_dead_urls == 2
+    assert skipped_event_ids == [2]
+
+
+@pytest.mark.asyncio
 async def test_get_new_events_gap(tmp_path):
     """Test that _get_new_events_gap returns events after the last one with preview."""
     db = Database(str(tmp_path / "db.sqlite"))
@@ -305,6 +368,33 @@ async def test_handle_3di_month_selection_opens_batch_menu(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_handle_3di_month_selection_current_month_excludes_past_missing(
+    tmp_path,
+    monkeypatch,
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        session.add(_make_event(1, date="2026-03-12", photo_urls=["http://img-1"], preview_3d_url=None))
+        session.add(_make_event(2, date="2026-03-13", photo_urls=["http://img-2"], preview_3d_url=None))
+        session.add(_make_event(3, date="2026-03-14", photo_urls=["http://img-3"], preview_3d_url=None))
+        await session.commit()
+
+    monkeypatch.setattr("preview_3d.handlers._preview3d_today", lambda: date(2026, 3, 13))
+
+    callback = DummyCallback("3di:gen:2026-03", user_id=1)
+    bot = DummyBot()
+
+    await handle_3di_callback(callback, db, bot)
+
+    assert len(bot.edits) == 1
+    assert "Без 3D-превью: 2" in bot.edits[0]["text"]
+    assert callback.answers == [{"text": None, "show_alert": False}]
+
+
+@pytest.mark.asyncio
 async def test_handle_3di_month_generation_uses_only_missing_previews_and_batch_limit(
     tmp_path, monkeypatch
 ):
@@ -346,6 +436,7 @@ async def test_handle_3di_month_generation_uses_only_missing_previews_and_batch_
         month,
         mode,
         start_kaggle_render,
+        min_images,
         operator_id,
         total_event_count,
         batch_limit,
@@ -353,6 +444,7 @@ async def test_handle_3di_month_generation_uses_only_missing_previews_and_batch_
         captured["event_ids"] = [event.id for event in events]
         captured["month"] = month
         captured["mode"] = mode
+        captured["min_images"] = min_images
         captured["operator_id"] = operator_id
         captured["total_event_count"] = total_event_count
         captured["batch_limit"] = batch_limit
@@ -366,6 +458,7 @@ async def test_handle_3di_month_generation_uses_only_missing_previews_and_batch_
 
     assert captured["month"] == "2026-04"
     assert captured["mode"] == "month"
+    assert captured["min_images"] == 1
     assert captured["operator_id"] == 1
     assert captured["total_event_count"] == 55
     assert captured["batch_limit"] == 50

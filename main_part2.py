@@ -186,7 +186,7 @@ def event_to_nodes(
                 "tag": "figure",
                 "children": [{"tag": "img", "attrs": {"src": preview_url}, "children": []}]
             })
-        elif show_image and e.photo_urls:
+        elif show_image and not show_3d_only and e.photo_urls:
             # Fallback to first photo (only if show_image=True, not show_3d_only)
             first_url = e.photo_urls[0]
             if isinstance(first_url, str):
@@ -2277,11 +2277,6 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             if _is_preview_friendly(p3d):
                 safe_cover = p3d
                 break
-            for raw in list(getattr(ev, "photo_urls", []) or []):
-                u = str(raw or "").strip()
-                if _is_preview_friendly(u):
-                    safe_cover = u
-                    break
             if safe_cover:
                 break
     if not safe_cover:

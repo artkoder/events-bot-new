@@ -13,9 +13,11 @@ import tempfile
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from importlib import import_module
 from pathlib import Path
 from typing import Callable
 
+from aiohttp import ClientSession, ClientTimeout
 from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -43,6 +45,13 @@ KAGGLE_POLL_INTERVAL_SECONDS = 20
 KAGGLE_TIMEOUT_SECONDS = 4 * 60 * 60  # 4 hours for CPU fallback scenarios
 KAGGLE_STARTUP_WAIT_SECONDS = 10
 KAGGLE_DATASET_WAIT_SECONDS = int(os.getenv("PREVIEW3D_DATASET_WAIT", "30"))
+PREVIEW3D_PREFLIGHT_TIMEOUT_SECONDS = float(
+    os.getenv("PREVIEW3D_PREFLIGHT_TIMEOUT_SECONDS", "8")
+)
+PREVIEW3D_PREFLIGHT_CONCURRENCY = max(
+    1,
+    int(os.getenv("PREVIEW3D_PREFLIGHT_CONCURRENCY", "8")),
+)
 CONFIG_DATASET_CIPHER = "preview3d-runtime-cipher"
 CONFIG_DATASET_KEY = "preview3d-runtime-key"
 KEEP_DATASETS = (os.getenv("PREVIEW3D_KEEP_DATASETS") or "").strip().lower() in {
@@ -125,6 +134,26 @@ def _build_dataset_slug(prefix: str, run_id: str) -> str:
     safe_run = _slugify(run_id, max_len=16)
     slug = f"{safe_prefix}-{safe_run}" if safe_run else safe_prefix
     return slug[:60].rstrip("-")
+
+
+def _preview3d_today() -> date:
+    for module_name in ("main_part2", "main"):
+        try:
+            module = import_module(module_name)
+        except Exception:
+            continue
+        tz = getattr(module, "LOCAL_TZ", None)
+        if tz is None:
+            continue
+        try:
+            return datetime.now(tz).date()
+        except Exception:
+            continue
+    return datetime.now(timezone.utc).date()
+
+
+def _is_current_month_key(month: str) -> bool:
+    return str(month or "").strip() == _preview3d_today().strftime("%Y-%m")
 
 
 def _create_dataset(
@@ -262,29 +291,50 @@ async def _is_authorized(db: Database, user_id: int) -> bool:
         return user is not None and user.is_superadmin
 
 
-async def _get_events_for_month(db: Database, month: str, min_images: int = 2) -> list[Event]:
+async def _get_events_for_month(
+    db: Database,
+    month: str,
+    min_images: int = 2,
+    *,
+    future_only: bool = False,
+) -> list[Event]:
     """Get all events for a month that have images."""
     start = date.fromisoformat(f"{month}-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    
+
+    filters = [
+        Event.date >= start.isoformat(),
+        Event.date < next_start.isoformat(),
+    ]
+    if future_only:
+        filters.append(Event.date >= _preview3d_today().isoformat())
+
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
-            .where(
-                Event.date >= start.isoformat(),
-                Event.date < next_start.isoformat()
-            )
+            .where(*filters)
             .order_by(Event.date, Event.time)
         )
         events = result.scalars().all()
-    
+
     # Filter events that have images
     return [e for e in events if e.photo_urls and len(e.photo_urls) >= min_images]
 
 
-async def _get_events_without_preview(db: Database, month: str, min_images: int = 2) -> list[Event]:
+async def _get_events_without_preview(
+    db: Database,
+    month: str,
+    min_images: int = 2,
+    *,
+    future_only: bool = False,
+) -> list[Event]:
     """Get events that don't have a 3D preview yet."""
-    events = await _get_events_for_month(db, month, min_images=min_images)
+    events = await _get_events_for_month(
+        db,
+        month,
+        min_images=min_images,
+        future_only=future_only,
+    )
     return [e for e in events if not e.preview_3d_url]
 
 
@@ -309,6 +359,148 @@ async def _get_all_future_events_without_preview(db: Database, min_images: int =
     
     # Filter events that have enough images
     return [e for e in events if e.photo_urls and len(e.photo_urls) >= min_images]
+
+
+def _normalize_preview3d_image_urls(event: Event) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for raw in list(event.photo_urls or [])[:MAX_IMAGES_PER_EVENT]:
+        url = str(raw or "").strip()
+        if not url or not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+async def _probe_preview3d_image_url(
+    http: ClientSession,
+    semaphore: asyncio.Semaphore,
+    url: str,
+) -> bool | None:
+    if not url:
+        return False
+
+    for method in ("HEAD", "GET"):
+        headers = None
+        if method == "GET":
+            headers = {"Range": "bytes=0-0"}
+        try:
+            async with semaphore:
+                async with http.request(
+                    method,
+                    url,
+                    allow_redirects=True,
+                    headers=headers,
+                ) as response:
+                    status = int(response.status or 0)
+                    if 200 <= status < 400:
+                        return True
+                    if method == "HEAD" and status in {405, 501}:
+                        continue
+                    if status in {408, 425, 429} or 500 <= status < 600:
+                        return None
+                    return False
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            if method == "HEAD":
+                continue
+            return None
+    return None
+
+
+async def _probe_preview3d_image_urls(urls: list[str]) -> dict[str, bool | None]:
+    unique_urls = list(dict.fromkeys(urls))
+    if not unique_urls:
+        return {}
+
+    timeout = ClientTimeout(total=PREVIEW3D_PREFLIGHT_TIMEOUT_SECONDS)
+    semaphore = asyncio.Semaphore(PREVIEW3D_PREFLIGHT_CONCURRENCY)
+    async with ClientSession(timeout=timeout) as http:
+        states = await asyncio.gather(
+            *(
+                _probe_preview3d_image_url(http, semaphore, url)
+                for url in unique_urls
+            ),
+            return_exceptions=True,
+        )
+
+    result: dict[str, bool | None] = {}
+    for url, state in zip(unique_urls, states):
+        if isinstance(state, Exception):
+            result[url] = None
+        else:
+            result[url] = state
+    return result
+
+
+async def _build_preview3d_payload(
+    events: list[Event],
+    *,
+    min_images: int,
+) -> tuple[dict[str, list[dict]], int, int, list[int]]:
+    prepared: list[tuple[Event, list[str]]] = [
+        (event, _normalize_preview3d_image_urls(event))
+        for event in events
+    ]
+    all_urls = [url for _, urls in prepared for url in urls]
+    states: dict[str, bool | None] = {}
+    if all_urls:
+        try:
+            states = await _probe_preview3d_image_urls(all_urls)
+        except Exception:
+            logger.warning("3di.preflight probe_failed", exc_info=True)
+            states = {}
+
+    payload_events: list[dict] = []
+    skipped_event_ids: list[int] = []
+    removed_dead_urls = 0
+
+    for event, urls in prepared:
+        live_urls: list[str] = []
+        for url in urls:
+            state = states.get(url)
+            if state is False:
+                removed_dead_urls += 1
+                continue
+            live_urls.append(url)
+        if len(live_urls) < min_images:
+            skipped_event_ids.append(int(event.id))
+            continue
+        payload_events.append(
+            {
+                "event_id": event.id,
+                "title": event.title,
+                "images": live_urls,
+            }
+        )
+
+    if skipped_event_ids or removed_dead_urls:
+        logger.info(
+            "3di.preflight done events=%d payload_events=%d skipped=%d removed_dead_urls=%d",
+            len(events),
+            len(payload_events),
+            len(skipped_event_ids),
+            removed_dead_urls,
+        )
+
+    return (
+        {"events": payload_events},
+        len(skipped_event_ids),
+        removed_dead_urls,
+        skipped_event_ids,
+    )
+
+
+def _resolve_3di_ops_status(updated: int, errors: int) -> str:
+    if errors and updated <= 0:
+        return "error"
+    if errors:
+        return "partial_success"
+    return "success"
 
 
 async def _get_new_events_gap(db: Database, min_images: int = 2) -> list[Event]:
@@ -391,12 +583,58 @@ async def run_3di_new_only_scheduler(
             )
             return 0
 
+        payload, preflight_skipped, preflight_removed_dead_urls, skipped_event_ids = (
+            await _build_preview3d_payload(events, min_images=min_images)
+        )
+        payload_events = list(payload.get("events", []))
+        if not payload_events:
+            ops_run_id = await start_ops_run(
+                db,
+                kind="3di",
+                trigger="scheduled",
+                chat_id=chat_id,
+                operator_id=0,
+                details={
+                    "run_id": run_id,
+                    "mode": "new_only",
+                    "month": "New Events Gap",
+                    "preflight_skipped": preflight_skipped,
+                    "preflight_removed_dead_urls": preflight_removed_dead_urls,
+                    "skipped_event_ids": skipped_event_ids,
+                },
+            )
+            await finish_ops_run(
+                db,
+                run_id=ops_run_id,
+                status="success",
+                metrics={
+                    "events_considered": 0,
+                    "previews_rendered": 0,
+                    "preview_errors": 0,
+                    "preview_skipped": int(preflight_skipped),
+                    "duration_sec": 0.0,
+                },
+                details={
+                    "run_id": run_id,
+                    "mode": "new_only",
+                    "month": "New Events Gap",
+                    "preflight_skipped": preflight_skipped,
+                    "preflight_removed_dead_urls": preflight_removed_dead_urls,
+                    "skipped_event_ids": skipped_event_ids,
+                },
+            )
+            return 0
+
         session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
         session = {
             "status": "preparing",
             "month": "New Events Gap",
             "mode": "new_only",
-            "event_count": len(events),
+            "event_count": len(payload_events),
+            "total_event_count": len(events),
+            "preflight_skipped": int(preflight_skipped),
+            "preflight_removed_dead_urls": int(preflight_removed_dead_urls),
+            "preflight_skipped_event_ids": skipped_event_ids,
             "created_at": datetime.now(timezone.utc),
             "chat_id": chat_id,
             "message_id": None,
@@ -417,17 +655,6 @@ async def run_3di_new_only_scheduler(
                 logger.warning("3di_scheduler: failed to post status message", exc_info=True)
         session["message_id"] = message_id
 
-        payload = {
-            "events": [
-                {
-                    "event_id": e.id,
-                    "title": e.title,
-                    "images": (e.photo_urls or [])[:MAX_IMAGES_PER_EVENT],
-                }
-                for e in events
-            ]
-        }
-
         await _run_kaggle_render(
             db=db,
             bot=bot,
@@ -439,7 +666,7 @@ async def run_3di_new_only_scheduler(
             operator_id=0,
             run_id=run_id,
         )
-        return len(events)
+        return len(payload_events)
     except Exception:
         ops_run_id = await start_ops_run(
             db,
@@ -945,6 +1172,9 @@ async def _run_kaggle_render(
     preview_errors = 0
     preview_skipped = 0
     duration_sec = 0.0
+    preflight_skipped = int(session.get("preflight_skipped") or 0)
+    preflight_removed_dead_urls = int(session.get("preflight_removed_dead_urls") or 0)
+    preflight_skipped_event_ids = list(session.get("preflight_skipped_event_ids") or [])
     try:
         if _preview3d_lock.locked():
             await _set_session_status(
@@ -1015,7 +1245,8 @@ async def _run_kaggle_render(
                 updated, errors, skipped = await update_previews_from_results(db, results)
                 previews_rendered = int(updated or 0)
                 preview_errors = int(errors or 0)
-                preview_skipped = int(skipped or 0)
+                preview_skipped = int(skipped or 0) + preflight_skipped
+                ops_status = _resolve_3di_ops_status(previews_rendered, preview_errors)
                 updated_event_ids: list[int] = []
                 seen_event_ids: set[int] = set()
                 for result in results:
@@ -1081,7 +1312,7 @@ async def _run_kaggle_render(
                         count_line,
                         f"✅ Успешно: {updated}",
                         f"⚠️ Ошибок: {errors}",
-                        f"⏭ Пропущено: {skipped}",
+                        f"⏭ Пропущено: {preview_skipped}",
                         f"⏱ Длительность: {duration:.1f}с",
                         "",
                     ]
@@ -1164,6 +1395,9 @@ async def _run_kaggle_render(
                 "month": month,
                 "mode": session.get("mode"),
                 "session_id": session_id,
+                "preflight_skipped": preflight_skipped,
+                "preflight_removed_dead_urls": preflight_removed_dead_urls,
+                "preflight_skipped_event_ids": preflight_skipped_event_ids,
                 "error": ops_error,
             },
         )
@@ -1281,6 +1515,7 @@ async def handle_3di_callback(
             label,
             mode_str,
             start_kaggle_render,
+            min_images=min_images,
             operator_id=callback.from_user.id,
         )
         return
@@ -1290,7 +1525,12 @@ async def handle_3di_callback(
         today = datetime.now(timezone.utc).date()
         month_key = today.strftime("%Y-%m")
         min_images = 2 if is_multy else 1
-        events = await _get_events_without_preview(db, month_key, min_images=min_images)
+        events = await _get_events_without_preview(
+            db,
+            month_key,
+            min_images=min_images,
+            future_only=True,
+        )
         
         if not events:
             await callback.answer("Нет событий без превью (в текущем месяце)", show_alert=True)
@@ -1305,6 +1545,7 @@ async def handle_3di_callback(
             month_key,
             mode_str,
             start_kaggle_render,
+            min_images=min_images,
             operator_id=callback.from_user.id,
         )
         return
@@ -1329,6 +1570,7 @@ async def handle_3di_callback(
             label,
             mode_str,
             start_kaggle_render,
+            min_images=min_images,
             operator_id=callback.from_user.id,
         )
         return
@@ -1353,6 +1595,7 @@ async def handle_3di_callback(
             month_key,
             mode_str,
             start_kaggle_render,
+            min_images=min_images,
             operator_id=callback.from_user.id,
         )
         return
@@ -1360,7 +1603,12 @@ async def handle_3di_callback(
     if base_data.startswith("3di:gen:"):
         month_key = base_data.split(":")[2]
         min_images = 2 if is_multy else 1
-        events = await _get_events_without_preview(db, month_key, min_images=min_images)
+        events = await _get_events_without_preview(
+            db,
+            month_key,
+            min_images=min_images,
+            future_only=_is_current_month_key(month_key),
+        )
 
         if not events:
             await callback.answer(
@@ -1395,7 +1643,12 @@ async def handle_3di_callback(
     if base_data.startswith("3di:genbatch:"):
         _, _, month_key, raw_limit = base_data.split(":", 3)
         min_images = 2 if is_multy else 1
-        events = await _get_events_without_preview(db, month_key, min_images=min_images)
+        events = await _get_events_without_preview(
+            db,
+            month_key,
+            min_images=min_images,
+            future_only=_is_current_month_key(month_key),
+        )
 
         if not events:
             await callback.answer(
@@ -1420,6 +1673,7 @@ async def handle_3di_callback(
             month_key,
             mode_str,
             start_kaggle_render,
+            min_images=min_images,
             operator_id=callback.from_user.id,
             total_event_count=len(events),
             batch_limit=batch_limit,
@@ -1447,6 +1701,7 @@ async def _start_generation(
     mode: str,
     start_kaggle_render: Callable | None,
     *,
+    min_images: int = 1,
     operator_id: int | None = None,
     total_event_count: int | None = None,
     batch_limit: int | None = None,
@@ -1454,33 +1709,35 @@ async def _start_generation(
     """Start 3D preview generation for events."""
     chat_id = callback.message.chat.id
     message_id = callback.message.message_id
-    
+
+    payload, preflight_skipped, preflight_removed_dead_urls, skipped_event_ids = (
+        await _build_preview3d_payload(events, min_images=min_images)
+    )
+    payload_events = list(payload.get("events", []))
+    if not payload_events:
+        await callback.answer(
+            "Нет событий с доступными картинками для рендера",
+            show_alert=True,
+        )
+        return
+
     # Create session
     session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
     _active_sessions[session_id] = {
         "status": "preparing",
         "month": month,
         "mode": mode,
-        "event_count": len(events),
+        "event_count": len(payload_events),
         "total_event_count": total_event_count or len(events),
         "batch_limit": batch_limit,
+        "preflight_skipped": int(preflight_skipped),
+        "preflight_removed_dead_urls": int(preflight_removed_dead_urls),
+        "preflight_skipped_event_ids": skipped_event_ids,
         "created_at": datetime.now(timezone.utc),
         "chat_id": chat_id,
         "message_id": message_id,
     }
-    
-    # Build payload
-    payload = {
-        "events": [
-            {
-                "event_id": e.id,
-                "title": e.title,
-                "images": (e.photo_urls or [])[:MAX_IMAGES_PER_EVENT]
-            }
-            for e in events
-        ]
-    }
-    
+
     await bot.edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
