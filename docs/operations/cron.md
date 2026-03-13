@@ -53,6 +53,7 @@ If you see skip notifications in admin chat often, spread the schedules further 
 
 - Fly probes `GET /healthz` every 15 seconds.
 - `/healthz` no longer returns a blind static `ok`: it verifies that startup completed, the runtime heartbeat is fresh, required background tasks (`daily_scheduler`, `add_event_watch`, and `job_outbox_worker` when enabled) are alive, the bot session is open, and SQLite answers `SELECT 1`.
+- `add_event_watch` is allowed to restart a stalled add-event worker in place; the watchdog now updates the shared dequeue timestamp correctly instead of tripping an `UnboundLocalError` during stall recovery and poisoning `/healthz`.
 - If any of those checks fail, `/healthz` returns `503` with a JSON payload describing the failing component. This lets Fly recycle machines that are still serving HTTP but stopped processing Telegram webhooks or scheduler loops correctly.
 
 ## Environment variables
