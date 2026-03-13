@@ -14,8 +14,9 @@ from models import (
     VideoAnnounceItem,
     VideoAnnounceItemStatus,
     VideoAnnounceSession,
+    VideoAnnounceSessionStatus,
 )
-from video_announce.scenario import VideoAnnounceScenario
+from video_announce.scenario import TOMORROW_TEST_MIN_POSTERS, VideoAnnounceScenario
 
 
 class _DummyBot:
@@ -145,4 +146,123 @@ async def test_run_tomorrow_pipeline_test_mode_limits_scenes(monkeypatch, tmp_pa
     scenario = VideoAnnounceScenario(db, bot, chat_id=123, user_id=1)
     await scenario.run_tomorrow_pipeline(test_mode=True)
 
-    assert started["limit_scenes"] == 3
+    assert started["limit_scenes"] == TOMORROW_TEST_MIN_POSTERS
+
+
+@pytest.mark.asyncio
+async def test_prepare_tomorrow_session_builds_manual_preflight_without_render(
+    monkeypatch, tmp_path
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    now_local = datetime.now(LOCAL_TZ)
+    tomorrow = (now_local + timedelta(days=1)).date()
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        ev = Event(
+            title="Manual Event",
+            description="d",
+            source_text="s",
+            date=tomorrow.isoformat(),
+            time="19:00",
+            location_name="Loc",
+            city="City",
+            photo_urls=["https://example.com/1.jpg"],
+            photo_count=1,
+        )
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+        session.add(
+            EventPoster(
+                event_id=ev.id,
+                poster_hash="h1",
+                ocr_text="TEXT",
+                ocr_title="TITLE",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await session.commit()
+
+    async def _should_not_render(*args, **kwargs):  # noqa: ANN002,ANN003
+        raise AssertionError("prepare_tomorrow_session must not auto-start render")
+
+    monkeypatch.setattr(VideoAnnounceScenario, "start_render", _should_not_render)
+
+    bot = _DummyBot()
+    scenario = VideoAnnounceScenario(db, bot, chat_id=123, user_id=1)
+    await scenario.prepare_tomorrow_session()
+
+    async with db.get_session() as session:
+        res = await session.execute(select(VideoAnnounceSession))
+        sessions = list(res.scalars().all())
+        assert len(sessions) == 1
+        sess = sessions[0]
+        assert sess.status == VideoAnnounceSessionStatus.SELECTED
+        assert isinstance(sess.selection_params, dict)
+        assert sess.selection_params.get("target_date") == tomorrow.isoformat()
+        assert sess.selection_params.get("render_scene_limit") == 12
+        assert sess.kaggle_kernel_ref is None
+
+        res_items = await session.execute(
+            select(VideoAnnounceItem).where(VideoAnnounceItem.session_id == sess.id)
+        )
+        items = list(res_items.scalars().all())
+        assert any(it.status == VideoAnnounceItemStatus.READY for it in items)
+
+    texts = [text for _, text, _ in bot.messages]
+    assert any("подготовлена" in text for text in texts)
+    assert any("SELECTED" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_show_kernel_selection_blocks_when_ready_items_exceed_limit(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        sess = VideoAnnounceSession(
+            status=VideoAnnounceSessionStatus.SELECTED,
+            profile_key="default",
+            selection_params={"render_scene_limit": 12},
+        )
+        session.add(sess)
+        await session.commit()
+        await session.refresh(sess)
+
+        for idx in range(13):
+            ev = Event(
+                title=f"Event {idx}",
+                description="d",
+                source_text="s",
+                date="2026-03-14",
+                time="19:00",
+                location_name=f"Loc {idx}",
+                city="City",
+                photo_urls=[f"https://example.com/{idx}.jpg"],
+                photo_count=1,
+            )
+            session.add(ev)
+            await session.flush()
+            session.add(
+                VideoAnnounceItem(
+                    session_id=sess.id,
+                    event_id=ev.id,
+                    position=idx + 1,
+                    status=VideoAnnounceItemStatus.READY,
+                )
+            )
+        await session.commit()
+
+    bot = _DummyBot()
+    scenario = VideoAnnounceScenario(db, bot, chat_id=123, user_id=1)
+
+    msg = await scenario.show_kernel_selection(sess.id)
+
+    assert msg == (
+        "Выбрано 13 событий, а текущий рендер поддерживает максимум 12. "
+        "Снимите лишние в SELECTED перед запуском."
+    )

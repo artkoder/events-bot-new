@@ -82,7 +82,7 @@ DEFAULT_CANDIDATE_LIMIT = 80
 MAX_CANDIDATE_LIMIT = 80
 DEFAULT_SELECTED_MIN = 8
 DEFAULT_SELECTED_MAX = 12
-TOMORROW_TEST_MIN_POSTERS = 7
+TOMORROW_TEST_MIN_POSTERS = 12
 TOMORROW_TEST_EXPAND_STEP_DAYS = 1
 TOMORROW_TEST_EXPAND_MAX_DAYS = 4
 PENDING_INSTRUCTION_TTL = 15 * 60
@@ -690,6 +690,16 @@ class VideoAnnounceScenario:
         params.update({k: v for k, v in (stored or {}).items() if v is not None})
         return params
 
+    def _parse_positive_int(self, value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _selection_render_limit(self, params: dict[str, Any]) -> int | None:
+        return self._parse_positive_int(params.get("render_scene_limit"))
+
     async def _resolve_profile(self, profile_key: str | None) -> VideoProfile:
         profiles = await fetch_profiles()
         if profile_key:
@@ -736,6 +746,60 @@ class VideoAnnounceScenario:
         params = self._get_selection_params(session_obj)
         profile = await self._resolve_profile(session_obj.profile_key)
         return self._selection_ctx_from_params(profile, params)
+
+    def _tomorrow_selection_setup(
+        self,
+        *,
+        selected_max: int,
+        test_mode: bool,
+    ) -> tuple[date, dict[str, Any], int | None]:
+        tomorrow = datetime.now(LOCAL_TZ).date() + timedelta(days=1)
+        params = self._default_selection_params()
+        params.update(
+            {
+                "target_date": tomorrow.isoformat(),
+                "primary_window_days": 0,
+                "fallback_window_days": 0,
+                "random_order": True,
+                "default_selected_max": selected_max,
+                "selected_required_period": None,
+            }
+        )
+        params.pop("instruction", None)
+        render_scene_limit = selected_max if selected_max > 0 else None
+        if test_mode:
+            render_scene_limit = TOMORROW_TEST_MIN_POSTERS
+        if render_scene_limit:
+            params["render_scene_limit"] = render_scene_limit
+            params["auto_expand_min_posters"] = render_scene_limit
+            params["auto_expand_step_days"] = TOMORROW_TEST_EXPAND_STEP_DAYS
+            params["auto_expand_max_days"] = TOMORROW_TEST_EXPAND_MAX_DAYS
+        if test_mode:
+            params["mode"] = "test"
+            params["is_test"] = True
+            params["allow_empty_ocr"] = True
+        return tomorrow, params, render_scene_limit
+
+    async def _count_ready_items(self, session_id: int) -> int:
+        async with self.db.get_session() as session:
+            res = await session.execute(
+                select(VideoAnnounceItem.event_id)
+                .where(VideoAnnounceItem.session_id == session_id)
+                .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+            )
+            return len(list(res.scalars().all()))
+
+    async def _validate_render_selection(self, session_obj: VideoAnnounceSession) -> str | None:
+        ready_count = await self._count_ready_items(session_obj.id)
+        if ready_count <= 0:
+            return "Нет выбранных событий"
+        render_limit = self._selection_render_limit(self._get_selection_params(session_obj))
+        if render_limit and ready_count > render_limit:
+            return (
+                f"Выбрано {ready_count} событий, а текущий рендер поддерживает максимум "
+                f"{render_limit}. Снимите лишние в SELECTED перед запуском."
+            )
+        return None
 
     async def has_rendering(self) -> VideoAnnounceSession | None:
         async with self.db.get_session() as session:
@@ -848,7 +912,7 @@ class VideoAnnounceScenario:
         rendering = await self.has_rendering()
         text_parts = [
             "Меню видео-анонсов",
-            "Выберите профиль, отметьте каналы и запустите подбор.",
+            "Выберите профиль или быстрый подбор, проверьте события и затем запускайте рендер.",
         ]
         if rendering:
             text_parts.append("\nРендеринг уже запущен, UI временно заблокирован.")
@@ -858,7 +922,8 @@ class VideoAnnounceScenario:
             keyboard.append(
                 [
                     types.InlineKeyboardButton(
-                        text="🚀 Запуск Завтра (Auto)", callback_data="vidauto:tomorrow"
+                        text="🎬 Завтра: проверка перед запуском",
+                        callback_data="vidauto:tomorrow",
                     )
                 ]
             )
@@ -971,36 +1036,11 @@ class VideoAnnounceScenario:
             )
             return
 
-        now_local = datetime.now(LOCAL_TZ)
-        tomorrow = now_local.date() + timedelta(days=1)
-
-        params = self._default_selection_params()
-        params.update(
-            {
-                "target_date": tomorrow.isoformat(),
-                "primary_window_days": 0,
-                "fallback_window_days": 0,
-                "random_order": True,
-                "default_selected_max": selected_max,
-                "selected_required_period": None,
-            }
+        tomorrow, params, render_scene_limit = self._tomorrow_selection_setup(
+            selected_max=selected_max,
+            test_mode=test_mode,
         )
-        params.pop("instruction", None)
-        render_scene_limit = None
-        if selected_max > 0:
-            render_scene_limit = selected_max
-        if test_mode:
-            render_scene_limit = TOMORROW_TEST_MIN_POSTERS
-        if render_scene_limit:
-            params["render_scene_limit"] = render_scene_limit
-            params["auto_expand_min_posters"] = render_scene_limit
-            params["auto_expand_step_days"] = TOMORROW_TEST_EXPAND_STEP_DAYS
-            params["auto_expand_max_days"] = TOMORROW_TEST_EXPAND_MAX_DAYS
         test_scene_limit = render_scene_limit if test_mode else None
-        if test_mode:
-            params["mode"] = "test"
-            params["is_test"] = True
-            params["allow_empty_ocr"] = True
 
         kernel_ref = self._pick_crumple_kernel_ref() or self._pick_default_kernel_ref()
         if not kernel_ref:
@@ -1052,6 +1092,72 @@ class VideoAnnounceScenario:
         )
         if msg and msg != "Рендеринг запущен":
             await self.bot.send_message(self.chat_id, f"Сессия #{obj.id}: {msg}")
+
+    async def prepare_tomorrow_session(
+        self,
+        *,
+        profile_key: str = "default",
+        selected_max: int = DEFAULT_SELECTED_MAX,
+        test_mode: bool = False,
+    ) -> None:
+        if not await self.ensure_access():
+            return
+        existing = await self.has_rendering()
+        if existing:
+            await self.bot.send_message(
+                self.chat_id,
+                f"Сессия #{existing.id} уже рендерится, дождитесь завершения",
+            )
+            return
+
+        tomorrow, params, render_scene_limit = self._tomorrow_selection_setup(
+            selected_max=selected_max,
+            test_mode=test_mode,
+        )
+        test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
+        async with self.db.get_session() as session:
+            obj = VideoAnnounceSession(
+                status=VideoAnnounceSessionStatus.SELECTED,
+                profile_key=profile_key,
+                selection_params=params,
+                test_chat_id=test_chat_id,
+                main_chat_id=main_chat_id,
+            )
+            session.add(obj)
+            await session.commit()
+            await session.refresh(obj)
+
+        limit_label = render_scene_limit or selected_max
+        mode_label = "тестовый подбор" if test_mode else "ручная проверка"
+        await self.bot.send_message(
+            self.chat_id,
+            (
+                f"Сессия #{obj.id} подготовлена: завтра ({tomorrow.isoformat()}), "
+                f"до {limit_label} событий, {mode_label}. "
+                "Проверьте INPUT/SELECTED, снимите дубли или ошибки и только потом запускайте рендер."
+            ),
+        )
+
+        result = await self._build_and_store_selection(obj)
+        await self._send_selection_posts(obj, result)
+
+        ready_count = len(result.default_ready_ids)
+        if ready_count > 0:
+            await self.bot.send_message(
+                self.chat_id,
+                (
+                    f"Сессия #{obj.id}: сейчас отмечено {ready_count} событий. "
+                    "Если нужно, разверните всех кандидатов и проверьте дубли перед запуском."
+                ),
+            )
+        else:
+            await self.bot.send_message(
+                self.chat_id,
+                (
+                    f"Сессия #{obj.id}: пока нет событий, готовых к рендеру. "
+                    "Проверьте кандидатов и OCR-полноту перед запуском."
+                ),
+            )
 
     async def prompt_payload_import(self, profile_key: str) -> None:
         if not await self.ensure_access():
@@ -2267,17 +2373,36 @@ class VideoAnnounceScenario:
         default_selected_max = int(
             params.get("default_selected_max", DEFAULT_SELECTED_MAX) or DEFAULT_SELECTED_MAX
         )
+        render_limit = self._selection_render_limit(params)
         show_all = bool(params.get("show_all_candidates", False))
         instruction = (str(params.get("instruction") or "").strip())
+        if show_all:
+            visibility_line = f"Показываем все кандидаты: {len(pairs)}"
+        else:
+            visibility_line = f"Показываем топ-{default_selected_max} + промо (всего {len(pairs)})"
+        total_ready_count = sum(
+            1 for item, _ in pairs if item.status == VideoAnnounceItemStatus.READY
+        )
         lines = [
             f"Сессия #{session_id}: SELECTED",
             f"Диапазон: {self._date_range_label(params)}",
-            "Выберите события для рендера:",
         ]
-        if show_all:
-            lines.append(f"Показываем все кандидаты: {len(pairs)}")
-        else:
-            lines.append(f"Показываем топ-{default_selected_max} + промо (всего {len(pairs)})")
+        if render_limit:
+            lines.append(f"Лимит рендера: до {render_limit} сцен")
+        lines.append(f"Выбрано для рендера: {total_ready_count} из {len(pairs)}")
+        if render_limit and total_ready_count > render_limit:
+            lines.append(
+                (
+                    f"⚠️ Лимит превышен на {total_ready_count - render_limit}. "
+                    "Снимите лишние события перед запуском."
+                )
+            )
+        lines.extend(
+            [
+                "Выберите события для рендера:",
+                visibility_line,
+            ]
+        )
         if instruction:
             lines.append(f"Инструкция: {html.escape(instruction[:300])}")
         else:
@@ -2344,11 +2469,6 @@ class VideoAnnounceScenario:
                         callback_data=f"vidtoggle:{session_id}:{ev.id}",
                     )
                 )
-        ready_count = sum(
-            1 for item, _ in visible_pairs if item.status == VideoAnnounceItemStatus.READY
-        )
-        if ready_count:
-            lines.insert(3, f"По умолчанию выбрано: {ready_count} из {len(visible_pairs)}")
         if allow_edit and toggle_buttons:
             # Use 5-column layout for compact display
             keyboard.extend(self._chunk_buttons(toggle_buttons, size=5))
@@ -2507,6 +2627,15 @@ class VideoAnnounceScenario:
     async def show_kernel_selection(self, session_id: int, message: types.Message | None = None) -> str:
         if not await self._has_access():
             return "Not authorized"
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+        if not self._is_import_session(session_obj):
+            validation_error = await self._validate_render_selection(session_obj)
+            if validation_error:
+                return validation_error
 
         keyboard: list[list[types.InlineKeyboardButton]] = []
         
@@ -2599,6 +2728,9 @@ class VideoAnnounceScenario:
             return await self.start_import_render(session_id, payload_json, message=message)
         if self._is_import_session(sess):
             return "Payload не найден, импортируйте заново"
+        validation_error = await self._validate_render_selection(sess)
+        if validation_error:
+            return validation_error
         return await self.start_render(session_id, message=message)
 
     async def start_import_render(
@@ -2696,6 +2828,10 @@ class VideoAnnounceScenario:
 
             if sess.status != VideoAnnounceSessionStatus.SELECTED:
                 return "Сессия уже запущена"
+            if limit_scenes is None:
+                validation_error = await self._validate_render_selection(sess)
+                if validation_error:
+                    return validation_error
             
             # Load items and events for fill_missing_about
             ranked_ids = [r.event.id for r in ranked if r.event.id is not None]

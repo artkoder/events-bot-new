@@ -6,6 +6,7 @@
 - **Bot Startup / Recent Imports**: Removed a duplicate `recent_imports_router` registration in `create_app()`, which crashed the production webhook process during startup and made the bot stop responding to commands.
 
 ### Changed
+- **CrumpleVideo / `/v`**: quick tomorrow flows now stop on a manual preflight instead of auto-starting Kaggle, the test cap is raised to `12` posters, the selection UI shows the active render limit and blocks over-limit launches, and the CrumpleVideo notebook holds each poster slightly longer before transitioning.
 - **Post Metrics / Popular Posts**: `/popular_posts` now includes posts that are strictly above the per-source median on `views` or `likes` (not only on both), improving sparse-result windows while keeping the same diagnostic breakdown for `views/likes/оба`.
 - **Admin Reports / Recent Imports UI**: `/recent_imports` rows now start with `id`, then show a compact status icon (`✅` created, `🔄` updated), and only then the Telegraph-linked title, reducing visual noise in long source reports.
 - **General Stats / Telegram Source Shares**: `/general_stats` now shows Telegram `events_created/events_updated` from `tg_monitoring` run logs and adds source-share coverage blocks for `vk` / `telegram` / `/parse` both for events touched in the report window and for the current active future inventory; shares are event-level coverage and may overlap for multisource events.
