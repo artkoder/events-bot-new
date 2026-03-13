@@ -18,6 +18,7 @@ from .scenario import (
     PendingInstruction,
     PendingIntroText,
     PendingPayloadImport,
+    TOMORROW_TEST_MIN_POSTERS,
     VideoAnnounceScenario,
     handle_prefix_action,
     is_waiting_instruction,
@@ -164,14 +165,14 @@ async def handle_video_callback(
     if data.startswith("vidauto:"):
         action = data.split(":", 1)[1]
         if action == "tomorrow":
-            await callback.answer("Запускаю…")
-            await scenario.run_tomorrow_pipeline(profile_key="default", test_mode=False)
+            await callback.answer("Готовлю подбор…")
+            await scenario.prepare_tomorrow_session(profile_key="default", test_mode=False)
             return
         if action == "test_tomorrow":
-            await callback.answer("Запускаю тест…")
-            await scenario.run_tomorrow_pipeline(
+            await callback.answer("Готовлю тестовый подбор…")
+            await scenario.prepare_tomorrow_session(
                 profile_key="default",
-                selected_max=7,
+                selected_max=TOMORROW_TEST_MIN_POSTERS,
                 test_mode=True,
             )
             return
