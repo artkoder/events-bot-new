@@ -18,6 +18,10 @@ app = "events-bot-new-wngqia"
   ENABLE_3DI_SCHEDULED = "1"
   THREEDI_TIMES_LOCAL = "03:15,15:15"
   THREEDI_TZ = "Europe/Kaliningrad"
+  ENABLE_VK_AUTO_IMPORT = "1"
+  VK_AUTO_IMPORT_TIMES_LOCAL = "06:15,10:15,12:00,18:30"
+  VK_AUTO_IMPORT_TZ = "Europe/Kaliningrad"
+  VK_AUTO_IMPORT_LIMIT = "15"
   GROUNDED_ANSWER_MODEL_ID = "gemini-2.5-flash-lite"
 
 

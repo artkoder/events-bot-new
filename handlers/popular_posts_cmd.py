@@ -6,7 +6,7 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -31,6 +31,37 @@ _VK_WALL_PATH_RE = re.compile(r"^/wall-?(\d+)_([0-9]+)$", re.IGNORECASE)
 
 def _utc_now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _local_today() -> date:
+    try:
+        tz = require_main_attr("LOCAL_TZ")
+    except Exception:
+        tz = timezone.utc
+    return datetime.now(tz).date()
+
+
+def _event_is_current_or_future(event: Any, *, today: date | None = None) -> bool:
+    current_day = today or _local_today()
+    start_date = _parse_iso_date(getattr(event, "date", None))
+    if start_date is None:
+        return True
+    if start_date >= current_day:
+        return True
+    end_date = _parse_iso_date(getattr(event, "end_date", None))
+    if end_date is not None:
+        return end_date >= current_day
+    return False
 
 
 def _env_int(name: str, default: int) -> int:
@@ -184,6 +215,47 @@ class _EventLinks:
     total: int
 
 
+@dataclass(slots=True, frozen=True)
+class _WindowSpec:
+    title: str
+    window_days: int
+    preferred_age_day: int
+    intro: str
+
+
+_WINDOW_SPECS: tuple[_WindowSpec, ...] = (
+    _WindowSpec(
+        title="ТОП-10 за 7 суток",
+        window_days=7,
+        preferred_age_day=6,
+        intro=(
+            "Окно 7 суток: посты опубликованы в последние ~7 суток; "
+            "предпочитаем снапшот метрик <b>age_day=6</b>, а если его ещё нет — "
+            "берём последний доступный <b>age_day&lt;=6</b>."
+        ),
+    ),
+    _WindowSpec(
+        title="ТОП-10 за 3 суток",
+        window_days=3,
+        preferred_age_day=2,
+        intro=(
+            "Окно 3 суток: посты опубликованы в последние ~3 суток; "
+            "предпочитаем снапшот метрик <b>age_day=2</b>, а если его ещё нет — "
+            "берём последний доступный <b>age_day&lt;=2</b>."
+        ),
+    ),
+    _WindowSpec(
+        title="ТОП-10 за 24 часа",
+        window_days=1,
+        preferred_age_day=0,
+        intro=(
+            "Окно 24 часа: берём снапшоты метрик <b>age_day=0</b> "
+            "(посты опубликованы в последние ~24 часа)."
+        ),
+    ),
+)
+
+
 def _safe_ratio(value: int, denom: int | None) -> float:
     d = int(denom or 0)
     if d <= 0:
@@ -199,7 +271,11 @@ async def _require_superadmin(db: Database, user_id: int) -> bool:
         return bool(user and not user.blocked and user.is_superadmin)
 
 
-async def _resolve_telegraph_map(db: Database, *, source_urls: list[str]) -> dict[str, _EventLinks]:
+async def _resolve_telegraph_map(
+    db: Database,
+    *,
+    source_urls: list[str],
+) -> tuple[dict[str, _EventLinks], set[str]]:
     """Map post_url -> event links bundle (Telegraph URL + title + event id).
 
     Returned `events` list is capped for UI readability. `total` preserves the true
@@ -214,7 +290,7 @@ async def _resolve_telegraph_map(db: Database, *, source_urls: list[str]) -> dic
         if str(u or "").strip().startswith(("http://", "https://"))
     ]
     if not urls:
-        return {}
+        return {}, set()
     uniq_urls = list(dict.fromkeys(urls))
 
     def _event_telegraph_url(event: Any) -> str | None:
@@ -312,7 +388,7 @@ async def _resolve_telegraph_map(db: Database, *, source_urls: list[str]) -> dic
             logger.debug("popular_posts: failed to resolve event_source mapping by tg fields", exc_info=True)
 
         if not event_ids:
-            return {}
+            return {}, set()
 
         try:
             events = (
@@ -320,22 +396,28 @@ async def _resolve_telegraph_map(db: Database, *, source_urls: list[str]) -> dic
             ).scalars().all()
         except Exception:
             logger.debug("popular_posts: failed to fetch events for telegraph map", exc_info=True)
-            return {}
+            return {}, set()
 
-        id_to_ref: dict[int, _EventRef] = {}
+        current_day = _local_today()
+        active_id_to_ref: dict[int, _EventRef] = {}
+        active_event_ids: set[int] = set()
         for ev in events:
+            if not _event_is_current_or_future(ev, today=current_day):
+                continue
             try:
                 ev_id = int(getattr(ev, "id", 0) or 0)
             except Exception:
                 continue
             title = str(getattr(ev, "title", "") or "").strip() or "событие"
-            id_to_ref[ev_id] = _EventRef(
+            active_event_ids.add(ev_id)
+            active_id_to_ref[ev_id] = _EventRef(
                 event_id=ev_id,
                 title=title,
                 telegraph_url=_event_telegraph_url(ev),
             )
 
         out: dict[str, _EventLinks] = {}
+        matched_urls: set[str] = set()
         for raw in uniq_urls:
             key = orig_to_key.get(raw) or _canonical_source_url_for_lookup(raw) or ""
             if not key:
@@ -343,16 +425,41 @@ async def _resolve_telegraph_map(db: Database, *, source_urls: list[str]) -> dic
             eids = list(key_to_event_ids.get(key) or [])
             if not eids:
                 continue
+            matched_urls.add(raw)
             refs: list[_EventRef] = []
             for ev_id in eids:
-                ref = id_to_ref.get(int(ev_id))
+                ref = active_id_to_ref.get(int(ev_id))
                 if not ref:
                     continue
                 refs.append(ref)
                 if len(refs) >= 3:
                     break
-            out[raw] = _EventLinks(events=tuple(refs), total=int(len(eids)))
-        return out
+            if refs:
+                total_active = sum(1 for ev_id in eids if int(ev_id) in active_event_ids)
+                out[raw] = _EventLinks(events=tuple(refs), total=int(total_active))
+        return out, matched_urls
+
+
+def _prune_stale_only_items(
+    items: list[_PostItem],
+    *,
+    telegraph_map: dict[str, _EventLinks],
+    matched_urls: set[str],
+    dbg: dict[str, Any] | None = None,
+) -> list[_PostItem]:
+    kept: list[_PostItem] = []
+    skipped_past_event_only = 0
+    for item in items:
+        post_url = str(getattr(item, "post_url", "") or "").strip()
+        if post_url and post_url in matched_urls and post_url not in telegraph_map:
+            skipped_past_event_only += 1
+            continue
+        kept.append(item)
+    if dbg is not None and skipped_past_event_only:
+        dbg["skipped_past_event_only"] = int(dbg.get("skipped_past_event_only", 0) or 0) + int(
+            skipped_past_event_only
+        )
+    return kept
 
 
 async def _table_exists(conn: Any, *, name: str) -> bool:
@@ -367,6 +474,34 @@ async def _table_exists(conn: Any, *, name: str) -> bool:
         return False
 
 
+def _dedupe_latest_age_rows(
+    rows: list[tuple],
+    *,
+    key_indexes: tuple[int, int],
+    age_idx: int,
+) -> tuple[list[tuple], dict[int, int]]:
+    best: dict[tuple[int, int], tuple[int, tuple]] = {}
+    for row in rows:
+        try:
+            key = (int(row[key_indexes[0]]), int(row[key_indexes[1]]))
+        except Exception:
+            continue
+        try:
+            age = int(row[age_idx])
+        except Exception:
+            age = -1
+        current = best.get(key)
+        if current is None or age > current[0]:
+            best[key] = (age, row)
+
+    age_hist: dict[int, int] = {}
+    deduped: list[tuple] = []
+    for age, row in best.values():
+        age_hist[int(age)] = int(age_hist.get(int(age), 0)) + 1
+        deduped.append(row)
+    return deduped, age_hist
+
+
 async def _load_top_items(
     db: Database,
     *,
@@ -377,6 +512,9 @@ async def _load_top_items(
     now_ts = _utc_now_ts()
     since_ts = now_ts - max(1, int(window_days)) * 86400
     min_sample = max(2, _env_int("POST_POPULARITY_MIN_SAMPLE", 2))
+    preferred_age_day = max(0, int(age_day))
+    configured_max_age_day = max(0, _env_int("POST_POPULARITY_MAX_AGE_DAY", 2))
+    tg_monitoring_days_back = max(0, _env_int("TG_MONITORING_DAYS_BACK", 3))
 
     tg_rows: list[tuple] = []
     vk_rows: list[tuple] = []
@@ -402,12 +540,12 @@ async def _load_top_items(
                     FROM (
                         SELECT DISTINCT source_id, message_id
                         FROM telegram_post_metric
-                        WHERE age_day = ?
+                        WHERE age_day <= ?
                           AND message_ts IS NOT NULL
                           AND message_ts >= ?
                     )
                     """,
-                    (int(age_day), int(since_ts)),
+                    (int(preferred_age_day), int(since_ts)),
                 )
                 row0 = await cur0.fetchone()
                 if row0:
@@ -421,6 +559,7 @@ async def _load_top_items(
                         m.message_id,
                         COALESCE(m.source_url, '') AS source_url,
                         COALESCE(m.message_ts, 0) AS message_ts,
+                        m.age_day,
                         m.views,
                         m.likes,
                         COALESCE(s.events_imported, 0) AS events_imported,
@@ -432,12 +571,12 @@ async def _load_top_items(
                      AND s.message_id = m.message_id
                     JOIN telegram_source t
                       ON t.id = m.source_id
-                    WHERE m.age_day = ?
+                    WHERE m.age_day <= ?
                       AND m.message_ts IS NOT NULL
                       AND m.message_ts >= ?
                       AND COALESCE(s.events_imported, 0) > 0
                     """,
-                    (int(age_day), int(since_ts)),
+                    (int(preferred_age_day), int(since_ts)),
                 )
                 tg_rows = await cur.fetchall()
             except sqlite3.OperationalError as exc:
@@ -463,12 +602,12 @@ async def _load_top_items(
                     FROM (
                         SELECT DISTINCT group_id, post_id
                         FROM vk_post_metric
-                        WHERE age_day = ?
+                        WHERE age_day <= ?
                           AND post_ts IS NOT NULL
                           AND post_ts >= ?
                     )
                     """,
-                    (int(age_day), int(since_ts)),
+                    (int(preferred_age_day), int(since_ts)),
                 )
                 row0 = await cur0.fetchone()
                 if row0:
@@ -483,6 +622,7 @@ async def _load_top_items(
                             m.post_id,
                             COALESCE(m.source_url, '') AS source_url,
                             COALESCE(m.post_ts, 0) AS post_ts,
+                            m.age_day,
                             m.views,
                             m.likes,
                             COALESCE(v.screen_name, '') AS screen_name,
@@ -495,7 +635,7 @@ async def _load_top_items(
                           ON ie.inbox_id = i.id
                         LEFT JOIN vk_source v
                           ON v.group_id = m.group_id
-                        WHERE m.age_day = ?
+                        WHERE m.age_day <= ?
                           AND m.post_ts IS NOT NULL
                           AND m.post_ts >= ?
                     """
@@ -506,6 +646,7 @@ async def _load_top_items(
                             m.post_id,
                             COALESCE(m.source_url, '') AS source_url,
                             COALESCE(m.post_ts, 0) AS post_ts,
+                            m.age_day,
                             m.views,
                             m.likes,
                             '' AS screen_name,
@@ -516,11 +657,11 @@ async def _load_top_items(
                          AND i.post_id = m.post_id
                         JOIN vk_inbox_import_event ie
                           ON ie.inbox_id = i.id
-                        WHERE m.age_day = ?
+                        WHERE m.age_day <= ?
                           AND m.post_ts IS NOT NULL
                           AND m.post_ts >= ?
                     """
-                cur2 = await conn.execute(sql, (int(age_day), int(since_ts)))
+                cur2 = await conn.execute(sql, (int(preferred_age_day), int(since_ts)))
                 vk_rows = await cur2.fetchall()
             except sqlite3.OperationalError as exc:
                 logger.info("popular_posts: vk query skipped: %s", exc)
@@ -528,11 +669,14 @@ async def _load_top_items(
         else:
             vk_rows = []
 
-    # Baselines: per-source medians inside the same window and bucket.
+    tg_rows, tg_age_hist = _dedupe_latest_age_rows(tg_rows, key_indexes=(0, 1), age_idx=4)
+    vk_rows, vk_age_hist = _dedupe_latest_age_rows(vk_rows, key_indexes=(0, 1), age_idx=4)
+
+    # Baselines: per-source medians inside the same window and preferred age cap.
     tg_views: dict[int, list[int]] = {}
     tg_likes: dict[int, list[int]] = {}
     tg_sample: dict[int, set[int]] = {}
-    for source_id, message_id, _url, _ts, v, l, _imp, _u, _t in tg_rows:
+    for source_id, message_id, _url, _ts, _age, v, l, _imp, _u, _t in tg_rows:
         try:
             sid = int(source_id)
             mid = int(message_id)
@@ -547,7 +691,7 @@ async def _load_top_items(
     vk_views: dict[int, list[int]] = {}
     vk_likes: dict[int, list[int]] = {}
     vk_sample: dict[int, set[int]] = {}
-    for group_id, post_id, _url, _ts, v, l, _sn, _nm in vk_rows:
+    for group_id, post_id, _url, _ts, _age, v, l, _sn, _nm in vk_rows:
         try:
             gid = int(group_id)
             pid = int(post_id)
@@ -576,11 +720,14 @@ async def _load_top_items(
             sample=sample,
         )
 
-    # Build candidates: strictly above median on both metrics.
+    # Build candidates: strictly above median on at least one metric.
     candidates: list[_PostItem] = []
     skipped: dict[str, Any] = {
         "tg_available": bool(tg_ready),
         "vk_available": bool(vk_ready),
+        "preferred_age_day": int(preferred_age_day),
+        "configured_max_age_day": int(configured_max_age_day),
+        "tg_monitoring_days_back": int(tg_monitoring_days_back),
         "tg_total": int(len(tg_rows)),
         "vk_total": int(len(vk_rows)),
         "tg_sources": int(len(tg_sample)),
@@ -589,6 +736,8 @@ async def _load_top_items(
         "vk_metrics_total": int(vk_metrics_total),
         "tg_metrics_sources": int(tg_metrics_sources),
         "vk_metrics_sources": int(vk_metrics_sources),
+        "tg_selected_max_age_day": max(tg_age_hist) if tg_age_hist else None,
+        "vk_selected_max_age_day": max(vk_age_hist) if vk_age_hist else None,
         "min_sample": int(min_sample),
         # Diagnostics: among posts that had enough data to compare (passed sample/median/metrics),
         # count how many are above the per-source median by each metric.
@@ -632,7 +781,7 @@ async def _load_top_items(
             skipped["above_median_likes"] += 1
         if is_above_views and is_above_likes:
             skipped["above_median_both"] += 1
-        if not (is_above_views and is_above_likes):
+        if not (is_above_views or is_above_likes):
             skipped["skipped_not_above_median"] += 1
             return
         popularity = ""
@@ -652,7 +801,8 @@ async def _load_top_items(
             popularity = ""
         v_ratio = _safe_ratio(views, baseline.median_views)
         l_ratio = _safe_ratio(likes, baseline.median_likes)
-        score = float(min(v_ratio, l_ratio)) + 0.01 * float(v_ratio + l_ratio)
+        primary_ratio = max(v_ratio if is_above_views else 0.0, l_ratio if is_above_likes else 0.0)
+        score = float(primary_ratio) + 0.01 * float(v_ratio + l_ratio)
         candidates.append(
             _PostItem(
                 platform=platform,
@@ -669,7 +819,7 @@ async def _load_top_items(
             )
         )
 
-    for source_id, message_id, url, ts, v, l, _imp, username, title in tg_rows:
+    for source_id, message_id, url, ts, _age, v, l, _imp, username, title in tg_rows:
         try:
             sid = int(source_id)
             mid = int(message_id)
@@ -703,7 +853,7 @@ async def _load_top_items(
             baseline=base,
         )
 
-    for group_id, post_id, url, ts, v, l, screen_name, name in vk_rows:
+    for group_id, post_id, url, ts, _age, v, l, screen_name, name in vk_rows:
         try:
             gid = int(group_id)
             pid = int(post_id)
@@ -767,15 +917,67 @@ def _fmt_platform(platform: str) -> str:
     return p.upper() or "?"
 
 
+def _window_diag_lines(dbg: dict[str, Any]) -> list[str]:
+    preferred_age_day = int(dbg.get("preferred_age_day", 0) or 0)
+    if preferred_age_day <= 0:
+        return []
+
+    lines: list[str] = []
+    configured_max_age_day = int(dbg.get("configured_max_age_day", 0) or 0)
+    if configured_max_age_day < preferred_age_day:
+        lines.append(
+            "Сбор зрелых снапшотов ограничен: "
+            f"POST_POPULARITY_MAX_AGE_DAY={configured_max_age_day}, "
+            f"поэтому <b>age_day={preferred_age_day}</b> пока не пишется; "
+            f"окно использует последний доступный <b>age_day&lt;={preferred_age_day}</b>."
+        )
+
+    tg_days_back = int(dbg.get("tg_monitoring_days_back", 0) or 0)
+    if tg_days_back and tg_days_back < (preferred_age_day + 1):
+        lines.append(
+            "Для Telegram Monitoring окно скана короче целевого бакета: "
+            f"TG_MONITORING_DAYS_BACK={tg_days_back}, для <b>age_day={preferred_age_day}</b> "
+            f"нужно как минимум {preferred_age_day + 1} суток."
+        )
+
+    observed_parts: list[str] = []
+    tg_selected_max_age_day = dbg.get("tg_selected_max_age_day")
+    vk_selected_max_age_day = dbg.get("vk_selected_max_age_day")
+    if isinstance(tg_selected_max_age_day, int) and tg_selected_max_age_day < preferred_age_day:
+        observed_parts.append(f"TG max age_day={tg_selected_max_age_day}")
+    if isinstance(vk_selected_max_age_day, int) and vk_selected_max_age_day < preferred_age_day:
+        observed_parts.append(f"VK max age_day={vk_selected_max_age_day}")
+    if observed_parts:
+        lines.append(
+            f"Фактически в этом окне пока доступны более ранние снапшоты: {', '.join(observed_parts)}."
+        )
+    return lines
+
+
 async def _send_popular_posts_report(message: Message, db: Database, *, limit: int = 10) -> None:
-    three_day, three_dbg = await _load_top_items(db, window_days=3, age_day=2, limit=limit)
-    one_day, one_dbg = await _load_top_items(db, window_days=1, age_day=0, limit=limit)
+    window_results: list[tuple[_WindowSpec, list[_PostItem], dict[str, Any]]] = []
+    for spec in _WINDOW_SPECS:
+        items, dbg = await _load_top_items(
+            db,
+            window_days=spec.window_days,
+            age_day=spec.preferred_age_day,
+            limit=limit,
+        )
+        window_results.append((spec, items, dbg))
 
-    urls = [it.post_url for it in (three_day + one_day) if it.post_url]
-    telegraph_map = await _resolve_telegraph_map(db, source_urls=urls)
+    urls = [it.post_url for _spec, items, _dbg in window_results for it in items if it.post_url]
+    telegraph_map, matched_urls = await _resolve_telegraph_map(db, source_urls=urls)
+    window_results = [
+        (
+            spec,
+            _prune_stale_only_items(items, telegraph_map=telegraph_map, matched_urls=matched_urls, dbg=dbg),
+            dbg,
+        )
+        for spec, items, dbg in window_results
+    ]
 
-    def _render_section(title: str, items: list[_PostItem], dbg: dict[str, Any]) -> list[str]:
-        lines: list[str] = [f"🔥 <b>{html.escape(title)}</b>", ""]
+    def _render_section(spec: _WindowSpec, items: list[_PostItem], dbg: dict[str, Any]) -> list[str]:
+        lines: list[str] = [f"🔥 <b>{html.escape(spec.title)}</b>", ""]
         min_sample = int(dbg.get("min_sample", 0) or 0)
         if min_sample <= 0:
             min_sample = max(2, _env_int("POST_POPULARITY_MIN_SAMPLE", 2))
@@ -796,7 +998,8 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
                 f"skip(sample)={int(dbg.get('skipped_small_sample', 0))}, "
                 f"skip(median)={int(dbg.get('skipped_missing_median', 0))}, "
                 f"skip(metrics)={int(dbg.get('skipped_missing_metrics', 0))}, "
-                f"skip(&lt;=median)={int(dbg.get('skipped_not_above_median', 0))}."
+                f"skip(&lt;=median)={int(dbg.get('skipped_not_above_median', 0))}, "
+                f"skip(past_event_only)={int(dbg.get('skipped_past_event_only', 0))}."
             )
             checked = int(dbg.get("checked_posts", 0) or 0)
             if checked > 0:
@@ -814,6 +1017,7 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
                 lines.append("Платформа TG: таблицы метрик не найдены (возможен DB_INIT_MINIMAL или старый дамп).")
             if not bool(dbg.get("vk_available", True)):
                 lines.append("Платформа VK: таблицы метрик не найдены (возможен DB_INIT_MINIMAL или старый дамп).")
+            lines.extend(_window_diag_lines(dbg))
             _append_debug()
             return lines
 
@@ -867,22 +1071,23 @@ async def _send_popular_posts_report(message: Message, db: Database, *, limit: i
                 lines.append("  Событие: —")
             lines.append("")
 
+        lines.extend(_window_diag_lines(dbg))
         _append_debug()
         return lines
 
     lines: list[str] = [
         "📊 <b>Популярные посты → события</b>",
-        "Фильтр: views и likes строго выше медиан внутри канала/сообщества; медианы считаются по окну и платформе отдельно.",
+        "Показываем только события, которые сегодня или в будущем; посты, связанные только с уже завершившимися событиями, скрываются.",
+        "Фильтр: views или likes строго выше медианы внутри канала/сообщества; медианы считаются по окну и платформе отдельно.",
         "Примечание: метрики пишутся только для постов, где были извлечены события (events_extracted>0/forced/existing); отчёт ниже дополнительно требует импортов (events_imported>0).",
-        "",
-        "Окно 3 суток: берём снапшоты метрик <b>age_day=2</b> (посты опубликованы ~2–3 суток назад; метрики накопились за ~3 дня).",
-        "",
     ]
-    lines.extend(_render_section("ТОП-10 за 3 суток", three_day, three_dbg))
-    lines.append("")
-    lines.append("Окно 24 часа: берём снапшоты метрик <b>age_day=0</b> (посты опубликованы в последние ~24 часа).")
-    lines.append("")
-    lines.extend(_render_section("ТОП-10 за 24 часа", one_day, one_dbg))
+    for idx, (spec, items, dbg) in enumerate(window_results):
+        lines.append("")
+        lines.append(spec.intro)
+        lines.append("")
+        lines.extend(_render_section(spec, items, dbg))
+        if idx < len(window_results) - 1:
+            lines.append("")
 
     for chunk in _chunk_lines(lines):
         await message.answer(chunk, parse_mode="HTML", disable_web_page_preview=True)

@@ -35,7 +35,8 @@
   - перед отправкой per-post отчёта (best-effort) синхронно «дренит» JobOutbox задачи `ics_publish` + `telegraph_build` для затронутых `event_id`, чтобы ссылки Telegraph/ICS были актуальны сразу и DEV-снапшоты с чужим Telegraph token корректно пересоздавали страницы при `PAGE_ACCESS_DENIED` (см. `TG_MONITORING_DRAIN_EVENT_JOBS`).
     - Важно: inline‑drain ограничен по времени (`TG_MONITORING_INLINE_DRAIN_TIMEOUT_SEC`, default `10`) и не должен останавливать импорт `/tg` (если outbox занят/завис или задачи уже выполнены).
   - в per-post блоке `Источник:` Telegram-посты (`t.me/<channel>/<id>`) рендерятся с preview-friendly `href` (`?single`), чтобы ссылка лучше открывалась через web preview в клиентах Telegram; канонический `source_url` в БД при этом не меняется.
-  - fallback на афиши/полный текст из публичной страницы `t.me/s/...` для single-event постов теперь выполняется независимо от наличия `bot`-объекта; в логи пишется явный результат (`tg_monitor.poster_fallback ... posters=N`) и ошибки fallback (debug), чтобы пропуски медиа диагностировались по логам.
+  - fallback на афиши из публичной страницы `t.me/s/...` теперь выполняется независимо от наличия `bot`-объекта и для single-event, и для multi-event постов, если upstream payload потерял `posters[]`; для multi-event fallback дополнительно прогоняет OCR по scraped-картинкам, чтобы сохранить безтекстовые фото у всех split-событий, но не размазывать расписательные постеры по чужим карточкам. В логи пишется явный результат (`tg_monitor.poster_fallback ... posters=N`) и ошибки fallback (debug), чтобы пропуски медиа диагностировались по логам.
+  - fallback полного текста из публичной страницы `t.me/s/...` остаётся single-event only.
   - если в fallback сломалась загрузка poster media в Catbox/Supabase, импорт не обнуляет иллюстрации: используется прямой CDN URL целевого Telegram media (`cdn*.telesco.pe`) как последний аварийный fallback.
   - `linked_source_urls` теперь обогащают медиа события: сервер пытается подтянуть афиши из linked Telegram постов (сначала из того же `telegram_results.json`, затем через `t.me/s/...` fallback) и добавляет их в candidate до Smart Update.
   - `linked_source_urls` также обогащают факты: для single-event постов сервер (best-effort) скачивает текст linked Telegram постов (payload-first, затем `t.me/s/...`) и прогоняет Smart Update по каждому linked источнику, чтобы в source log были факты по всем ссылкам.
@@ -190,6 +191,9 @@
   для приоритизации (первое изображение как обложка), а не для удаления фото.
 - Для постов, где извлечено несколько событий (расписания/альбомы), мы стараемся **не** прикреплять “чужие”
   афиши ко всем событиям: используем event-level assignment от Kaggle или строгий OCR-матчинг.
+- Если у multi-event поста `posters[]` потерялись на upstream, server-side public-page fallback повторно забирает
+  картинки из `t.me/s/...`: безтекстовые фото могут попасть во все split-события, а постеры с читаемым OCR
+  всё равно проходят через event-level фильтрацию.
 - Нестандартный кейс: иногда канал публикует **текст** и сразу отдельным следующим сообщением пересылает афишу
   (forward из другого чата/канала). Если у текстового сообщения нет фото, а у следующего есть `posters[]`, сервер
   (best-effort) прикрепляет афишу к событию из предыдущего поста (poster-bridge) и не считает метрики второго сообщения

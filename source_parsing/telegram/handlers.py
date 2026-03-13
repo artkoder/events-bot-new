@@ -1152,6 +1152,25 @@ def _payload_to_poster_candidates(payload: list[dict[str, Any]] | None) -> list[
     return _dedupe_poster_candidates(out, limit=8)
 
 
+def _select_public_page_fallback_posters(
+    candidate: EventCandidate,
+    posters: list[PosterCandidate] | None,
+    *,
+    is_single_event_post: bool,
+) -> list[PosterCandidate]:
+    deduped = _dedupe_poster_candidates(list(posters or []), limit=5)
+    if not deduped:
+        return []
+    if is_single_event_post:
+        return deduped
+    return _filter_posters_for_event(
+        deduped,
+        event_title=str(candidate.title or "").strip() or None,
+        event_date=str(candidate.date or "").strip() or None,
+        event_time=str(candidate.time or "").strip() or None,
+    )
+
+
 def _canonical_tg_post_url(value: str | None) -> str | None:
     username, message_id = _parse_tg_source_url(value)
     uname = normalize_tg_username(username)
@@ -1341,11 +1360,14 @@ async def _fallback_fetch_posters_from_public_tg_page(
     username: str,
     message_id: int,
     limit: int = 3,
+    need_ocr: bool = False,
 ) -> list[PosterCandidate]:
     """Best-effort fallback: scrape poster URLs from public `t.me/s/...` HTML.
 
     This is used only when the Telegram monitoring payload contains no posters at all.
     It prevents events from being imported without images due to upstream media failures.
+    For multi-event posts we can optionally OCR the scraped images, so downstream logic
+    can keep image-only posters for every child event while still filtering schedule posters.
     """
     uname = normalize_tg_username(username)
     if not uname or not message_id:
@@ -1432,7 +1454,11 @@ async def _fallback_fetch_posters_from_public_tg_page(
     try:
         from poster_media import process_media
 
-        poster_items, _msg = await process_media(images, need_catbox=True, need_ocr=False)
+        poster_items, _msg = await process_media(
+            images,
+            need_catbox=True,
+            need_ocr=bool(need_ocr),
+        )
     except Exception:
         logger.debug(
             "tg_monitor.poster_fallback process_media failed source=%s message_id=%s",
@@ -1448,10 +1474,18 @@ async def _fallback_fetch_posters_from_public_tg_page(
         sha = str(getattr(item, "digest", None) or "").strip() or None
         if not url:
             continue
+        common_kwargs = {
+            "sha256": sha,
+            "ocr_text": getattr(item, "ocr_text", None),
+            "ocr_title": getattr(item, "ocr_title", None),
+            "prompt_tokens": int(getattr(item, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(item, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(item, "total_tokens", 0) or 0),
+        }
         if _looks_like_supabase_url(url):
-            posters.append(PosterCandidate(supabase_url=url, sha256=sha))
+            posters.append(PosterCandidate(supabase_url=url, **common_kwargs))
         else:
-            posters.append(PosterCandidate(catbox_url=url, sha256=sha))
+            posters.append(PosterCandidate(catbox_url=url, **common_kwargs))
     if posters:
         return posters
 
@@ -4448,15 +4482,17 @@ async def process_telegram_results(
                             message_id,
                             exc_info=True,
                         )
-                # Fallback poster scraping: only when we have no posters at all.
+                # Fallback poster scraping: when the payload brought no poster URLs at all.
                 # Do it once per message and reuse for all extracted events if needed.
-                if is_single_event_post and not _has_poster_urls(list(candidate.posters or [])):
+                if not _has_poster_urls(list(candidate.posters or [])):
                     try:
                         if scraped_posters is None:
+                            fallback_limit = 2 if is_single_event_post else 5
                             scraped_posters = await _fallback_fetch_posters_from_public_tg_page(
                                 username=username,
                                 message_id=int(message_id or 0),
-                                limit=2,
+                                limit=fallback_limit,
+                                need_ocr=not is_single_event_post,
                             )
                             logger.info(
                                 "tg_monitor.poster_fallback source=%s message_id=%s posters=%d",
@@ -4464,11 +4500,20 @@ async def process_telegram_results(
                                 message_id,
                                 len(scraped_posters or []),
                             )
-                        if scraped_posters:
-                            candidate.posters = list(scraped_posters)
-                            candidate.poster_scope_hashes = sorted(
-                                {p.sha256 for p in candidate.posters if (p.sha256 or "").strip()}
+                        selected_fallback_posters = _select_public_page_fallback_posters(
+                            candidate,
+                            scraped_posters,
+                            is_single_event_post=is_single_event_post,
+                        )
+                        if selected_fallback_posters:
+                            candidate.posters = list(selected_fallback_posters)
+                            scope_hashes = {h for h in (candidate.poster_scope_hashes or []) if h}
+                            scope_hashes.update(
+                                str(p.sha256 or "").strip()
+                                for p in (scraped_posters or [])
+                                if str(p.sha256 or "").strip()
                             )
+                            candidate.poster_scope_hashes = sorted(scope_hashes)
                     except Exception:
                         logger.debug(
                             "tg_monitor.poster_fallback failed source=%s message_id=%s",

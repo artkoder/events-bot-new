@@ -2228,7 +2228,7 @@ async def vk_auto_import_scheduler(
         chat_id = int(admin_chat)
     except (TypeError, ValueError):
         return
-    limit = int(os.getenv("VK_AUTO_IMPORT_LIMIT", "25") or "25")
+    limit = int(os.getenv("VK_AUTO_IMPORT_LIMIT", "15") or "15")
     await run_vk_auto_import(
         db,
         bot,

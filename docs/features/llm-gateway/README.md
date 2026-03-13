@@ -131,5 +131,36 @@ except RateLimitError:
     print("Limits exceeded, try again later")
 ```
 
+### 4.1. Kaggle smoke-probe для конкретного ключа
+
+Для live-проверки отдельного ключа Gemma через Kaggle добавлен приватный kernel
+`kaggle/GemmaKey2Probe/gemma_key2_probe.ipynb` и launcher
+`kaggle/execute_gemma_key2_probe.py`.
+
+Что делает launcher:
+* best-effort подхватывает `.env` для `KAGGLE_USERNAME`/`KAGGLE_KEY` и общих env;
+* может дополнительно читать другой env-файл c целевым ключом (например `.env copy`);
+* шифрует только выбранный ключ в `secrets.enc`, кладёт `fernet.key` в отдельный dataset
+  и запускает Kaggle kernel через тот же split-secrets паттерн, что используется в
+  Telegram Monitoring и `/3di`;
+* скачивает `output.json` в `artifacts/codex/kaggle/gemma-key2-probe/<run_id>/`.
+
+Базовый запуск:
+
+```bash
+python kaggle/execute_gemma_key2_probe.py --env-file ".env copy"
+```
+
+Полезные опции:
+* `--secret-var GOOGLE_API_KEY2` — имя проверяемого ключа (по умолчанию уже `GOOGLE_API_KEY2`);
+* `--model models/gemma-3-27b-it` — модель для smoke-call;
+* `--keep-datasets` — не удалять временные private datasets после прогона.
+
+Важно:
+* launcher не печатает значение ключа;
+* если в `.env` ключа нет, можно передать второй env-файл через `--env-file`;
+* Kaggle output фиксирует только `ok/status_code/model/response_excerpt` и диагностические excerpts,
+  без секрета.
+
 ## TODO / Risks
 - Проверить и зафиксировать статус возможной deprecation `google.generativeai` (источник сигнала: операторский репорт), подготовить план миграции SDK при подтверждении.

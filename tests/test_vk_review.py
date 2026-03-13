@@ -879,6 +879,43 @@ async def test_mark_failed_retries_on_locked_commit(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_release_stale_locks_requeues_legacy_importing(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    future_ts = int(_time.time()) + 10_000
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status, locked_by, locked_at, review_batch) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                1,
+                99,
+                500,
+                "Концерт 13.11.2099",
+                "k",
+                1,
+                future_ts,
+                "importing",
+                42,
+                "2000-01-01 00:00:00",
+                "legacy-batch",
+            ),
+        )
+        await conn.commit()
+
+    released = await vk_review.release_stale_locks(db)
+    assert released == 1
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, locked_by, locked_at, review_batch FROM vk_inbox WHERE post_id=?",
+            (99,),
+        )
+        row = await cur.fetchone()
+
+    assert row == ("pending", None, None, None)
+
+
+@pytest.mark.asyncio
 async def test_finish_batch_clears_months(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

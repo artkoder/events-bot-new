@@ -4386,6 +4386,60 @@ def _location_matches(a: str | None, b: str | None) -> bool:
     return False
 
 
+_ADDRESS_NOISE_RE = re.compile(
+    r"(?iu)\b(?:ул(?:ица)?|пр(?:оспект|осп)?|пр-?т|пер(?:еулок)?|б-р|бульвар|пл(?:ощадь)?|наб(?:ережная)?)\.?\b"
+)
+
+
+def _normalize_address_for_match(value: str | None, city: str | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    norm = _normalize_location_compact(raw)
+    norm = norm.replace("-", " ").replace("—", " ")
+    norm = re.sub(r"[«»\"']", " ", norm)
+    norm = _ADDRESS_NOISE_RE.sub(" ", norm)
+    if city:
+        city_norm = _normalize_location_compact(city)
+        if city_norm:
+            norm = re.sub(
+                rf"(?iu)(?:,\s*|\s+)#?{re.escape(city_norm)}$",
+                "",
+                norm,
+            )
+    norm = re.sub(r"\s+", " ", norm).strip()
+    return norm
+
+
+def _address_matches(
+    a: str | None,
+    b: str | None,
+    *,
+    city_a: str | None = None,
+    city_b: str | None = None,
+) -> bool:
+    na = _normalize_address_for_match(a, city_a)
+    nb = _normalize_address_for_match(b, city_b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if na in nb or nb in na:
+        return True
+    return False
+
+
+def _event_candidate_location_matches(event: Event, candidate: "EventCandidate") -> bool:
+    if _location_matches(getattr(event, "location_name", None), candidate.location_name):
+        return True
+    return _address_matches(
+        getattr(event, "location_address", None),
+        candidate.location_address,
+        city_a=getattr(event, "city", None),
+        city_b=candidate.city,
+    )
+
+
 def _apply_soft_city_filter(stmt, city: str | None):
     """Filter by candidate city, but keep legacy rows with empty city.
 
@@ -7805,7 +7859,7 @@ async def _match_existing_event_by_source_anchor(
         if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
             continue
         if candidate.location_name and getattr(ev, "location_name", None):
-            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         anchor_filtered.append(ev)
         ev_title = str(getattr(ev, "title", "") or "").strip()
@@ -7878,7 +7932,7 @@ async def _match_existing_event_by_event_source_url(
             continue
         ev_title = str(getattr(ev, "title", "") or "").strip()
         if candidate.location_name and getattr(ev, "location_name", None):
-            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         anchor_filtered.append(ev)
         if title_raw and ev_title and _title_has_meaningful_tokens(title_raw) and _title_has_meaningful_tokens(ev_title):
@@ -7919,7 +7973,7 @@ def _single_candidate_auto_match_ok(
         if candidate.date and getattr(event_db, "date", None) and candidate.date != event_db.date:
             return False
         if candidate.location_name and getattr(event_db, "location_name", None):
-            if not _location_matches(candidate.location_name, event_db.location_name):
+            if not _event_candidate_location_matches(event_db, candidate):
                 return False
         if _has_explicit_time_conflict(cand_time_anchor, event_time_anchor):
             return False
@@ -7983,7 +8037,7 @@ def _deterministic_exact_title_match(
         if str(getattr(ev, "date", "") or "").strip() != cand_date:
             continue
         if cand_loc and getattr(ev, "location_name", None):
-            if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         if _normalize_title_for_match(getattr(ev, "title", None)) != cand_title_norm:
             continue
@@ -8037,7 +8091,7 @@ def _deterministic_related_title_anchor_match(
             continue
         if str(getattr(ev, "date", "") or "").strip() != cand_date:
             continue
-        if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+        if not _event_candidate_location_matches(ev, candidate):
             continue
         if _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
             continue
@@ -8119,7 +8173,7 @@ def _deterministic_same_post_longrun_exact_title_match(
         if _normalize_title_for_match(getattr(ev, "title", None)) != cand_title:
             continue
         if candidate.location_name and getattr(ev, "location_name", None):
-            if not _location_matches(candidate.location_name, getattr(ev, "location_name", None)):
+            if not _event_candidate_location_matches(ev, candidate):
                 continue
         ev_start, ev_end = _event_date_range(ev)
         if not _ranges_overlap(cand_start, cand_end, ev_start, ev_end):
@@ -8158,7 +8212,7 @@ def _deterministic_ticket_source_anchor_match(
             continue
         if str(getattr(ev, "date", "") or "").strip() != cand_date:
             continue
-        if not _location_matches(getattr(ev, "location_name", None), cand_loc):
+        if not _event_candidate_location_matches(ev, candidate):
             continue
         if _normalize_url(getattr(ev, "ticket_link", None)) != cand_ticket:
             continue
@@ -9501,7 +9555,7 @@ async def _smart_event_update_impl(
 
     if (not anchor_forced) and (not city_noise_rescued) and candidate.location_name:
         shortlist = [
-            ev for ev in shortlist if _location_matches(ev.location_name, candidate.location_name)
+            ev for ev in shortlist if _event_candidate_location_matches(ev, candidate)
         ]
 
     # Time is an anchor field, but for canonical site/parser imports we allow time corrections:

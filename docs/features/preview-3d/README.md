@@ -13,6 +13,7 @@
 
 1. Бот отбирает события без `preview_3d_url` или по выбранному режиму `/3di`.
    - `📅 Выбрать месяц` по умолчанию тоже берёт только события выбранного месяца без `preview_3d_url`.
+   - После выбора месяца бот предлагает размер батча: `25`, `50`, `100` или `все`, чтобы не отправлять в один Kaggle-run весь длинный месяц.
    - Для явной массовой пересборки текущего месяца используется отдельная кнопка `🔄 Перегенерировать все`.
 2. Для Kaggle создаётся временный dataset с `payload.json`.
 3. Отдельно создаются приватные runtime datasets:
@@ -23,6 +24,8 @@
 5. Notebook `kaggle/Preview3D/preview_3d.ipynb` загружает `config.json` и расшифровывает секреты из `/kaggle/input` до начала рендера.
 6. После рендера WebP-preview загружается в Supabase Storage по ключу
    `SUPABASE_PREVIEW3D_PREFIX/event/<event_id>.webp` в `SUPABASE_MEDIA_BUCKET`.
+   Runtime payload прокидывает совместимые alias-переменные `SUPABASE_KEY`/`SUPABASE_SERVICE_KEY`
+   и `SUPABASE_BUCKET`/`SUPABASE_MEDIA_BUCKET`, чтобы upload не отключался на старых notebook/runtime ветках.
 7. Бот сохраняет public URL в `event.preview_3d_url` и ставит downstream-задачи на обновление страниц события.
 
 ## Обязательные ENV
@@ -43,3 +46,11 @@
 - `PREVIEW3D_KEEP_DATASETS=1` отключает cleanup временных Kaggle datasets после прогона.
 - Хранилище и формат ключей описаны в `docs/operations/supabase-storage.md`.
 - Общий паттерн доставки секретов в Kaggle описан в `docs/operations/kaggle-secrets.md`.
+
+## UI режимы `/3di`
+
+- `🆕 Только новые` — gap-fill для недавних событий без `preview_3d_url`.
+- `🌐 All missing` — все будущие события без `preview_3d_url`.
+- `⚡️ Сгенерировать (текущий мес)` — текущий месяц, только missing.
+- `🔄 Перегенерировать все` — текущий месяц целиком, включая уже готовые превью.
+- `📅 Выбрать месяц (без превью)` — выбор месяца и затем размера батча (`25/50/100/все`) для missing-only рендера.

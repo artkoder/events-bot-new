@@ -36,6 +36,7 @@ MONTHS_RU = {
     9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
 }
 MAX_IMAGES_PER_EVENT = 7
+MONTH_BATCH_LIMIT_OPTIONS = (25, 50, 100)
 KAGGLE_KERNEL_FOLDER = "Preview3D"
 KAGGLE_DATASET_SLUG_PREFIX = "preview3d"
 KAGGLE_POLL_INTERVAL_SECONDS = 20
@@ -182,6 +183,7 @@ def _build_preview3d_runtime_config_payload() -> dict[str, object]:
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "env": {
+            "SUPABASE_BUCKET": media_bucket,
             "SUPABASE_MEDIA_BUCKET": media_bucket,
             "SUPABASE_PREVIEW3D_PREFIX": preview_prefix or "p3d",
         },
@@ -193,6 +195,7 @@ def _build_preview3d_runtime_secrets_payload() -> str:
     supabase_key = _require_env_value("SUPABASE_SERVICE_KEY", aliases=("SUPABASE_KEY",))
     payload = {
         "SUPABASE_URL": supabase_url,
+        "SUPABASE_KEY": supabase_key,
         "SUPABASE_SERVICE_KEY": supabase_key,
     }
     return json.dumps(payload, ensure_ascii=False)
@@ -622,26 +625,98 @@ def _build_month_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _build_month_batch_menu(
+    month: str,
+    total_events: int,
+    *,
+    is_multy: bool = False,
+) -> InlineKeyboardMarkup:
+    suffix = ":multy" if is_multy else ""
+    rows: list[list[InlineKeyboardButton]] = []
+    option_row: list[InlineKeyboardButton] = []
+
+    for limit in MONTH_BATCH_LIMIT_OPTIONS:
+        if total_events <= limit:
+            continue
+        option_row.append(
+            InlineKeyboardButton(
+                text=f"Первые {limit}",
+                callback_data=f"3di:genbatch:{month}:{limit}{suffix}",
+            )
+        )
+        if len(option_row) == 2:
+            rows.append(option_row)
+            option_row = []
+
+    if option_row:
+        rows.append(option_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"Все ({total_events})",
+                callback_data=f"3di:genbatch:{month}:all{suffix}",
+            )
+        ]
+    )
+    rows.append(
+        [InlineKeyboardButton(text="⬅️ К месяцам", callback_data=f"3di:month_select{suffix}")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _format_month_name(month: str) -> str:
     try:
+        year = month.split("-")[0]
         month_number = int(month.split("-")[1])
     except (AttributeError, IndexError, ValueError, TypeError):
         return month
-    return MONTHS_RU.get(month_number, month)
+    month_name = MONTHS_RU.get(month_number, month)
+    return f"{month_name} {year}"
+
+
+def _apply_limit(events: list[Event], limit: int | None) -> list[Event]:
+    if limit is None:
+        return list(events)
+    return list(events[: max(limit, 0)])
+
+
+def _parse_batch_limit(raw_value: str) -> int | None:
+    value = (raw_value or "").strip().lower()
+    if value == "all":
+        return None
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError("Batch limit must be positive")
+    return parsed
 
 
 def _format_status_text(session: dict) -> str:
     month_name = _format_month_name(session.get("month", ""))
     event_count = session.get("event_count", 0)
+    total_event_count = session.get("total_event_count") or event_count
     status = session.get("status", "unknown")
     status_label = STATUS_LABELS.get(status, status)
     mode = session.get("mode", "")
-    return (
-        f"🎨 <b>3D-превью: {month_name}</b>\n\n"
-        f"📊 Событий к обработке: {event_count}\n"
-        f"🔄 Статус: {status_label}\n\n"
-        f"Режим: {mode}"
+    if total_event_count and total_event_count > event_count:
+        event_count_text = f"{event_count} из {total_event_count}"
+    else:
+        event_count_text = str(event_count)
+    lines = [
+        f"🎨 <b>3D-превью: {month_name}</b>",
+        "",
+        f"📊 Событий к обработке: {event_count_text}",
+    ]
+    if session.get("batch_limit") is not None:
+        lines.append(f"📦 Батч: первые {event_count}")
+    lines.extend(
+        [
+            f"🔄 Статус: {status_label}",
+            "",
+            f"Режим: {mode}",
+        ]
     )
+    return "\n".join(lines)
 
 
 def _build_status_keyboard(session_id: int) -> InlineKeyboardMarkup:
@@ -850,6 +925,7 @@ async def _run_kaggle_render(
     else:
         month_label = f"{MONTHS_RU.get(month_number, month)} {year}"
     event_count = session.get("event_count", len(payload.get("events", [])))
+    total_event_count = session.get("total_event_count") or event_count
     ops_run_id = await start_ops_run(
         db,
         kind="3di",
@@ -995,10 +1071,14 @@ async def _run_kaggle_render(
                         await schedule_tasks(db, event, skip_vk_sync=True)
                 session["status"] = "done"
                 if message_id:
+                    if total_event_count and total_event_count > event_count:
+                        count_line = f"📊 Событий: {event_count} из {total_event_count}"
+                    else:
+                        count_line = f"📊 Событий: {event_count}"
                     lines = [
                         f"🎨 <b>3D-превью: {month_label}</b>",
                         "",
-                        f"📊 Событий: {event_count}",
+                        count_line,
                         f"✅ Успешно: {updated}",
                         f"⚠️ Ошибок: {errors}",
                         f"⏭ Пропущено: {skipped}",
@@ -1281,27 +1361,71 @@ async def handle_3di_callback(
         month_key = base_data.split(":")[2]
         min_images = 2 if is_multy else 1
         events = await _get_events_without_preview(db, month_key, min_images=min_images)
-        
+
         if not events:
             await callback.answer(
                 f"Нет событий без превью ({min_images}+ изображений) в этом месяце",
                 show_alert=True,
             )
             return
-        
+
+        month_label = _format_month_name(month_key)
+        text = [
+            f"📅 <b>{month_label}</b>",
+            "",
+            f"Без 3D-превью: {len(events)}",
+            "Выберите размер батча для рендера:",
+        ]
+        if is_multy:
+            text.insert(3, "🎭 Только события с 2+ картинками.")
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="\n".join(text),
+            reply_markup=_build_month_batch_menu(
+                month_key,
+                len(events),
+                is_multy=is_multy,
+            ),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    if base_data.startswith("3di:genbatch:"):
+        _, _, month_key, raw_limit = base_data.split(":", 3)
+        min_images = 2 if is_multy else 1
+        events = await _get_events_without_preview(db, month_key, min_images=min_images)
+
+        if not events:
+            await callback.answer(
+                f"Нет событий без превью ({min_images}+ изображений) в этом месяце",
+                show_alert=True,
+            )
+            return
+
+        try:
+            batch_limit = _parse_batch_limit(raw_limit)
+        except ValueError:
+            await callback.answer("Некорректный размер батча", show_alert=True)
+            return
+
+        limited_events = _apply_limit(events, batch_limit)
         mode_str = "month:multy" if is_multy else "month"
         await _start_generation(
             db,
             bot,
             callback,
-            events,
+            limited_events,
             month_key,
             mode_str,
             start_kaggle_render,
             operator_id=callback.from_user.id,
+            total_event_count=len(events),
+            batch_limit=batch_limit,
         )
         return
-    
+
     if data.startswith("3di:status:"):
         session_id = int(data.split(":")[2])
         session = _active_sessions.get(session_id)
@@ -1324,6 +1448,8 @@ async def _start_generation(
     start_kaggle_render: Callable | None,
     *,
     operator_id: int | None = None,
+    total_event_count: int | None = None,
+    batch_limit: int | None = None,
 ) -> None:
     """Start 3D preview generation for events."""
     chat_id = callback.message.chat.id
@@ -1336,6 +1462,8 @@ async def _start_generation(
         "month": month,
         "mode": mode,
         "event_count": len(events),
+        "total_event_count": total_event_count or len(events),
+        "batch_limit": batch_limit,
         "created_at": datetime.now(timezone.utc),
         "chat_id": chat_id,
         "message_id": message_id,

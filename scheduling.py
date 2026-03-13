@@ -834,7 +834,9 @@ def startup(
     if enable_vk_auto_import:
         from vk_auto_queue import vk_auto_import_scheduler
 
-        vk_auto_times = os.getenv("VK_AUTO_IMPORT_TIMES_LOCAL", "06:30,18:30").strip()
+        vk_auto_times = os.getenv(
+            "VK_AUTO_IMPORT_TIMES_LOCAL", "06:15,10:15,12:00,18:30"
+        ).strip()
         vk_auto_tz = os.getenv("VK_AUTO_IMPORT_TZ", "Europe/Kaliningrad").strip()
         for idx, t in enumerate(vk_auto_times.split(",")):
             t = t.strip()

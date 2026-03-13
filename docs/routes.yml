@@ -88,6 +88,8 @@ features:
       - google_ai/client.py
       - google_ai/exceptions.py
       - google_ai/secrets.py
+      - kaggle/GemmaKey2Probe/gemma_key2_probe.ipynb
+      - kaggle/execute_gemma_key2_probe.py
   admin_action_assistant:
     status: implemented
     docs: docs/features/admin-action-assistant/README.md

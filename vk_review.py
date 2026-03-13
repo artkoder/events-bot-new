@@ -90,14 +90,17 @@ async def _unlock_stale(conn) -> int:
 
     Rows older than :data:`LOCK_TIMEOUT_SECONDS` are switched back to ``pending``
     state with ``review_batch`` cleared so they can be picked again by any
-    operator.  Returns number of rows that were unlocked.
+    operator. Legacy ``importing`` rows are treated the same way: the current
+    auto-import flow only uses ``locked`` while processing, so an old
+    ``importing`` status would otherwise remain invisible to the queue forever.
+    Returns number of rows that were unlocked.
     """
 
     cursor = await conn.execute(
         """
         UPDATE vk_inbox
         SET status='pending', locked_by=NULL, locked_at=NULL, review_batch=NULL
-        WHERE status='locked'
+        WHERE status IN ('locked', 'importing')
           AND (locked_at IS NULL OR locked_at < datetime('now', ?))
         """,
         (f"-{LOCK_TIMEOUT_SECONDS} seconds",),

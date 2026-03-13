@@ -35,6 +35,7 @@
 - Пример “split datasets + Fernet”: `source_parsing/telegram/service.py` + `source_parsing/telegram/split_secrets.py`.
 - Ещё один пример “split datasets + Fernet”: `telegraph_cache_sanitizer.py` (Telegraph cache sanitizer / TelegraphCacheProbe).
 - `/3di` (`preview_3d/handlers.py` + `kaggle/Preview3D/preview_3d.ipynb`) тоже использует split datasets: `config.json` для non-secret runtime env и `secrets.enc`/`fernet.key` для `SUPABASE_URL` + service key.
+- Smoke-probe отдельного Gemma key: `kaggle/GemmaKey2Probe/gemma_key2_probe.ipynb` + `kaggle/execute_gemma_key2_probe.py` (подробный runbook: `docs/features/llm-gateway/README.md`).
 - Пример multi-source secrets в Kaggle: `kaggle/UniversalFestivalParser/src/secrets.py` (env → Kaggle Secrets → encrypted datasets).
 
 ## Telegram Auth Bundle для Kaggle (ручные запуски)
