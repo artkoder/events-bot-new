@@ -4,6 +4,7 @@ import html
 import re
 import asyncio
 import time as _time
+from collections import defaultdict
 from datetime import date, timezone, datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Any, Sequence, List, Mapping, Optional, Dict, Tuple, Collection, Literal, Awaitable

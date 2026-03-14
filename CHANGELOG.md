@@ -25,6 +25,7 @@
 
 ### Fixed
 - **Tools / Event Dedup Cleanup**: `scripts/inspect/dedup_event_duplicates.py` now repoints `vk_inbox.imported_event_id` and rewrites `event.linked_event_ids` during merges, so safe cleanup of legacy duplicate rows does not leave stale internal references after the dropped event is deleted.
+- **Telegraph Pages / `/pages_rebuild`**: fixed a runtime `NameError` in the month/weekend rebuild helper path so production rebuilds can execute from the bot/runtime shell without crashing before weekend mapping is prepared.
 - **CrumpleVideo / Poster Overlay**: Notebook overlay placement now scans the full poster for low-text zones, keeps fact-only overlays compact, and avoids styling the first line as a large title when the overlay only adds date/location facts.
 - **General Stats / Parse Runs**: `/general_stats` now restores `/parse` `events_created/events_updated` from per-source `ops_run.details_json.sources` when older parse runs logged zero metrics, shows `updated=` in `/parse breakdown`, and `/parse` itself now writes run metrics from `stats_by_source` instead of chat-only added/updated lists.
 - **Admin Reports**: Added `/recent_imports [hours]` superadmin report for events created or updated from `Telegram`, `VK`, and `/parse` over the last `N` hours (default `24`), with Telegraph-linked titles, dedupe by `event_id`, multi-message pagination, and `/a` routing for natural-language requests about recent source imports.
