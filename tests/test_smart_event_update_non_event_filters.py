@@ -160,6 +160,52 @@ def test_congrats_notice_is_detected_as_non_event() -> None:
     assert su._looks_like_congrats_notice_not_event(title, text) is True
 
 
+def test_completed_event_report_is_detected_as_non_event() -> None:
+    title = "Профориентационная игра с «Ораторами России»"
+    text = (
+        "💥 Один на один с учениками МАОУ СОШ № 33\n\n"
+        "Мы отправились к ребятам, чтобы поговорить о самом важном – о выборе будущего. "
+        "И сделали это в формате профориентационного квиза «Востребованные профессии».\n\n"
+        "Вместе с учениками 9-11 классов мы:\n"
+        "🔍 Исследовали современные и перспективные профессиональные направления.\n"
+        "🧠 Решали практические задачи, где пригодилась и логика, и смекалка.\n"
+        "🤝 Работали в командах – ведь умение договариваться и быстро принимать решения пригодится в любой сфере.\n\n"
+        "Было здорово видеть горящие глаза ребят, их вовлечённость и неподдельный интерес к теме.\n\n"
+        "Огромное спасибо администрации и педагогам 33 школы за тёплый приём и сотрудничество. "
+        "И, конечно, скоро увидимся вновь, ведь это не последняя наша встреча!"
+    )
+    candidate = su.EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-2051396_23431",
+        source_text=text,
+        raw_excerpt="Профориентационный квиз для учеников 9-11 классов школы № 33.",
+        title=title,
+        date="2026-03-14",
+        city="Калининград",
+    )
+    assert su._looks_like_completed_event_report_not_event(title, text, candidate=candidate) is True
+
+
+def test_upcoming_school_game_is_not_flagged_as_completed_event_report() -> None:
+    title = "Профориентационная игра с «Ораторами России»"
+    text = (
+        "14 марта в 14:00 в МАОУ СОШ № 33 состоится профориентационная игра.\n"
+        "Приглашаем старшеклассников принять участие в квизе об актуальных профессиях.\n"
+        "Нужна регистрация у классного руководителя."
+    )
+    candidate = su.EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/kenigevents/2",
+        source_text=text,
+        raw_excerpt="Игра для старшеклассников о востребованных профессиях.",
+        title=title,
+        date="2026-03-14",
+        time="14:00",
+        city="Калининград",
+    )
+    assert su._looks_like_completed_event_report_not_event(title, text, candidate=candidate) is False
+
+
 def test_real_lecture_is_not_flagged_as_non_event_notice() -> None:
     title = "Лекция об Алексее Леонове"
     text = "26 февраля состоится лекция о жизни и пути Алексея Леонова в Доме китобоя."

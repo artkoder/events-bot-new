@@ -3239,6 +3239,42 @@ _PHOTO_DAY_PERIOD_RE = re.compile(
     rf"до\s+\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE})|"
     rf"по\s+\d{{1,2}}\s+(?:{_RU_MONTHS_GENITIVE_RE}))\b"
 )
+_COMPLETED_EVENT_REPORT_KEEP_RE = re.compile(
+    r"(?iu)\b("
+    r"приглаша(ем|ю|ет)|"
+    r"приходите|"
+    r"жд[её]м\s+вас|"
+    r"состо(ится|ятся)|"
+    r"пройд(ёт|ет|ут)|"
+    r"регистрац\w*|"
+    r"запис\w*|"
+    r"билет\w*|"
+    r"бронь\b|"
+    r"заброниру\w*|"
+    r"купить\b"
+    r")\b"
+)
+_COMPLETED_EVENT_REPORT_MARKERS = (
+    re.compile(r"(?iu)\b(?:встреча|игра|урок|лекция|концерт|экскурсия|мероприятие|мастер-?класс)\s+прош(?:ел|ла|ло|ли)\b"),
+    re.compile(r"(?iu)\b(?:прош(?:ел|ла|ло|ли)|состоял(?:ся|ась|ось|ись))\b"),
+    re.compile(r"(?iu)\bпринял(?:а|и)?\s+участие\b"),
+    re.compile(r"(?iu)\bприняли\s+участие\b"),
+    re.compile(r"(?iu)\b(?:побывал(?:а|и)?|посетил(?:а|и)?)\b"),
+    re.compile(
+        r"(?iu)\b(?:мы|участники|ребята)\s+"
+        r"(?:отправили(?:сь)?|провели|сделали|исследовали|решали|работали|обсудили|поговорили)\b"
+    ),
+    re.compile(r"(?iu)\b(?:было\s+(?:здорово|интересно|ценно)|горящие\s+глаза|неподдельн\w+\s+интерес)\b"),
+    re.compile(
+        r"(?iu)\b(?:огромное\s+спасибо|спасибо\s+(?:администрац\w*|педагог\w*|организатор\w*)|"
+        r"скоро\s+увидимся\s+вновь|не\s+последняя\s+наша\s+встреча)\b"
+    ),
+    re.compile(
+        r"(?iu)\b(?:педагог\w*|организатор\w*|администрац\w*|учител\w*)[^.!?\n]{0,80}\b"
+        r"(?:отметил\w*|выразил\w*\s+благодарн\w*|поблагодарил\w*)"
+    ),
+    re.compile(r"(?iu)\b(?:итоги|результаты)\b"),
+)
 
 
 def _looks_like_too_soon_notice(title: str | None, text: str | None) -> bool:
@@ -3450,6 +3486,38 @@ def _looks_like_congrats_notice_not_event(title: str | None, text: str | None) -
     if _EVENT_INVITE_RE.search(combined):
         return False
     return True
+
+
+def _looks_like_completed_event_report_not_event(
+    title: str | None,
+    text: str | None,
+    *,
+    candidate: EventCandidate | None = None,
+) -> bool:
+    """Detect posts that recap a finished event rather than announce an upcoming one."""
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    low = combined.casefold()
+    if _COMPLETED_EVENT_REPORT_KEEP_RE.search(low):
+        return False
+    if candidate is not None:
+        time_raw = str(getattr(candidate, "time", "") or "").strip().replace(".", ":")
+        if time_raw and time_raw not in {"00:00", "0:00"}:
+            return False
+        if str(getattr(candidate, "end_date", "") or "").strip():
+            return False
+        if str(getattr(candidate, "ticket_link", "") or "").strip():
+            return False
+        if (
+            getattr(candidate, "ticket_price_min", None) is not None
+            or getattr(candidate, "ticket_price_max", None) is not None
+        ):
+            return False
+    if not ((candidate is not None and str(getattr(candidate, "date", "") or "").strip()) or _has_datetime_signals(combined)):
+        return False
+    hits = sum(1 for pattern in _COMPLETED_EVENT_REPORT_MARKERS if pattern.search(combined))
+    return hits >= 2
 
 
 def _has_price_evidence(text: str | None, *values: int | None) -> bool:
@@ -9260,6 +9328,14 @@ async def _smart_event_update_impl(
                 _clip_title(clean_title),
             )
             return SmartUpdateResult(status="skipped_non_event", reason="photo_day")
+        if _looks_like_completed_event_report_not_event(clean_title, combined_text, candidate=candidate):
+            logger.info(
+                "smart_update.skip reason=completed_event_report source_type=%s source_url=%s title=%s",
+                candidate.source_type,
+                candidate.source_url,
+                _clip_title(clean_title),
+            )
+            return SmartUpdateResult(status="skipped_non_event", reason="completed_event_report")
 
     # Ticket price grounding: prevent hallucinated min/max prices for VK/TG sources.
     # Only accept price values when the source text/OCR contains explicit price signals.
