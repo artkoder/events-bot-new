@@ -41,6 +41,7 @@ sections:
     index: docs/backlog/README.md
     features:
       event_static_pages: docs/backlog/features/static-event-pages/README.md
+      guide_excursions_architecture: docs/backlog/features/guide-excursions-monitoring/architecture.md
       guide_excursions_casebook: docs/backlog/features/guide-excursions-monitoring/casebook.md
       guide_excursions_mvp: docs/backlog/features/guide-excursions-monitoring/mvp.md
       guide_excursions_monitoring: docs/backlog/features/guide-excursions-monitoring/README.md

@@ -7,6 +7,7 @@
 
 - high-level design: `docs/backlog/features/guide-excursions-monitoring/README.md`
 - source taxonomy + case analysis: `docs/backlog/features/guide-excursions-monitoring/casebook.md`
+- facts-first architecture: `docs/backlog/features/guide-excursions-monitoring/architecture.md`
 - future static pages / own domain: `docs/backlog/features/static-event-pages/README.md`
 
 ## 1. Что должно дать ценность сразу
@@ -26,7 +27,8 @@ MVP считается успешным, если в тот же день пос
 - OCR картинок;
 - regex/heuristic prefilter до LLM;
 - подтверждение и нормализация через Gemma по отдельному ключу `GOOGLE_API_KEY2`;
-- occurrence-level хранение в отдельных guide-таблицах;
+- facts-first накопление для `guide / template / occurrence` в отдельных guide-таблицах;
+- короткая текстовая выдача для digest, а не long-form pages;
 - два публичных digest family:
   - `new_occurrences`
   - `last_call`
@@ -82,7 +84,7 @@ MVP считается успешным, если в тот же день пос
 Это даёт три преимущества:
 
 - нулевая утечка в `/daily`, month pages, weekend pages;
-- отдельная domain-model для occurrence/status/template hints;
+- отдельная domain-model для guide/template/occurrence facts и status deltas;
 - простая интеграция с `/general_stats`, scheduler и админ-командами без второй БД.
 
 ### Почему не `event` table
@@ -95,12 +97,21 @@ MVP считается успешным, если в тот же день пос
 
 ### Минимальные таблицы MVP
 
+MVP не должен быть “только про digest row”.
+
+Правильный компромисс:
+
+- surface MVP остаётся кратким и occurrence-first;
+- underlying storage уже копит факты по `GuideProfile`, `GuideExcursionTemplate` и `GuideExcursionOccurrence`;
+- generated text остаётся минимальным и может пересобираться из фактов.
+
 #### `guide_source`
 
 - `id`
 - `platform='telegram'`
 - `username`
 - `title`
+- `primary_profile_id`
 - `source_kind`
 - `trust_level`
 - `priority_weight`
@@ -133,10 +144,40 @@ MVP считается успешным, если в тот же день пос
 - admin-diagnostics;
 - база для future metrics windows.
 
-#### `guide_occurrence`
+#### `guide_profile`
+
+- `id`
+- `profile_kind`
+  - `person`
+  - `project`
+  - `organization`
+- `display_name`
+- `marketing_name`
+- `source_links_json`
+- `base_region`
+- `summary_short`
+- `facts_rollup_json`
+- `first_seen_at`
+- `last_seen_at`
+
+#### `guide_template`
 
 - `id`
 - `canonical_title`
+- `aliases_json`
+- `base_city`
+- `participant_profiles_json`
+- `summary_short`
+- `facts_rollup_json`
+- `first_seen_at`
+- `last_seen_at`
+
+#### `guide_occurrence`
+
+- `id`
+- `template_id`
+- `canonical_title`
+- `participant_profiles_json`
 - `guide_names_json`
 - `organizer_names_json`
 - `date`
@@ -162,11 +203,34 @@ MVP считается успешным, если в тот же день пос
   - `organization`
   - `aggregator_fallback`
 - `summary_one_liner`
+- `digest_blurb`
 - `raw_facts_json`
 - `first_seen_at`
 - `last_seen_at`
 - `published_new_digest_at`
 - `published_last_call_digest_at`
+
+#### `guide_fact_claim`
+
+- `id`
+- `entity_kind`
+  - `guide`
+  - `template`
+  - `occurrence`
+- `entity_id`
+- `fact_key`
+- `fact_value_json`
+- `claim_role`
+  - `anchor`
+  - `support`
+  - `status_delta`
+  - `template_hint`
+  - `guide_profile_hint`
+- `confidence`
+- `source_id`
+- `message_id`
+- `observed_at`
+- `last_confirmed_at`
 
 #### `guide_occurrence_source`
 
@@ -227,9 +291,27 @@ MVP считается успешным, если в тот же день пос
    - только по prefiltered items;
    - output: `ignore | announce_occurrence | status_update | template_signal`.
 5. `Server import`
-   - occurrence merge;
+   - profile/template/occurrence match + merge;
    - digest candidate extraction;
    - stats + admin report.
+
+### Текстовая стратегия MVP
+
+MVP не делает long-form guide pages и template pages, но и не ограничивается хранением “только title и одна строка”.
+
+Что генерируется в MVP:
+
+- `occurrence.canonical_title`
+- `occurrence.summary_one_liner`
+- optional `occurrence.digest_blurb`
+
+Что уже копится в MVP как факты:
+
+- occurrence logistics and status;
+- template hints и recurring anchors;
+- guide profile claims, если они явно grounded в постах/OCR.
+
+Иначе говоря, digest family оперируют базовыми информационными единицами, но underneath storage уже готов к следующей итерации.
 
 ## 6. Scan modes
 
@@ -242,7 +324,8 @@ MVP должен быть **двухрежимным**.
 - находить новые occurrences;
 - обновлять полноту карточек;
 - находить template hints;
-- собирать cover-image и summary.
+- собирать guide/profile signals;
+- собирать cover-image и краткие тексты.
 
 Поведение:
 
