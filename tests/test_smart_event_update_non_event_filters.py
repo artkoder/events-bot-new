@@ -206,6 +206,64 @@ def test_upcoming_school_game_is_not_flagged_as_completed_event_report() -> None
     assert su._looks_like_completed_event_report_not_event(title, text, candidate=candidate) is False
 
 
+def test_completed_event_report_with_next_show_is_not_flagged() -> None:
+    title = "Мысли мудрых людей на каждый день"
+    text = (
+        "«Мысли мудрых людей на каждый день»👏👏👏 Премьера. День 2.\n"
+        "Спасибо всей команде спектакля, театру и нашим любимым зрителям❤️\n"
+        "Следующий показ будет 13 января."
+    )
+    candidate = su.EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-132625599_15632",
+        source_text=text,
+        raw_excerpt="Премьера прошла, следующий показ 13 января.",
+        title=title,
+        date="2026-01-13",
+        city="Калининград",
+    )
+    assert su._looks_like_completed_event_report_not_event(title, text, candidate=candidate) is False
+
+
+def test_completed_event_report_with_next_workshop_is_not_flagged() -> None:
+    title = "Мастер-класс «лошадка»"
+    text = (
+        "🐎🎠Иго-го! Мастер-класс \"лошадка\" состоялся👍\n"
+        "В следующий раз встречаемся 6 января на мастер-классе \"ангел\".\n"
+        "✍️Запись - Информационно-туристический центр Светлогорска."
+    )
+    candidate = su.EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-195754292_10555",
+        source_text=text,
+        raw_excerpt="Мастер-класс состоялся, следующий пройдет 6 января.",
+        title=title,
+        date="2026-01-06",
+        city="Светлогорск",
+    )
+    assert su._looks_like_completed_event_report_not_event(title, text, candidate=candidate) is False
+
+
+def test_completed_event_report_with_repeat_show_is_not_flagged() -> None:
+    title = "Снегурочка"
+    text = (
+        "В этот субботний вечер в Музыкальном театре вновь отгремела \"Снегурочка\".\n"
+        "Спасибо!\n"
+        "\"Снегурочка\" прощается с вами, но ненадолго.\n"
+        "27 и 28 февраля вас вновь ждет встреча с героями пьесы."
+    )
+    candidate = su.EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-131136967_20613",
+        source_text=text,
+        raw_excerpt="Спектакль прошел, следующий показ 27 и 28 февраля.",
+        title=title,
+        date="2026-02-27",
+        city="Калининград",
+    )
+    assert su._looks_like_completed_event_report_not_event(title, text, candidate=candidate) is False
+
+
 def test_real_lecture_is_not_flagged_as_non_event_notice() -> None:
     title = "Лекция об Алексее Леонове"
     text = "26 февраля состоится лекция о жизни и пути Алексея Леонова в Доме китобоя."

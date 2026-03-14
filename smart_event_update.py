@@ -3254,6 +3254,17 @@ _COMPLETED_EVENT_REPORT_KEEP_RE = re.compile(
     r"купить\b"
     r")\b"
 )
+_COMPLETED_EVENT_REPORT_CONTINUATION_RE = re.compile(
+    r"(?iu)\b("
+    r"следующ\w+\s+(?:показ|встреча|игра|спектакл\w*|концерт\w*|занят\w*|лекци\w*|"
+    r"мастер-?класс\w*|программ\w*)(?:\s+(?:будет|состоится|пройд[её]т))?|"
+    r"в\s+следующ\w+\s+раз\s+(?:встречаемся|увидимся|жд[её]м)|"
+    r"(?:вас\s+)?вновь\s+жд[её]т\s+(?:встреча|показ|спектакл\w*|концерт\w*|игр\w*|"
+    r"занят\w*|лекци\w*|мастер-?класс\w*|программ\w*)|"
+    r"повтор(?:ный)?\s+(?:показ|спектакл\w*|концерт\w*|занят\w*|лекци\w*|"
+    r"мастер-?класс\w*|игр\w*|мероприяти\w*|программ\w*)"
+    r")\b"
+)
 _COMPLETED_EVENT_REPORT_MARKERS = (
     re.compile(r"(?iu)\b(?:встреча|игра|урок|лекция|концерт|экскурсия|мероприятие|мастер-?класс)\s+прош(?:ел|ла|ло|ли)\b"),
     re.compile(r"(?iu)\b(?:прош(?:ел|ла|ло|ли)|состоял(?:ся|ась|ось|ись))\b"),
@@ -3500,6 +3511,8 @@ def _looks_like_completed_event_report_not_event(
         return False
     low = combined.casefold()
     if _COMPLETED_EVENT_REPORT_KEEP_RE.search(low):
+        return False
+    if _COMPLETED_EVENT_REPORT_CONTINUATION_RE.search(low):
         return False
     if candidate is not None:
         time_raw = str(getattr(candidate, "time", "") or "").strip().replace(".", ":")
