@@ -122,6 +122,9 @@ async def test_split_month_until_ok_strips_details_when_needed(tmp_path, monkeyp
         *,
         include_ics=True,
         include_details=True,
+        page_number=1,
+        first_date=None,
+        last_date=None,
     ):
         combos.append((include_ics, include_details))
         result = await original_build(
@@ -133,6 +136,9 @@ async def test_split_month_until_ok_strips_details_when_needed(tmp_path, monkeyp
             size_limit=size_limit,
             include_ics=include_ics,
             include_details=include_details,
+            page_number=page_number,
+            first_date=first_date,
+            last_date=last_date,
         )
         if include_ics or include_details:
             raise m.TelegraphException("CONTENT_TOO_BIG")

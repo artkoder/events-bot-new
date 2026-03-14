@@ -842,6 +842,17 @@ class Database:
 
             await conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS monthexhibitionspage(
+                    month TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    content_hash TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS weekendpage(
                     start TEXT PRIMARY KEY,
                     url TEXT NOT NULL,

@@ -155,6 +155,139 @@ async def test_same_post_longrun_exact_title_merges_same_source_time_noise(
 
 
 @pytest.mark.asyncio
+async def test_same_post_longrun_exact_title_survives_time_filtered_shortlist(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    source_url = "https://vk.com/wall-152679358_23836"
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="Женственность через века",
+                date="2026-03-05",
+                time="12:00",
+                end_date="2026-06-05",
+                location_name="Информационно-туристический центр",
+                city="Черняховск",
+                event_type="выставка",
+                source_text="Выставка работает до 5 июня. Экскурсии в 12:00 и 15:00.",
+                source_post_url=source_url,
+                source_vk_post_url=source_url,
+            )
+        )
+        session.add(
+            _base_event(
+                id=2,
+                title="Другая выставка",
+                date="2026-03-05",
+                time="15:00",
+                location_name="Информационно-туристический центр",
+                city="Черняховск",
+                event_type="выставка",
+                source_text="Отвлекающая выставка на тот же слот.",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url=source_url,
+        source_text="Выставка работает до 5 июня. Экскурсии в 12:00 и 15:00.",
+        raw_excerpt="Экскурсия по выставке.",
+        title="Женственность через века",
+        date="2026-03-05",
+        time="15:00",
+        end_date="2026-06-05",
+        location_name="Информационно-туристический центр",
+        city="Черняховск",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_source_longrun_exact_title_merges_later_in_period_mention(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    museum = "Музей Изобразительных искусств, Ленинский проспект 83, Калининград"
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="Путешествие Матрешки",
+                date="2026-03-05",
+                time="",
+                end_date="2026-04-05",
+                location_name=museum,
+                location_address="Ленинский проспект 83",
+                city="Калининград",
+                event_type="выставка",
+                source_text="Выставка «Путешествие Матрешки» работает по 5 апреля.",
+                source_post_url="https://vk.com/wall-9118984_23492",
+                source_vk_post_url="https://vk.com/wall-9118984_23492",
+            )
+        )
+        session.add(
+            _base_event(
+                id=2,
+                title="Другая выставка в музее",
+                date="2026-03-10",
+                time="",
+                end_date="2026-04-10",
+                location_name=museum,
+                city="Калининград",
+                event_type="выставка",
+                source_text="Другая выставка в музее.",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/kaliningradartmuseum/7748",
+        source_text=(
+            "Благотворительная выставка «Путешествие Матрешки» продолжается. "
+            "Красны девицы гостят в музее до 5 апреля."
+        ),
+        raw_excerpt="Выставка в музее до 5 апреля.",
+        title="Путешествие Матрешки",
+        date="2026-03-10",
+        time="",
+        end_date="2026-04-05",
+        location_name="Музей",
+        city="Калининград",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+    async with db.get_session() as session:
+        source_row = (
+            await session.execute(
+                select(EventSource).where(
+                    EventSource.source_url == "https://t.me/kaliningradartmuseum/7748"
+                )
+            )
+        ).scalar_one()
+        assert source_row.event_id == 1
+
+
+@pytest.mark.asyncio
 async def test_same_source_anchor_message_id_merges_without_event_source_row(
     tmp_path, monkeypatch
 ):

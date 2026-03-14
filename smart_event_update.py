@@ -8192,6 +8192,59 @@ def _deterministic_same_post_longrun_exact_title_match(
     return None
 
 
+def _event_type_is_exhibition(value: str | None) -> bool:
+    return str(value or "").strip().casefold() == "выставка"
+
+
+def _deterministic_longrun_exhibition_exact_title_match(
+    candidate: EventCandidate,
+    events: Sequence[Event],
+) -> Event | None:
+    cand_title = _normalize_title_for_match(candidate.title)
+    cand_start, cand_end = _candidate_date_range(candidate)
+    if not cand_title or not cand_start or not cand_end or cand_start == cand_end:
+        return None
+    if not _event_type_is_exhibition(candidate.event_type):
+        return None
+
+    cand_end_iso = str(candidate.end_date or "").strip() or None
+    cand_time_anchor = _candidate_anchor_time(candidate, is_canonical_site=False)
+
+    matches: list[Event] = []
+    for ev in events:
+        if not getattr(ev, "id", None):
+            continue
+        if not _event_type_is_exhibition(getattr(ev, "event_type", None)):
+            continue
+        if _normalize_title_for_match(getattr(ev, "title", None)) != cand_title:
+            continue
+        ev_start, ev_end = _event_date_range(ev)
+        if not _ranges_overlap(cand_start, cand_end, ev_start, ev_end):
+            continue
+        ev_end_iso = str(getattr(ev, "end_date", "") or "").strip() or None
+        if cand_end_iso and ev_end_iso and cand_end_iso != ev_end_iso:
+            continue
+        same_source = _event_has_source_url_hint(ev, candidate.source_url)
+        if candidate.location_name and getattr(ev, "location_name", None):
+            if not same_source and not _event_candidate_location_matches(ev, candidate):
+                continue
+        elif not same_source:
+            continue
+        if (not same_source) and _has_explicit_time_conflict(cand_time_anchor, _event_anchor_time(ev)):
+            continue
+        matches.append(ev)
+
+    if len(matches) == 1:
+        return matches[0]
+    if matches and cand_end_iso:
+        same_end = {
+            str(getattr(ev, "end_date", "") or "").strip() or None for ev in matches
+        }
+        if len(same_end) == 1:
+            return _pick_best_duplicate_event(matches)
+    return None
+
+
 def _deterministic_ticket_source_anchor_match(
     candidate: EventCandidate,
     events: Sequence[Event],
@@ -9536,6 +9589,7 @@ async def _smart_event_update_impl(
 
     is_canonical_site = str(candidate.source_type or "").startswith("parser:")
     city_noise_rescued = False
+    longrun_exhibition_match: Event | None = None
     if (not anchor_forced) and (not shortlist):
         city_noise_match, city_noise_reason = await _match_existing_event_by_city_noise_rescue(
             db,
@@ -9549,6 +9603,19 @@ async def _smart_event_update_impl(
                 "smart_update.shortlist rescue=%s event_id=%s source_type=%s source_url=%s",
                 city_noise_reason,
                 getattr(city_noise_match, "id", None),
+                candidate.source_type,
+                candidate.source_url,
+            )
+
+    if (not anchor_forced) and shortlist:
+        longrun_exhibition_match = _deterministic_longrun_exhibition_exact_title_match(
+            candidate,
+            shortlist,
+        )
+        if longrun_exhibition_match is not None:
+            logger.info(
+                "smart_update.shortlist longrun_exhibition_match event_id=%s source_type=%s source_url=%s",
+                getattr(longrun_exhibition_match, "id", None),
                 candidate.source_type,
                 candidate.source_url,
             )
@@ -9644,6 +9711,13 @@ async def _smart_event_update_impl(
         if anchor_forced:
             match_event = shortlist[0]
             match_reason = "anchor_forced"
+        elif longrun_exhibition_match is not None:
+            match_event = longrun_exhibition_match
+            match_reason = "deterministic_longrun_exhibition_exact_title"
+            logger.info(
+                "smart_update.match type=deterministic_longrun_exhibition_exact_title event_id=%s",
+                getattr(match_event, "id", None),
+            )
         elif len(shortlist) == 1 and _single_candidate_auto_match_ok(
             candidate,
             shortlist[0],

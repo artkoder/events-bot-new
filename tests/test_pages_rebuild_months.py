@@ -6,7 +6,7 @@ import pytest
 
 import main
 from db import Database
-from models import Event, MonthPage
+from models import Event, MonthPage, MonthPagePart
 
 
 @pytest.mark.asyncio
@@ -232,7 +232,7 @@ async def test_pages_rebuild_split_keeps_day_boundaries(tmp_path, monkeypatch):
                 )
         await session.commit()
 
-    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 500)
+    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 2200)
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
     class DummyTelegraph:
@@ -279,24 +279,108 @@ async def test_pages_rebuild_split_keeps_day_boundaries(tmp_path, monkeypatch):
 
     async with db.get_session() as session:
         page = await session.get(MonthPage, month)
+        parts = (
+            await session.execute(
+                main.select(MonthPagePart)
+                .where(MonthPagePart.month == month)
+                .order_by(MonthPagePart.part_number)
+            )
+        ).scalars().all()
 
     assert page is not None
-    assert page.path and page.path2
-    assert page.path in html_by_path
-    assert page.path2 in html_by_path
+    paths = [page.path] + [part.path for part in parts]
+    assert all(path in html_by_path for path in paths if path)
 
     def days_from_html(html: str) -> set[str]:
         return set(re.findall(r"<!--DAY:(\d{4}-\d{2}-\d{2}) START-->", html))
 
-    days1 = days_from_html(html_by_path[page.path])
-    days2 = days_from_html(html_by_path[page.path2])
-
     expected_days = {(base_day + timedelta(days=i)).isoformat() for i in range(3)}
+    collected: set[str] = set()
 
-    assert days1
-    assert days2
-    assert days1.isdisjoint(days2)
-    assert days1 | days2 == expected_days
+    for path in paths:
+        assert path
+        page_days = days_from_html(html_by_path[path])
+        assert page_days
+        assert collected.isdisjoint(page_days)
+        collected |= page_days
+
+    assert collected == expected_days
+
+
+@pytest.mark.asyncio
+async def test_split_month_until_ok_splits_exhibitions(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    month = "2025-10"
+
+    async with db.get_session() as session:
+        session.add(MonthPage(month=month, url="", path=""))
+        await session.commit()
+
+    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 300)
+
+    async def fake_build_month_page_content(
+        db_obj,
+        month_str,
+        events_list,
+        exhibitions_list,
+        continuation_url=None,
+        size_limit=None,
+        *,
+        include_ics=True,
+        include_details=True,
+        page_number=1,
+        first_date=None,
+        last_date=None,
+    ):
+        payload = "x" * (len(events_list) * 60 + len(exhibitions_list) * 120)
+        if continuation_url:
+            payload += "c" * 20
+        return (f"Title {page_number}", [{"tag": "p", "children": [payload]}], len(payload))
+
+    monkeypatch.setattr(main, "build_month_page_content", fake_build_month_page_content)
+
+    html_by_path: dict[str, str] = {}
+
+    async def fake_create_page(tg, *args, caller="event_pipeline", **kwargs):
+        html_content = kwargs.get("html_content") or kwargs.get("content")
+        path = f"path{len(html_by_path) + 1}"
+        if html_content is not None:
+            html_by_path[path] = html_content
+        return {"url": f"https://telegra.ph/{path}", "path": path}
+
+    async def fake_edit_page(
+        tg, path, *args, caller="event_pipeline", **kwargs
+    ):
+        html_content = kwargs.get("html_content") or kwargs.get("content")
+        if html_content is not None:
+            html_by_path[path] = html_content
+        return {"url": f"https://telegra.ph/{path}", "path": path}
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
+
+    exhibitions = [
+        Event(
+            title=f"Exhibition {idx}",
+            description="D",
+            date=f"{month}-01",
+            end_date=f"{month}-30",
+            time="10:00",
+            location_name="Hall",
+            source_text="src",
+            event_type="выставка",
+        )
+        for idx in range(5)
+    ]
+
+    async with db.get_session() as session:
+        page_obj = await session.get(MonthPage, month)
+
+    await main.split_month_until_ok(db, object(), page_obj, month, [], exhibitions, "<nav>links</nav>")
+
+    assert len(html_by_path) == 3
+    assert all(len(html.encode()) <= main.TELEGRAPH_LIMIT for html in html_by_path.values())
 
 
 @pytest.mark.asyncio
@@ -402,4 +486,3 @@ async def test_month_nav_update_falls_back_to_full_rebuild(tmp_path, monkeypatch
         page = await session.get(MonthPage, month)
 
     assert page.content_hash == main.content_hash(edit_calls[-1]["html"])
-

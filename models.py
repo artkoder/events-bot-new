@@ -799,6 +799,14 @@ class MonthPagePart(SQLModel, table=True):
     last_date: Optional[str] = None   # Last event date on this page (YYYY-MM-DD)
 
 
+class MonthExhibitionsPage(SQLModel, table=True):
+    __table_args__ = {"extend_existing": True}
+    month: str = Field(primary_key=True)
+    url: str
+    path: str
+    content_hash: Optional[str] = None
+
+
 class WeekendPage(SQLModel, table=True):
     __table_args__ = {"extend_existing": True}
     start: str = Field(primary_key=True)

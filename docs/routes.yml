@@ -40,6 +40,10 @@ sections:
   backlog:
     index: docs/backlog/README.md
     features:
+      event_static_pages: docs/backlog/features/static-event-pages/README.md
+      guide_excursions_casebook: docs/backlog/features/guide-excursions-monitoring/casebook.md
+      guide_excursions_mvp: docs/backlog/features/guide-excursions-monitoring/mvp.md
+      guide_excursions_monitoring: docs/backlog/features/guide-excursions-monitoring/README.md
       telegram_monitoring: docs/backlog/features/telegram-monitoring/README.md
       telegram_monitoring_videos: docs/backlog/features/telegram-monitoring-videos/README.md
       smart_event_update: docs/backlog/features/smart-event-update/README.md
@@ -64,6 +68,7 @@ features:
   crumple_video:
     status: implemented
     docs: docs/features/crumple-video/README.md
+    tasks: docs/features/crumple-video/tasks/README.md
     entrypoints:
       - video_announce/scenario.py
       - kaggle/execute_crumple_test.py

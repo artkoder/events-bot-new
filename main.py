@@ -279,6 +279,7 @@ from models import (
     EventPoster,
     JobOutbox,
     MonthPagePart,
+    MonthExhibitionsPage,
     JobTask,
     JobStatus,
     OcrUsage,
@@ -15192,6 +15193,8 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
+        prev_telegraph_url = str(getattr(ev, "telegraph_url", "") or "").strip()
+        prev_telegraph_path = str(getattr(ev, "telegraph_path", "") or "").strip()
         from models import EventMediaAsset, EventPoster, EventSource, EventSourceFact
         # Backfill legacy single-source fields into event_source so Telegraph footer
         # shows a meaningful "Источников: N" even for older events.
@@ -15840,9 +15843,24 @@ async def update_telegraph_event_page(
         session.add(ev)
         await session.commit()
         url = ev.telegraph_url
+        path = ev.telegraph_path
 
     # Month/weekend pages are updated via debounced JobOutbox tasks (see schedule_event_update_tasks).
     logline("TG-EVENT", event_id, "done", url=url)
+
+    telegraph_ref_changed = (
+        prev_telegraph_url != str(url or "").strip()
+        or prev_telegraph_path != str(path or "").strip()
+    )
+    if telegraph_ref_changed:
+        try:
+            await update_month_pages_for(event_id, db, bot)
+        except Exception:
+            logging.warning(
+                "telegraph: failed to refresh month pages after event %s telegraph update",
+                event_id,
+                exc_info=True,
+            )
 
     # Optional warm-up: trigger Telegram web preview generation for the Telegraph URL.
     #
@@ -16007,6 +16025,7 @@ async def optimize_month_chunks(
     events: list[Event],
     exhibitions: list[Event],  # Usually put on the last page
     nav_block: str,
+    exhibitions_page_url: str | None = None,
 ) -> tuple[list[tuple[list[Event], list[Event]]], bool, bool]:
     """
     Split events into chunks that fit into Telegraph pages.
@@ -16016,114 +16035,170 @@ async def optimize_month_chunks(
     """
     from telegraph.utils import nodes_to_html
 
+    async def render_chunk_size(
+        chunk_events: list[Event],
+        chunk_exhibitions: list[Event],
+        *,
+        page_num: int,
+        continuation_url: str | None,
+        inc_ics: bool,
+        inc_det: bool,
+    ) -> int:
+        p_first_date = None
+        p_last_date = None
+        if chunk_events:
+            try:
+                p_first_date = parse_iso_date(chunk_events[0].date)
+                p_last_date = parse_iso_date(chunk_events[-1].date)
+            except Exception:
+                p_first_date = None
+                p_last_date = None
+
+        build_kwargs = {
+            "include_ics": inc_ics,
+            "include_details": inc_det,
+            "continuation_url": continuation_url,
+            "page_number": page_num,
+            "first_date": p_first_date,
+            "last_date": p_last_date,
+        }
+        if exhibitions_page_url:
+            build_kwargs["exhibitions_page_url"] = exhibitions_page_url
+        _, content, _ = await build_month_page_content(
+            db,
+            month,
+            chunk_events,
+            chunk_exhibitions,
+            **build_kwargs,
+        )
+        html = unescape_html_comments(nodes_to_html(content))
+        html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
+        return len(html.encode())
+
     async def make_chunks(inc_ics: bool, inc_det: bool) -> list[tuple[list[Event], list[Event]]]:
         chunks_list = []
         rem_events = events[:]
-        # We only attach exhibitions to the very last chunk of the sequence.
-        # However, if we split, we might have multiple chunks.
-        # Strategy: Keep exhibitions for the end.
-        
-        while rem_events or exhibitions:
+        rem_exhibitions = exhibitions[:]
+
+        while rem_events or rem_exhibitions:
             page_num = len(chunks_list) + 1
-            
-            # Case 1: Try fitting EVERYTHING remaining (events + exhibitions)
-            # This is the "Final Page" scenario.
-            title, content, _ = await build_month_page_content(
-                db, month, rem_events, exhibitions,
-                include_ics=inc_ics, include_details=inc_det,
-                continuation_url=None, # Last page has no continuation
-                page_number=page_num
+
+            # Try fitting everything remaining on the final page.
+            total_size = await render_chunk_size(
+                rem_events,
+                rem_exhibitions,
+                page_num=page_num,
+                continuation_url=None,
+                inc_ics=inc_ics,
+                inc_det=inc_det,
             )
-            html = unescape_html_comments(nodes_to_html(content))
-            html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
-            
-            if len(html.encode()) <= TELEGRAPH_LIMIT:
-                chunks_list.append((rem_events, exhibitions))
-                logging.info("optimize_month_chunks: Case 1 success. Appended chunk with events=%d exhibitions=%d", len(rem_events), len(exhibitions))
+            if total_size <= TELEGRAPH_LIMIT:
+                chunks_list.append((rem_events, rem_exhibitions))
+                logging.info(
+                    "optimize_month_chunks: final chunk fits events=%d exhibitions=%d",
+                    len(rem_events),
+                    len(rem_exhibitions),
+                )
                 return chunks_list
 
-            # Case 2: Cannot fit all. Must split.
-            # We assume exhibitions go to the LAST page, so current intermediate page will have NO exhibitions.
-            # Unless we have NO events left? Then we must split exhibitions (not implemented, force fit).
-            
             if not rem_events:
-                # Only exhibitions left.
-                if exhibitions:
-                     logging.warning("optimize_month_chunks: Exhibitions remaining, forcing new page.")
-                     chunks_list.append(([], exhibitions))
-                else:
-                     logging.info("optimize_month_chunks: No events and no exhibitions left.")
-                return chunks_list
+                logging.info(
+                    "optimize_month_chunks: splitting exhibitions. Remaining=%d",
+                    len(rem_exhibitions),
+                )
+                low = 1
+                high = len(rem_exhibitions)
+                best_k = 1
+
+                while low <= high:
+                    mid = (low + high) // 2
+                    size_mid = await render_chunk_size(
+                        [],
+                        rem_exhibitions[:mid],
+                        page_num=page_num,
+                        continuation_url="x",
+                        inc_ics=inc_ics,
+                        inc_det=inc_det,
+                    )
+                    if size_mid <= TELEGRAPH_LIMIT:
+                        best_k = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+
+                chunks_list.append(([], rem_exhibitions[:best_k]))
+                rem_exhibitions = rem_exhibitions[best_k:]
+                continue
 
             logging.info("optimize_month_chunks: Splitting. Events left: %d", len(rem_events))
-            # Binary search for max events for this intermediate page
             low = 1
             high = len(rem_events)
             best_k = 1
-            
+
             while low <= high:
                 mid = (low + high) // 2
-                # Intermediate page: No exhibitions, YES continuation link
-                title, content, _ = await build_month_page_content(
-                    db, month, rem_events[:mid], [],
-                    include_ics=inc_ics, include_details=inc_det,
-                    continuation_url="x", # Placeholder for size estimation
-                    page_number=page_num
+                size_mid = await render_chunk_size(
+                    rem_events[:mid],
+                    [],
+                    page_num=page_num,
+                    continuation_url="x",
+                    inc_ics=inc_ics,
+                    inc_det=inc_det,
                 )
-                html = unescape_html_comments(nodes_to_html(content))
-                html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
-                
-                if len(html.encode()) <= TELEGRAPH_LIMIT:
+                if size_mid <= TELEGRAPH_LIMIT:
                     best_k = mid
                     low = mid + 1
                 else:
                     high = mid - 1
-            
-            # ATOMIC DATE SPLIT check
-            # We have best_k events.
-            # Check if we are splitting in the middle of a date.
-            # Condition: We are taking 'best_k', so the next event is at index 'best_k'.
-            # If best_k < len(rem_events) (meaning we haven't taken all),
-            # check if rem_events[best_k-1].date == rem_events[best_k].date
-            
+
             if best_k < len(rem_events):
                 last_included_date = rem_events[best_k - 1].date
                 first_excluded_date = rem_events[best_k].date
-                
                 if last_included_date == first_excluded_date:
                     logging.info("Atomic Split: Date %s cut at %d. Backtracking to prevent split.", last_included_date, best_k)
-                    
-                    # Backtrack best_k until date changes or we hit 0
                     original_k = best_k
                     while best_k > 0 and rem_events[best_k - 1].date == last_included_date:
                         best_k -= 1
-                    
                     if best_k == 0:
                         logging.warning("Atomic Split: Single date %s (%d events) too big to fit atomically. Forcing split at %d.", 
                                         last_included_date, len(rem_events), original_k)
-                        best_k = original_k # Revert to greedy split
+                        best_k = original_k
                     else:
                         logging.info("Atomic Split: Adjusted split to %d (End of %s)", best_k, rem_events[best_k-1].date)
 
             chunks_list.append((rem_events[:best_k], []))
             rem_events = rem_events[best_k:]
-            
+
         return chunks_list
 
-    # 1. Try Default Mode
-    res_default = await make_chunks(True, True)
-    
-    # If it fits in 1 or 2 pages, perfect.
-    if len(res_default) <= 2:
-        return res_default, True, True
+    successful: list[tuple[list[tuple[list[Event], list[Event]]], bool, bool]] = []
+    for inc_ics, inc_det in ((True, True), (False, True), (False, False)):
+        try:
+            chunks = await make_chunks(inc_ics, inc_det)
+        except TelegraphException as exc:
+            logging.warning(
+                "optimize_month_chunks mode failed month=%s ics=%s details=%s err=%s",
+                month,
+                inc_ics,
+                inc_det,
+                exc,
+            )
+            continue
+        successful.append((chunks, inc_ics, inc_det))
+        if len(chunks) <= 2:
+            return chunks, inc_ics, inc_det
 
-    # 2. Try Compact Mode (no ICS)
-    # Requirement: "If ... requires 3 or more pages, use compact" (implied preference for compact if big)
-    res_compact = await make_chunks(False, True)
-    
-    # If compact mode reduces pages OR we are just complying with "many pages = compact" rule:
-    # We use compact mode if default yielded > 2 pages.
-    return res_compact, False, True
+    if not successful:
+        raise TelegraphException("CONTENT_TOO_BIG")
+
+    min_pages = min(len(chunks) for chunks, _, _ in successful)
+    candidates = [
+        item for item in successful
+        if len(item[0]) == min_pages
+    ]
+    candidates.sort(key=lambda item: (int(item[1]) + int(item[2]),))
+    chunks, inc_ics, inc_det = candidates[0]
+    return chunks, inc_ics, inc_det
 
 
 async def split_month_until_ok(
@@ -16134,6 +16209,7 @@ async def split_month_until_ok(
     events: list[Event],
     exhibitions: list[Event],
     nav_block: str,
+    exhibitions_page_url: str | None = None,
 ) -> None:
     from telegraph.utils import nodes_to_html
 
@@ -16143,7 +16219,7 @@ async def split_month_until_ok(
 
     # 1. Calculate optimized chunks
     chunks, include_ics, include_details = await optimize_month_chunks(
-        db, month, events, exhibitions, nav_block
+        db, month, events, exhibitions, nav_block, exhibitions_page_url
     )
 
     # (p1 lookup block removed)
@@ -16186,14 +16262,22 @@ async def split_month_until_ok(
              except:
                  pass
 
+        build_kwargs = {
+            "include_ics": include_ics,
+            "include_details": include_details,
+            "continuation_url": next_url,
+            "page_number": i,
+            "first_date": p_first_date,
+            "last_date": p_last_date,
+        }
+        if exhibitions_page_url:
+            build_kwargs["exhibitions_page_url"] = exhibitions_page_url
         title, content, _ = await build_month_page_content(
-            db, month, chunk_events, chunk_exhibitions,
-            include_ics=include_ics,
-            include_details=include_details,
-            continuation_url=next_url,
-            page_number=i,
-            first_date=p_first_date,
-            last_date=p_last_date
+            db,
+            month,
+            chunk_events,
+            chunk_exhibitions,
+            **build_kwargs,
         )
         
         html_str = unescape_html_comments(nodes_to_html(content))
@@ -16663,9 +16747,23 @@ async def patch_month_page_for_date(
             )
             async with _page_locks[f"month:{month_key}"]:
                 events_m, exhibitions = await get_month_data(db, month_key)
+                exhibitions_page_url = await sync_month_exhibitions_page(
+                    db,
+                    telegraph,
+                    month_key,
+                    exhibitions,
+                )
+                page_exhibitions = [] if exhibitions_page_url else exhibitions
                 nav_block = await build_month_nav_block(db, month_key)
                 await split_month_until_ok(
-                    db, telegraph, page, month_key, events_m, exhibitions, nav_block
+                    db,
+                    telegraph,
+                    page,
+                    month_key,
+                    events_m,
+                    page_exhibitions,
+                    nav_block,
+                    exhibitions_page_url=exhibitions_page_url,
                 )
             logging.info(
                 "month_patch retry month=%s day=%s", month_key, d.isoformat()

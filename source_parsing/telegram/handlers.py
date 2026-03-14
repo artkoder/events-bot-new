@@ -929,6 +929,87 @@ def _location_matches(a: str | None, b: str | None) -> bool:
     return False
 
 
+_LOCATION_EXPLICIT_STOPWORDS = {
+    "город",
+    "городская",
+    "городской",
+    "областная",
+    "областной",
+    "центральная",
+    "центральной",
+    "информационно",
+    "туристический",
+    "туристического",
+    "пространство",
+    "площадка",
+    "выставочное",
+    "театр",
+    "музей",
+    "галерея",
+    "центр",
+    "замок",
+    "библиотека",
+    "библиотеке",
+    "им",
+}
+
+
+def _normalize_location_probe_text(text: str | None) -> str:
+    if not text:
+        return ""
+    raw = str(text).replace("ё", "е").lower()
+    raw = re.sub(r"[«»\"'()]", " ", raw)
+    raw = re.sub(r"[^\w\s]+", " ", raw, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _location_probe_tokens(text: str | None) -> set[str]:
+    norm = _normalize_location_probe_text(text)
+    if not norm:
+        return set()
+    out: set[str] = set()
+    for tok in norm.split():
+        if tok.isdigit():
+            out.add(tok)
+            continue
+        if len(tok) < 4:
+            continue
+        if tok in _LOCATION_EXPLICIT_STOPWORDS:
+            continue
+        out.add(tok)
+    return out
+
+
+def _source_text_explicitly_mentions_location(
+    source_text: str | None,
+    *,
+    location_name: str | None,
+    location_address: str | None,
+) -> bool:
+    source_norm = _normalize_location_probe_text(source_text)
+    if not source_norm:
+        return False
+
+    addr_norm = _normalize_location_probe_text(location_address)
+    if addr_norm and len(addr_norm) >= 5 and addr_norm in source_norm:
+        return True
+
+    name_norm = _normalize_location_probe_text(location_name)
+    if name_norm and len(name_norm) >= 10 and name_norm in source_norm:
+        return True
+
+    source_tokens = set(source_norm.split())
+    name_hits = _location_probe_tokens(location_name) & source_tokens
+    if len(name_hits) >= 2:
+        return True
+
+    addr_hits = _location_probe_tokens(location_address) & source_tokens
+    if name_hits and addr_hits:
+        return True
+
+    return False
+
+
 _SCHED_LINE_RE = re.compile(r"(^|\s)(\d{1,2})[./](\d{1,2})\s*\|", re.IGNORECASE)
 _SCHED_LINE_START_RE = re.compile(r"^\s*\d{1,2}[./]\d{1,2}\s*\|", re.IGNORECASE)
 _TIME_TOKEN_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
@@ -2925,19 +3006,6 @@ def _build_candidate(
     location_address = event_data.get("location_address")
     extracted_location_address = location_address
     location_overridden_by_default = False
-    if extracted_location and source.default_location and not _location_matches(
-        extracted_location, source.default_location
-    ):
-        logger.warning(
-            "telegram: location mismatch for @%s msg=%s extracted=%s default=%s",
-            username,
-            message_id,
-            extracted_location,
-            source.default_location,
-        )
-        location_name = source.default_location
-        location_address = None
-        location_overridden_by_default = True
     if not location_name and location_address:
         location_name, location_address = location_address, None
     extracted_city = event_data.get("city")
@@ -2952,21 +3020,6 @@ def _build_candidate(
             last_part = ""
         if last_part and not re.search(r"\d", last_part):
             default_city = _infer_city_from_location_string(location_name)
-    if default_city:
-        if extracted_city and str(extracted_city).strip().casefold() != str(default_city).strip().casefold():
-            logger.warning(
-                "telegram: city mismatch for @%s msg=%s extracted=%s default=%s",
-                username,
-                message_id,
-                extracted_city,
-                default_city,
-            )
-            city_overridden_by_default = True
-        city = default_city
-    else:
-        city = extracted_city or "Калининград"
-    if location_address:
-        location_address = strip_city_from_address(location_address, city)
     ticket_link = _coerce_url(event_data.get("ticket_link")) or _coerce_url(source.default_ticket_link)
     ticket_link_from_post_author = False
     ticket_price_min = _to_int(event_data.get("ticket_price_min"))
@@ -3102,6 +3155,68 @@ def _build_candidate(
                 title,
                 location_name,
             )
+
+    if extracted_location and source.default_location and not _location_matches(
+        extracted_location, source.default_location
+    ):
+        logger.warning(
+            "telegram: location mismatch for @%s msg=%s extracted=%s default=%s",
+            username,
+            message_id,
+            extracted_location,
+            source.default_location,
+        )
+        explicit_offsite = _source_text_explicitly_mentions_location(
+            message_text_s or event_source_text,
+            location_name=extracted_location,
+            location_address=extracted_location_address,
+        )
+        if explicit_offsite:
+            logger.info(
+                "telegram: keeping explicit extracted location over default for @%s msg=%s extracted=%s",
+                username,
+                message_id,
+                extracted_location,
+            )
+            location_name = extracted_location
+            location_address = extracted_location_address
+        else:
+            location_name = source.default_location
+            location_address = None
+            location_overridden_by_default = True
+
+    kept_explicit_location = bool(
+        extracted_location
+        and location_name
+        and str(extracted_location).strip().casefold()
+        == str(location_name).strip().casefold()
+        and source.default_location
+        and not _location_matches(extracted_location, source.default_location)
+    )
+
+    if default_city:
+        if (
+            extracted_city
+            and str(extracted_city).strip().casefold() != str(default_city).strip().casefold()
+        ):
+            logger.warning(
+                "telegram: city mismatch for @%s msg=%s extracted=%s default=%s",
+                username,
+                message_id,
+                extracted_city,
+                default_city,
+            )
+            if kept_explicit_location:
+                city = extracted_city
+            else:
+                city_overridden_by_default = True
+                city = default_city
+        else:
+            city = default_city
+    else:
+        city = extracted_city or "Калининград"
+    if location_address:
+        location_address = strip_city_from_address(location_address, city)
 
     # Extract a booking contact from the message when ticket_link is missing.
     if not ticket_link:
@@ -3343,6 +3458,7 @@ def _build_candidate(
             if extracted_location_address
             else None,
             "tg_location_overridden_by_default": bool(location_overridden_by_default),
+            "tg_location_kept_extracted": kept_explicit_location,
             "tg_city_overridden_by_default": bool(city_overridden_by_default),
             "tg_ticket_link_from_post_author": bool(ticket_link_from_post_author),
         }
