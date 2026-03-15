@@ -69,3 +69,71 @@ async def test_create_app_startup_waits_for_init(monkeypatch):
         main.db = prev_db
 
     assert called
+
+
+@pytest.mark.asyncio
+async def test_watch_add_event_worker_stall_restart_updates_global_timestamp(monkeypatch):
+    prev_ts = getattr(main, "_ADD_EVENT_LAST_DEQUEUE_TS", None)
+
+    class _Queue:
+        def qsize(self):
+            return 1
+
+    class _CancelledWorker:
+        def done(self):
+            return False
+
+        def cancelled(self):
+            return False
+
+        def cancel(self):
+            return None
+
+        def __await__(self):
+            async def _wait():
+                raise asyncio.CancelledError
+
+            return _wait().__await__()
+
+    class _RestartedWorker:
+        def done(self):
+            return False
+
+        def cancelled(self):
+            return False
+
+    class _DummyBot:
+        pass
+
+    created: list[object] = []
+
+    def fake_create_task(coro):
+        created.append(coro)
+        coro.close()
+        return _RestartedWorker()
+
+    sleep_calls = 0
+
+    async def fake_sleep(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        raise asyncio.CancelledError
+
+    fake_now = 1000.0
+    monkeypatch.setattr(main, "add_event_queue", _Queue())
+    monkeypatch.setattr(main._time, "monotonic", lambda: fake_now)
+    monkeypatch.setattr(main.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    app = {"add_event_worker": _CancelledWorker()}
+    main._ADD_EVENT_LAST_DEQUEUE_TS = fake_now - 1001
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._watch_add_event_worker(app, None, _DummyBot())
+
+    assert isinstance(app["add_event_worker"], _RestartedWorker)
+    assert main._ADD_EVENT_LAST_DEQUEUE_TS == fake_now
+    assert sleep_calls == 1
+    assert created
+
+    main._ADD_EVENT_LAST_DEQUEUE_TS = prev_ts

@@ -15,7 +15,7 @@ from html import escape, unescape
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
-from behave import given, when, then
+from behave import given, step, then, when
 
 logger = logging.getLogger("e2e.steps")
 
@@ -3026,7 +3026,21 @@ def step_click_inline_button(context, btn_text):
     async def _click():
         msg = context.last_response
         btn = find_button(msg, btn_text)
-        
+
+        if not btn:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=12)
+            for candidate in messages:
+                btn = find_button(candidate, btn_text)
+                if btn:
+                    msg = candidate
+                    context.last_response = candidate
+                    logger.info(
+                        "↺ Кнопка %r найдена в другом сообщении бота id=%s",
+                        btn_text,
+                        getattr(candidate, "id", None),
+                    )
+                    break
+
         if not btn:
             available = get_all_buttons(msg)
             raise AssertionError(
@@ -7645,6 +7659,82 @@ def _extract_recent_named_link(context, label: str, *, limit: int = 60) -> str |
         return None
 
     return run_async(context, _fetch())
+
+
+@step('я запоминаю верхнее сообщение в чате "{chat_ref}"')
+@given('я запоминаю верхнее сообщение в чате "{chat_ref}"')
+def step_remember_top_message_in_chat(context, chat_ref):
+    async def _remember():
+        try:
+            entity = await context.client.client.get_entity(chat_ref)
+            messages = await context.client.client.get_messages(entity, limit=1)
+            if not hasattr(context, "chat_baselines"):
+                context.chat_baselines = {}
+            context.chat_baselines[str(chat_ref)] = int(getattr(messages[0], "id", 0) or 0) if messages else 0
+        except Exception as exc:
+            raise AssertionError(f"Не удалось прочитать baseline для чата {chat_ref}: {type(exc).__name__}: {exc}") from exc
+    run_async(context, _remember())
+    logger.info("✓ Запомнили baseline для чата %s", chat_ref)
+
+
+@step('в чате "{chat_ref}" появилось новое сообщение с текстом "{text}"')
+@then('в чате "{chat_ref}" появилось новое сообщение с текстом "{text}"')
+def step_wait_new_message_in_chat(context, chat_ref, text):
+    async def _wait():
+        import asyncio
+
+        entity = await context.client.client.get_entity(chat_ref)
+        baseline_id = int(getattr(getattr(context, "chat_baselines", {}), "get", lambda _k, _d=0: 0)(str(chat_ref), 0) or 0)
+        timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview = []
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(entity, limit=20)
+            last_preview = [(m.text or "").replace("\n", " ")[:140] for m in messages[:8]]
+            for msg in messages:
+                mid = int(getattr(msg, "id", 0) or 0)
+                if mid <= baseline_id:
+                    continue
+                payload = (msg.text or msg.caption or "")
+                if payload and text.lower() in payload.lower():
+                    if not hasattr(context, "chat_baselines"):
+                        context.chat_baselines = {}
+                    context.chat_baselines[str(chat_ref)] = mid
+                    return
+            await asyncio.sleep(2.0)
+        raise AssertionError(
+            f"В чате {chat_ref} не найдено новое сообщение с текстом {text!r}. "
+            f"baseline_id={baseline_id}; recent={last_preview}"
+        )
+    run_async(context, _wait())
+    logger.info("✓ В чате %s появилось новое сообщение с текстом %r", chat_ref, text)
+
+
+@step('в чате "{chat_ref}" появилось новое медиа-сообщение')
+@then('в чате "{chat_ref}" появилось новое медиа-сообщение')
+def step_wait_new_media_message_in_chat(context, chat_ref):
+    async def _wait():
+        import asyncio
+
+        entity = await context.client.client.get_entity(chat_ref)
+        baseline_id = int(getattr(getattr(context, "chat_baselines", {}), "get", lambda _k, _d=0: 0)(str(chat_ref), 0) or 0)
+        timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
+        deadline = time.monotonic() + float(timeout_sec)
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(entity, limit=20)
+            for msg in messages:
+                mid = int(getattr(msg, "id", 0) or 0)
+                if mid <= baseline_id:
+                    continue
+                if getattr(msg, "media", None):
+                    if not hasattr(context, "chat_baselines"):
+                        context.chat_baselines = {}
+                    context.chat_baselines[str(chat_ref)] = mid
+                    return
+            await asyncio.sleep(2.0)
+        raise AssertionError(f"В чате {chat_ref} не найдено новое медиа-сообщение после baseline_id={baseline_id}")
+    run_async(context, _wait())
+    logger.info("✓ В чате %s появилось новое медиа-сообщение", chat_ref)
 
 
 def _fetch_festivals_index_from_db() -> str | None:

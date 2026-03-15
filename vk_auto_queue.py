@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence, Literal
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from ops_run import finish_ops_run, start_ops_run
 
@@ -18,6 +19,31 @@ import vk_review
 logger = logging.getLogger(__name__)
 
 _vk_auto_import_cancel_requests: set[tuple[int, int]] = set()
+
+
+async def _record_vk_auto_import_scheduler_skip(
+    db: Database,
+    *,
+    run_id: str | None,
+    reason: str,
+) -> None:
+    details = {
+        "run_id": run_id,
+        "skip_reason": str(reason or "").strip() or "unknown",
+    }
+    ops_run_id = await start_ops_run(
+        db,
+        kind="vk_auto_import",
+        trigger="scheduled",
+        operator_id=0,
+        details=details,
+    )
+    await finish_ops_run(
+        db,
+        run_id=ops_run_id,
+        status="skipped",
+        details=details,
+    )
 
 def _timings_enabled() -> bool:
     raw = (os.getenv("PIPELINE_TIMINGS") or "").strip().lower()
@@ -2221,14 +2247,22 @@ async def vk_auto_import_scheduler(
     """
     if os.getenv("ENABLE_VK_AUTO_IMPORT", "").strip().lower() not in {"1", "true", "yes"}:
         return
-    admin_chat = os.getenv("ADMIN_CHAT_ID")
-    if not admin_chat or not bot:
+    if not bot:
+        await _record_vk_auto_import_scheduler_skip(
+            db,
+            run_id=run_id,
+            reason="missing_bot",
+        )
         return
-    try:
-        chat_id = int(admin_chat)
-    except (TypeError, ValueError):
+    chat_id = await resolve_superadmin_chat_id(db)
+    if not chat_id:
+        await _record_vk_auto_import_scheduler_skip(
+            db,
+            run_id=run_id,
+            reason="missing_superadmin_chat",
+        )
         return
-    limit = int(os.getenv("VK_AUTO_IMPORT_LIMIT", "25") or "25")
+    limit = int(os.getenv("VK_AUTO_IMPORT_LIMIT", "15") or "15")
     await run_vk_auto_import(
         db,
         bot,

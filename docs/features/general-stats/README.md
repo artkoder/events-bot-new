@@ -26,8 +26,8 @@
 ### 1.2. Куда отправляется отчёт
 
 - **По расписанию**: отправляется в оба чата:
-  - операторский (`OPERATOR_CHAT_ID`)
-  - админский (`ADMIN_CHAT_ID`)
+  - операторский (`OPERATOR_CHAT_ID`), если задан
+  - чат superadmin из базы (`user.is_superadmin=1`); `ADMIN_CHAT_ID` используется только как legacy fallback, если superadmin ещё не зарегистрирован в БД
 - **Вручную** (`/general_stats`): отправляется **в тот чат**, откуда вызвана команда.
 
 ### 1.3. Права доступа
@@ -47,7 +47,7 @@
 Поведение:
 - `max_instances=1`, `coalesce=True`, `misfire_grace_time=30`
 - если `ENABLE_GENERAL_STATS!=1` — тихо не запускаем
-- если включено, но `ADMIN_CHAT_ID`/`OPERATOR_CHAT_ID` невалидны — логируем warning и отправляем в доступный чат (или пропускаем, если обоих нет).
+- если включено, но `OPERATOR_CHAT_ID` невалиден и chat superadmin не удалось получить ни из БД, ни из `ADMIN_CHAT_ID` fallback — логируем warning и пропускаем плановую отправку.
 
 ## 3) Что должно попасть в отчёт (метрики за `start_local..end_local`)
 
@@ -93,13 +93,15 @@
    - `messages_with_events = COUNT(*) WHERE events_extracted>0 OR events_imported>0`
    - `sources_with_events = COUNT(DISTINCT source_id) WHERE events_extracted>0 OR events_imported>0`
 
-Дополнительно `/general_stats` показывает итог Telegram monitoring по импортам из run-log:
-- `events_created` — сколько новых событий создал TG monitoring за окно отчёта;
-- `events_updated` — сколько существующих событий TG monitoring обновил/смерджил за окно отчёта.
+### 3.2.1. Guide excursions monitoring
 
-Эти числа берутся из `ops_run(kind='tg_monitoring').metrics_json`:
-- `events_created`
-- `events_merged` (в отчёте рендерится как `events_updated` для единообразия с остальными пайплайнами)
+Дополнительно `/general_stats` теперь показывает отдельный блок `Guide excursions`:
+
+- `sources_scanned` — `COUNT(DISTINCT source_id)` из `guide_monitor_post.last_scanned_at` в окне отчёта;
+- `posts_prefiltered` — сколько guide-постов прошло prefilter и были признаны потенциально экскурсионными;
+- `occurrences_new` — сколько новых `guide_occurrence` впервые появилось в окне отчёта;
+- `digest_published` — сколько выпусков `guide_digest_issue(status='published')` было отправлено;
+- `guide_monitoring runs` — список прогонов `ops_run(kind='guide_monitoring')`.
 
 ### 3.3. /parse (source parsing)
 
@@ -132,17 +134,6 @@
 
 14) **Из обновлённых — сколько имеет источников 2, 3, …** (Exact при наличии определения “обновлено”)  
     Источник: `event_source` → `sources_per_event = COUNT(*) GROUP BY event_id` и распределение по множеству обновлённых.
-
-Дополнительно `/general_stats` показывает coverage по источникам в двух срезах:
-- `source_share_period` — доля уникальных событий, которые были **созданы или обновлены** в окне отчёта, с разбивкой по `vk` / `telegram` / `/parse`;
-- `source_share_future_active` — доля всех **не-прошедших** событий (`date >= today` или `end_date >= today`, только `active`, без `silent`) с разбивкой по тем же группам.
-
-Группы источников:
-- `/parse` = `event_source.source_type LIKE 'parser:%'`
-- `telegram` = `event_source.source_type LIKE 'telegram%'` или legacy `tg`
-- `vk` = `event_source.source_type LIKE 'vk%'`
-
-Важно: это именно **coverage по event_id**, а не взаимоисключающее распределение. Одно событие может иметь несколько источников, поэтому суммы процентов могут быть больше `100%`.
 
 15) **Сколько событий было по неизвестным ранее городам/НП и каким** (Needs schema support)  
     Текущее состояние:
@@ -214,7 +205,7 @@
 - `/parse`: список источников + `new_added`/`updated`/`failed` по каждому
 - `/3di`: `events_considered`, `previews_rendered`, `duration_sec`
 - `festival_queue`: `limit`, `source_kind`, `processed/success/failed`, `duration_sec`
-- `tg_monitoring`: `sources_scanned`, `messages_processed`, `messages_with_events`, `events_imported`, `events_created`, `events_merged`
+- `tg_monitoring`: `sources_scanned`, `messages_processed`, `messages_with_events`, `events_imported`
 
 ## 6) Формат сообщения (рекомендация)
 
@@ -224,10 +215,16 @@
 2) VK (`vk_queue_added_period`, `vk_queue_parsed_period`, `vk_queue_unresolved_now` + автоимпорт метрики)  
 3) Telegram  
 4) `/parse` и `/3di` (список запусков с временем Kaliningrad)  
-5) События (created/updated + breakdown по кол-ву источников + source coverage по `vk/telegram//parse` за окно и по текущему future inventory)  
+5) События (created/updated + breakdown по кол-ву источников)  
 6) География (новые города)  
 7) Фестивали/очередь  
 8) Тех.метрики (Gemma, bucket size)
+
+Для блоков `vk_auto_import runs`, `tg_monitoring runs`, `/parse runs`, `/3di runs`:
+
+- каждая строка должна печатать `status=...` и `trigger=...` (`scheduled|manual|...`);
+- если запуск завершился как `skipped`, в строке нужно показывать `reason=...`;
+- для scheduler skip из-за общего heavy guard дополнительно показываем `blocked_by=...` (какая тяжёлая операция занимала слот).
 
 ## 7) /help
 

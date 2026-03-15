@@ -617,7 +617,6 @@ class EventSource(SQLModel, table=True):
     __table_args__ = (
         Index("ix_event_source_event", "event_id"),
         Index("ix_event_source_type_url", "source_type", "source_url"),
-        Index("ix_event_source_imported_at", "imported_at"),
         UniqueConstraint("event_id", "source_url", name="ux_event_source_event_url"),
     )
 
@@ -798,6 +797,14 @@ class MonthPagePart(SQLModel, table=True):
     content_hash: Optional[str] = None
     first_date: Optional[str] = None  # First event date on this page (YYYY-MM-DD)
     last_date: Optional[str] = None   # Last event date on this page (YYYY-MM-DD)
+
+
+class MonthExhibitionsPage(SQLModel, table=True):
+    __table_args__ = {"extend_existing": True}
+    month: str = Field(primary_key=True)
+    url: str
+    path: str
+    content_hash: Optional[str] = None
 
 
 class WeekendPage(SQLModel, table=True):

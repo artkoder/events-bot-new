@@ -4,6 +4,7 @@ import html
 import re
 import asyncio
 import time as _time
+from collections import defaultdict
 from datetime import date, timezone, datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Any, Sequence, List, Mapping, Optional, Dict, Tuple, Collection, Literal, Awaitable
@@ -13,7 +14,7 @@ from aiohttp import web
 from telegraph import Telegraph
 from markup import md_to_html, telegraph_br, linkify_for_telegraph
 
-from models import Event, EventSource, EventSourceFact, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User, TelegramSource
+from models import Event, EventSource, EventSourceFact, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, MonthExhibitionsPage, VkMissRecord, VkMissReviewSession, User, TelegramSource
 from source_parsing.telegram.commands import tg_monitor_router
 from poster_media import PosterMedia
 from db import Database
@@ -186,7 +187,7 @@ def event_to_nodes(
                 "tag": "figure",
                 "children": [{"tag": "img", "attrs": {"src": preview_url}, "children": []}]
             })
-        elif show_image and e.photo_urls:
+        elif show_image and not show_3d_only and e.photo_urls:
             # Fallback to first photo (only if show_image=True, not show_3d_only)
             first_url = e.photo_urls[0]
             if isinstance(first_url, str):
@@ -405,6 +406,146 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     return nodes
 
 
+def exhibition_compact_to_nodes(e: Event) -> list[dict]:
+    nodes = [{"tag": "h4", "children": exhibition_title_nodes(e)}]
+    loc = str(getattr(e, "location_name", None) or "").strip()
+    addr = str(getattr(e, "location_address", None) or "").strip()
+    city = str(getattr(e, "city", None) or "").strip()
+    if addr and city:
+        addr = strip_city_from_address(addr, city)
+    if addr:
+        loc = f"{loc}, {addr}" if loc else addr
+    if city:
+        loc = f"{loc}, #{city}" if loc else f"#{city}"
+
+    period = ""
+    if getattr(e, "end_date", None):
+        end = parse_iso_date(str(e.end_date).split("..", 1)[0].strip())
+        if end:
+            period = f"по {format_day_pretty(end)}"
+    summary = ", ".join(part for part in (period, loc) if part)
+    if summary:
+        nodes.append({"tag": "p", "children": [{"tag": "i", "children": [summary]}]})
+    nodes.extend(telegraph_br())
+    return nodes
+
+
+_EXHIBITION_DISPLAY_LOCATION_STOPWORDS = {
+    "калининград",
+    "черняховск",
+    "светлогорск",
+    "областной",
+    "областная",
+    "калининградский",
+    "калининградская",
+    "музей",
+    "галерея",
+    "центр",
+    "информационно",
+    "туристический",
+}
+
+
+def _normalize_exhibition_display_text(value: str | None) -> str:
+    if not value:
+        return ""
+    raw = str(value).replace("ё", "е").lower()
+    raw = re.sub(r"[«»\"'()]", " ", raw)
+    raw = re.sub(r"[^\w\s]+", " ", raw, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _normalize_exhibition_display_location(event: Event) -> str:
+    parts = [
+        str(getattr(event, "location_name", None) or "").strip(),
+        str(getattr(event, "location_address", None) or "").strip(),
+        str(getattr(event, "city", None) or "").strip(),
+    ]
+    return _normalize_exhibition_display_text(" ".join(part for part in parts if part))
+
+
+def _exhibition_display_location_tokens(value: str | None) -> set[str]:
+    norm = _normalize_exhibition_display_text(value)
+    if not norm:
+        return set()
+    out: set[str] = set()
+    for tok in norm.split():
+        if tok.isdigit():
+            out.add(tok)
+            continue
+        if len(tok) < 4:
+            continue
+        if tok in _EXHIBITION_DISPLAY_LOCATION_STOPWORDS:
+            continue
+        out.add(tok)
+    return out
+
+
+def _exhibitions_display_locations_match(left: Event, right: Event) -> bool:
+    loc_left = _normalize_exhibition_display_location(left)
+    loc_right = _normalize_exhibition_display_location(right)
+    name_left = _normalize_exhibition_display_text(getattr(left, "location_name", None))
+    name_right = _normalize_exhibition_display_text(getattr(right, "location_name", None))
+    if not loc_left or not loc_right:
+        return False
+    if loc_left == loc_right:
+        return True
+    if loc_left in loc_right or loc_right in loc_left:
+        return True
+    if name_left and name_right and (name_left in name_right or name_right in name_left):
+        return True
+    overlap = _exhibition_display_location_tokens(loc_left) & _exhibition_display_location_tokens(loc_right)
+    return len(overlap) >= 2
+
+
+def _exhibition_display_score(event: Event) -> tuple[int, int]:
+    score = 0
+    if (getattr(event, "telegraph_url", None) or "").strip():
+        score += 4
+    if (getattr(event, "location_address", None) or "").strip():
+        score += 3
+    score += min(len(_normalize_exhibition_display_location(event)), 60) // 15
+    if not str(getattr(event, "time", None) or "").strip():
+        score += 1
+    event_id = int(getattr(event, "id", 0) or 0)
+    return score, -event_id
+
+
+def dedupe_exhibitions_for_display(events: Sequence[Event]) -> list[Event]:
+    grouped: dict[tuple[str, str, str], list[Event]] = {}
+    for event in events:
+        key = (
+            str(getattr(event, "city", None) or "").strip().casefold(),
+            _normalize_exhibition_display_text(getattr(event, "title", None)),
+            str(getattr(event, "end_date", None) or "").strip(),
+        )
+        grouped.setdefault(key, []).append(event)
+
+    deduped: list[Event] = []
+    for key in sorted(grouped.keys()):
+        clusters: list[list[Event]] = []
+        for event in grouped[key]:
+            placed = False
+            for cluster in clusters:
+                if any(_exhibitions_display_locations_match(event, existing) for existing in cluster):
+                    cluster.append(event)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([event])
+        for cluster in clusters:
+            deduped.append(max(cluster, key=_exhibition_display_score))
+
+    deduped.sort(
+        key=lambda event: (
+            str(getattr(event, "date", None) or ""),
+            _normalize_exhibition_display_text(getattr(event, "title", None)),
+            int(getattr(event, "id", 0) or 0),
+        )
+    )
+    return deduped
+
+
 def add_day_sections(
     days: Iterable[date],
     by_day: dict[date, list[Event]],
@@ -532,6 +673,66 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     return events, exhibitions
 
 
+def month_exhibitions_page_threshold() -> int:
+    raw = (os.getenv("MONTH_EXHIBITIONS_PAGE_THRESHOLD") or "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value >= 0:
+                return value
+        except Exception:
+            pass
+    return 10
+
+
+def should_split_month_exhibitions_page(exhibitions: Sequence[Event] | None) -> bool:
+    return len(list(exhibitions or [])) > month_exhibitions_page_threshold()
+
+
+def _month_exhibitions_link_text(month: str) -> str:
+    month_num = int(month.split("-")[1])
+    return f"Постоянные выставки {MONTHS_GEN[month_num]}"
+
+
+async def build_month_exhibitions_page_content(
+    db: Database,
+    month: str,
+    exhibitions: list[Event] | None = None,
+) -> tuple[str, list, int]:
+    if exhibitions is None:
+        _, exhibitions = await get_month_data(db, month)
+
+    async with span("db"):
+        async with db.get_session() as session:
+            res_f = await session.execute(select(Festival))
+            fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
+
+    for e in exhibitions:
+        fest = fest_map.get((e.festival or "").casefold())
+        await ensure_event_telegraph_link(e, fest, db)
+    exhibitions = dedupe_exhibitions_for_display(exhibitions)
+
+    month_num = int(month.split("-")[1])
+    year = month.split("-")[0]
+    title = f"Постоянные выставки {MONTHS_GEN[month_num]} {year}: полный анонс"
+    content: list[dict] = [
+        {
+            "tag": "p",
+            "children": [
+                f"На этой странице собраны все постоянные выставки в {month_name_prepositional(month)}. "
+                "Под каждой выставкой указана подтверждённая дата окончания в формате "
+                f"«по {MONTHS_GEN[month_num]}» и площадка показа.",
+            ],
+        }
+    ]
+    content.extend(telegraph_br())
+
+    for ev in exhibitions:
+        content.extend(exhibition_compact_to_nodes(ev))
+
+    return title, content, rough_size(content)
+
+
 async def build_month_page_content(
     db: Database,
     month: str,
@@ -545,6 +746,7 @@ async def build_month_page_content(
     page_number: int = 1,
     first_date: date | None = None,
     last_date: date | None = None,
+    exhibitions_page_url: str | None = None,
 ) -> tuple[str, list, int]:
     if events is None or exhibitions is None:
         events, exhibitions = await get_month_data(db, month)
@@ -600,6 +802,7 @@ async def build_month_page_content(
             page_number,
             first_date,
             last_date,
+            exhibitions_page_url,
         )
     logging.info("build_month_page_content size=%d page=%d", size, page_number)
     return title, content, size
@@ -619,6 +822,7 @@ def _build_month_page_content_sync(
     page_number: int = 1,
     first_date: date | None = None,
     last_date: date | None = None,
+    exhibitions_page_url: str | None = None,
 ) -> tuple[str, list, int]:
     # Ensure festivals have full Telegraph URLs for easy linking
     for fest in fest_map.values():
@@ -638,6 +842,7 @@ def _build_month_page_content_sync(
     exhibitions = [
         e for e in exhibitions if e.end_date and e.date <= today_str and e.end_date >= today_str
     ]
+    exhibitions = dedupe_exhibitions_for_display(exhibitions)
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
@@ -712,6 +917,28 @@ def _build_month_page_content_sync(
                 break
             add_many(exhibition_to_nodes(ev))
         add_many([PERM_END])
+    elif exhibitions_page_url and not exceeded:
+        add_many(telegraph_br())
+        add(
+            {
+                "tag": "h3",
+                "children": [
+                    {
+                        "tag": "a",
+                        "attrs": {"href": exhibitions_page_url},
+                        "children": [_month_exhibitions_link_text(month)],
+                    }
+                ],
+            }
+        )
+        add(
+            {
+                "tag": "p",
+                "children": [
+                    "Все постоянные выставки месяца собраны на отдельной странице с периодами показа.",
+                ],
+            }
+        )
 
 
     if continuation_url and not exceeded:
@@ -767,6 +994,69 @@ def _build_month_page_content_sync(
         else:
             title = f"{test_prefix}События Калининграда в {month_name_prepositional(month)} (продолжение)"
     return title, content, size
+
+
+async def sync_month_exhibitions_page(
+    db: Database,
+    tg: Telegraph,
+    month: str,
+    exhibitions: list[Event],
+) -> str | None:
+    if not should_split_month_exhibitions_page(exhibitions):
+        async with db.get_session() as session:
+            page = await session.get(MonthExhibitionsPage, month)
+            if page is not None:
+                await session.delete(page)
+                await session.commit()
+        return None
+
+    from telegraph.utils import nodes_to_html
+
+    title, content, _ = await build_month_exhibitions_page_content(
+        db,
+        month,
+        exhibitions,
+    )
+    html_content = unescape_html_comments(nodes_to_html(content))
+    html_content = apply_footer_link(html_content)
+    content_hash_value = content_hash(html_content)
+
+    async with db.get_session() as session:
+        page = await session.get(MonthExhibitionsPage, month)
+        if page and page.content_hash == content_hash_value and page.url:
+            return page.url
+        if page is None or not page.path:
+            data = await telegraph_create_page(
+                tg,
+                title=title,
+                html_content=html_content,
+                caller="month_exhibitions_build",
+            )
+            url = normalize_telegraph_url(data.get("url"))
+            path = data.get("path")
+            if page is None:
+                page = MonthExhibitionsPage(
+                    month=month,
+                    url=url,
+                    path=path,
+                    content_hash=content_hash_value,
+                )
+                session.add(page)
+            else:
+                page.url = url
+                page.path = path
+                page.content_hash = content_hash_value
+        else:
+            await telegraph_edit_page(
+                tg,
+                page.path,
+                title=title,
+                html_content=html_content,
+                caller="month_exhibitions_build",
+            )
+            page.content_hash = content_hash_value
+        await session.commit()
+        return page.url
 
 
 async def _sync_month_page_inner(
@@ -887,12 +1177,23 @@ async def _sync_month_page_inner(
             logging.info("Falling back to full rebuild for %s", month)
 
         events, exhibitions = await get_month_data(db, month)
-        nav_block = await build_month_nav_block(db, month)
+        exhibitions_page_url = await sync_month_exhibitions_page(db, tg, month, exhibitions)
+        page_exhibitions = [] if exhibitions_page_url else exhibitions
+        nav_block = ""
+        if not (update_links and not page.path):
+            nav_block = await build_month_nav_block(db, month)
 
         from telegraph.utils import nodes_to_html
 
+        build_kwargs = {}
+        if exhibitions_page_url:
+            build_kwargs["exhibitions_page_url"] = exhibitions_page_url
         title, content, _ = await build_month_page_content(
-            db, month, events, exhibitions
+            db,
+            month,
+            events,
+            page_exhibitions,
+            **build_kwargs,
         )
         html_full = unescape_html_comments(nodes_to_html(content))
         html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
@@ -950,7 +1251,14 @@ async def _sync_month_page_inner(
                 )
                 had_path = bool(page.path)
                 await split_month_until_ok(
-                    db, tg, page, month, events, exhibitions, nav_block
+                    db,
+                    tg,
+                    page,
+                    month,
+                    events,
+                    page_exhibitions,
+                    nav_block,
+                    exhibitions_page_url=exhibitions_page_url,
                 )
                 if not had_path and page.path:
                     created = True
@@ -978,7 +1286,14 @@ async def _sync_month_page_inner(
                 logging.warning("Month page %s too big, splitting", month)
                 had_path = bool(page.path)
                 await split_month_until_ok(
-                    db, tg, page, month, events, exhibitions, nav_block
+                    db,
+                    tg,
+                    page,
+                    month,
+                    events,
+                    page_exhibitions,
+                    nav_block,
+                    exhibitions_page_url=exhibitions_page_url,
                 )
                 if not had_path and page.path:
                     created = True
@@ -1030,8 +1345,9 @@ async def sync_month_page(
         needs_nav = await _sync_month_page_inner(
             db, month, update_links, force, progress
         )
-    if needs_nav:
+    if needs_nav and not update_links:
         await refresh_month_nav(db)
+    return needs_nav
 
 
 def week_start_for_date(d: date) -> date:
@@ -2277,11 +2593,6 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             if _is_preview_friendly(p3d):
                 safe_cover = p3d
                 break
-            for raw in list(getattr(ev, "photo_urls", []) or []):
-                u = str(raw or "").strip()
-                if _is_preview_friendly(u):
-                    safe_cover = u
-                    break
             if safe_cover:
                 break
     if not safe_cover:
@@ -4986,8 +5297,163 @@ async def init_db_and_scheduler(
         app["job_outbox_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
     else:
         logging.info("SCHED skipping job_outbox_worker (ENABLE_JOB_OUTBOX_WORKER!=1)")
+    app["runtime_health_heartbeat"] = asyncio.create_task(_runtime_health_heartbeat(app))
+    _mark_runtime_health_tick(app, ready=True)
     gc.collect()
     logging.info("BOOT_OK pid=%s", os.getpid())
+
+
+def _runtime_health_heartbeat_interval_sec() -> float:
+    raw = (os.getenv("RUNTIME_HEALTH_HEARTBEAT_SEC") or "").strip()
+    try:
+        value = float(raw) if raw else 15.0
+    except ValueError:
+        value = 15.0
+    return max(5.0, value)
+
+
+def _runtime_health_stale_sec() -> float:
+    raw = (os.getenv("RUNTIME_HEALTH_STALE_SEC") or "").strip()
+    try:
+        value = float(raw) if raw else 45.0
+    except ValueError:
+        value = 45.0
+    return max(_runtime_health_heartbeat_interval_sec() * 2, value)
+
+
+def _runtime_health_startup_grace_sec() -> float:
+    raw = (os.getenv("RUNTIME_HEALTH_STARTUP_GRACE_SEC") or "").strip()
+    try:
+        value = float(raw) if raw else 120.0
+    except ValueError:
+        value = 120.0
+    return max(15.0, value)
+
+
+def _runtime_health_state(app: Mapping[str, Any]) -> dict[str, Any]:
+    existing = app.get("runtime_health")
+    if isinstance(existing, dict):
+        return existing
+    state = {
+        "boot_monotonic": _time.monotonic(),
+        "last_tick_monotonic": None,
+        "ready": False,
+    }
+    app["runtime_health"] = state
+    return state
+
+
+def _mark_runtime_health_tick(app: Mapping[str, Any], *, ready: bool | None = None) -> dict[str, Any]:
+    state = _runtime_health_state(app)
+    state["last_tick_monotonic"] = _time.monotonic()
+    if ready is not None:
+        state["ready"] = bool(ready)
+    return state
+
+
+async def _runtime_health_heartbeat(app: Mapping[str, Any]) -> None:
+    interval = _runtime_health_heartbeat_interval_sec()
+    while True:
+        _mark_runtime_health_tick(app)
+        await asyncio.sleep(interval)
+
+
+def _runtime_task_status(task: object | None) -> str:
+    if task is None:
+        return "missing"
+    done_fn = getattr(task, "done", None)
+    if not callable(done_fn):
+        return "unknown"
+    try:
+        done = bool(done_fn())
+    except Exception as exc:
+        return f"done_check_failed:{type(exc).__name__}"
+    if not done:
+        return "ok"
+    cancelled_fn = getattr(task, "cancelled", None)
+    if callable(cancelled_fn):
+        try:
+            if bool(cancelled_fn()):
+                return "cancelled"
+        except Exception as exc:
+            return f"cancel_check_failed:{type(exc).__name__}"
+    exception_fn = getattr(task, "exception", None)
+    if callable(exception_fn):
+        try:
+            exc = exception_fn()
+        except Exception as exc:
+            return f"exception_check_failed:{type(exc).__name__}"
+        if exc is not None:
+            return f"exception:{type(exc).__name__}"
+    return "finished"
+
+
+async def _runtime_health_report(
+    app: Mapping[str, Any],
+    db: Database,
+    bot: Bot,
+) -> tuple[int, dict[str, Any]]:
+    state = _runtime_health_state(app)
+    now = _time.monotonic()
+    boot_monotonic = float(state.get("boot_monotonic") or now)
+    boot_age_sec = max(0.0, now - boot_monotonic)
+    ready = bool(state.get("ready"))
+    last_tick_monotonic = state.get("last_tick_monotonic")
+    tick_age_sec = (
+        None
+        if last_tick_monotonic is None
+        else round(max(0.0, now - float(last_tick_monotonic)), 1)
+    )
+
+    issues: list[str] = []
+    tasks: dict[str, str] = {}
+    startup_grace_exceeded = (
+        not ready and boot_age_sec > _runtime_health_startup_grace_sec()
+    )
+    required_tasks = ["daily_scheduler", "add_event_watch"]
+    if "job_outbox_worker" in app:
+        required_tasks.append("job_outbox_worker")
+    for name in required_tasks:
+        status = _runtime_task_status(app.get(name))
+        tasks[name] = status
+        if status != "ok" and (ready or startup_grace_exceeded):
+            issues.append(f"{name}:{status}")
+
+    add_event_worker_status = _runtime_task_status(app.get("add_event_worker"))
+    if add_event_worker_status != "missing":
+        tasks["add_event_worker"] = add_event_worker_status
+
+    if ready:
+        if tick_age_sec is None or tick_age_sec > _runtime_health_stale_sec():
+            issues.append("heartbeat:stale")
+    elif startup_grace_exceeded:
+        issues.append("startup:not_ready")
+
+    session_closed = bool(getattr(getattr(bot, "session", None), "closed", False))
+    if session_closed:
+        issues.append("bot_session:closed")
+
+    db_status = "skipped"
+    if ready:
+        try:
+            async with db.raw_conn() as conn:
+                await conn.execute("SELECT 1")
+            db_status = "ok"
+        except Exception as exc:
+            db_status = f"error:{type(exc).__name__}"
+            issues.append(f"db:{type(exc).__name__}")
+
+    payload = {
+        "ok": not issues,
+        "ready": ready,
+        "boot_age_sec": round(boot_age_sec, 1),
+        "tick_age_sec": tick_age_sec,
+        "db": db_status,
+        "bot_session_closed": session_closed,
+        "tasks": tasks,
+        "issues": issues,
+    }
+    return (200 if not issues else 503), payload
 
 
 def _topic_labels_for_display(topics: Sequence[str] | None) -> list[str]:
@@ -5200,6 +5666,7 @@ async def build_exhibitions_message(
             .order_by(Event.date)
         )
         events = result.scalars().all()
+    events = dedupe_exhibitions_for_display(events)
 
     lines = []
     for e in events:
@@ -16828,13 +17295,14 @@ def create_app() -> web.Application:
     dp.include_router(special_router)  # must be after db init
     from handlers.admin_assist_cmd import admin_assist_router
     dp.include_router(admin_assist_router)
-    from handlers.recent_imports_cmd import recent_imports_router
-    dp.include_router(recent_imports_router)
     from handlers.popular_posts_cmd import popular_posts_router
     dp.include_router(popular_posts_router)
+    from handlers.recent_imports_cmd import recent_imports_router
+    dp.include_router(recent_imports_router)
     from handlers.telegraph_cache_cmd import telegraph_cache_router
     dp.include_router(telegraph_cache_router)
     dp.include_router(tg_monitor_router)
+    dp.include_router(guide_excursions_router)
     import video_announce.handlers as video_handlers
     import preview_3d.handlers as preview_3d_handlers
 
@@ -17726,10 +18194,12 @@ def create_app() -> web.Application:
     # Store bot and dispatcher in app context for dev mode
     app["bot"] = bot
     app["dispatcher"] = dp
+    _runtime_health_state(app)
 
     async def health_handler(request: web.Request) -> web.Response:
         async with span("healthz"):
-            return web.Response(text="ok")
+            status, payload = await _runtime_health_report(app, db, bot)
+            return web.json_response(payload, status=status)
 
     app.router.add_get("/healthz", health_handler)
     app.router.add_get("/metrics", metrics_handler)
@@ -17739,6 +18209,10 @@ def create_app() -> web.Application:
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
+        if "runtime_health_heartbeat" in app:
+            app["runtime_health_heartbeat"].cancel()
+            with contextlib.suppress(Exception):
+                await app["runtime_health_heartbeat"]
         if "add_event_watch" in app:
             app["add_event_watch"].cancel()
             with contextlib.suppress(Exception):
@@ -18125,6 +18599,10 @@ async def run_dev_mode():
     finally:
         # Cleanup - use the on_shutdown from app
         await app["bot"].session.close()
+        if "runtime_health_heartbeat" in app:
+            app["runtime_health_heartbeat"].cancel()
+            with contextlib.suppress(Exception):
+                await app["runtime_health_heartbeat"]
         if "add_event_watch" in app:
             app["add_event_watch"].cancel()
             with contextlib.suppress(Exception):

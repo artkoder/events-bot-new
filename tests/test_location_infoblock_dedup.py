@@ -75,3 +75,16 @@ def test_location_normalisation_keeps_raw_unknown_venue_when_address_conflicts()
     assert obj["location_name"] == "Школа им. М.С. Любушкина"
     assert obj["location_address"] == "пгт Янтарный, ул. Лесная, 10А"
     assert obj["city"] == "Янтарный"
+
+
+def test_location_normalisation_overrides_wrong_city_for_known_venue() -> None:
+    import main
+
+    obj = {
+        "location_name": "Заря",
+        "location_address": None,
+        "city": "Москва",
+    }
+    main._normalise_event_location_from_reference(obj)
+    assert obj["location_name"] == "Заря, Мира 41-43, Калининград"
+    assert obj["city"] == "Калининград"

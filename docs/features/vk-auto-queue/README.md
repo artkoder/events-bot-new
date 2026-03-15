@@ -144,14 +144,28 @@ Scheduler job: `vk_auto_queue.vk_auto_import_scheduler` (`scheduling.py`).
 
 ENV:
 - `ENABLE_VK_AUTO_IMPORT=1` включает job.
-- `VK_AUTO_IMPORT_TIMES_LOCAL` (по умолчанию `06:30,18:30`) локальные времена запуска.
+- `VK_AUTO_IMPORT_TIMES_LOCAL` (по умолчанию `06:15,10:15,12:00,18:30`) локальные времена запуска.
 - `VK_AUTO_IMPORT_TZ` (по умолчанию `Europe/Kaliningrad`) таймзона расписания.
-- `VK_AUTO_IMPORT_LIMIT` (по умолчанию `25`) сколько постов обработать за один запуск.
+- `VK_AUTO_IMPORT_LIMIT` (по умолчанию `15`) сколько постов обработать за один запуск.
 - `VK_AUTO_IMPORT_PREFETCH` (по умолчанию `1`) включает конвейер N/N+1: пока сохраняется пост N, параллельно подтягиваем лёгкие данные поста N+1 (wall.getById + мета).
 - `VK_AUTO_IMPORT_PREFETCH_DRAFTS` (по умолчанию `0`) если включён — в префетче дополнительно выполняется (download media + OCR + LLM-parse) для N+1. ⚠️ Может заметно увеличить RAM и привести к OOM на маленьких машинах (например Fly `512MB`).
 - `VK_AUTO_IMPORT_INLINE_JOBS` (по умолчанию `1`) ждать inline-джобы для отчёта (Telegraph/ICS).
 - `VK_AUTO_IMPORT_INLINE_INCLUDE_ICS` (по умолчанию `0`) ждать ICS inline вместе с Telegraph (обычно не нужно для E2E/local).
 - `VK_AUTO_IMPORT_SLOW_ROW_LOG_SEC` (по умолчанию `60`) порог для автоматического stage timing log по одной строке очереди даже без `PIPELINE_TIMINGS=1`; `0` означает логировать все строки.
+
+Плановый отчёт scheduler отправляется в чат superadmin из БД (`user.is_superadmin=1`). `ADMIN_CHAT_ID` больше не нужен для штатной работы и используется только как legacy fallback до регистрации superadmin в БД.
+
+Рекомендация по эксплуатации: для live очереди безопаснее частые меньшие батчи, чем редкие большие. Такой режим лучше переживает `SCHED_HEAVY_GUARD_MODE=skip`, быстрее подбирает свежие посты после crawl и реже создаёт длинные окна, где один пропущенный запуск мгновенно превращается в суточный backlog.
+
+Подбор дефолтных окон делался с запасом относительно типовых соседних задач в `Europe/Kaliningrad`: утренний run не ставится вплотную к `daily` на `08:00`, поздний run не ставится рядом с вечерним `tg_monitoring`, а дневные окна держат отступ от `VK_CRAWL_TIMES_LOCAL` и midday jobs.
+
+Recovery: legacy-строки `vk_inbox.status='importing'`, зависшие дольше lock timeout, автоматически возвращаются в `pending` на следующем run/выборе очереди. Иначе такие строки не видны текущему auto-import flow, который использует `locked` как рабочий статус.
+
+Диагностика scheduler:
+
+- если плановый запуск пропущен ещё **до входа** в `run_vk_auto_import()` (например, из-за `SCHED_HEAVY_GUARD_MODE=skip` или потому что не удалось определить chat superadmin ни из БД, ни из fallback env), теперь создаётся `ops_run` со `status='skipped'`;
+- в `details_json` пишется причина (`skip_reason`) и, для heavy-guard skip, `blocked_by_kind`;
+- `/general_stats` показывает такие записи в блоке `vk_auto_import runs`, чтобы было видно разницу между “очередь была пустой”, “run реально выполнился” и “scheduler попытался, но пропустил запуск”.
 
 Важно: обработка событий остаётся последовательной и сериализована через `HEAVY_SEMAPHORE` и внутренний lock Smart Update, но префетч N+1 может выполняться параллельно. По умолчанию префетч лёгкий; полный (media/OCR/LLM) включается только через `VK_AUTO_IMPORT_PREFETCH_DRAFTS=1`.
 

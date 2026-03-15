@@ -282,4 +282,9 @@ class TestEventProcessingWithLLM:
                     # Verify LLM was called with correct parameters
                     if mock_llm.called:
                         call_args = mock_llm.call_args
+                        source_text = call_args.kwargs.get("text", "")
                         assert "dom_iskusstv" in call_args.kwargs.get("source_name", "")
+                        assert "Дата: 2026-01-03" in source_text
+                        assert "Время: 14:00" in source_text
+                        assert "Площадка: Дом искусств" in source_text
+                        assert "Статус билетов: доступны" in source_text

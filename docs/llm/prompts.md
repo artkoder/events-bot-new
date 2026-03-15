@@ -88,6 +88,13 @@ What to include:
 - Conditions/restrictions (16+, "for entrepreneurs", "Pushkin card"...).
 Length guide: 25–55 words (20-80 allowed if necessary for search uniqueness).
 If an array of events is returned, `search_digest` must be present in every object.
+
+**report / recap rule:**
+- If the text is mainly a post-event report / recap about something that already happened, return no events.
+- Typical clues: past-tense narrative ("мы провели/исследовали/работали"), after-the-fact summary ("было здорово"),
+  gratitude/wrap-up ("спасибо ...", "увидимся вновь"), but no concrete attendable future anchor.
+- If a post mixes recap/background about past meetings with a real future invite, ignore the recap part and extract
+  only the future attendable event with its explicit future anchor (date/venue/time/registration/ticket).
 ```
 
 Examples of the desired venue formatting:
@@ -130,11 +137,6 @@ Guidelines:
   into events unless there is a concrete attendable event with explicit date + venue (and preferably time).
   If it's an initiative description with a program "запланировано/включает в себя" but without a specific event entry,
   return no events.
-- Do NOT create events out of giveaway/contest posts where a match, concert, or other event is mentioned only as the prize
-  ("разыгрываем билеты на ...", "главный приз — два билета ..."). If the post is mainly giveaway mechanics/results and
-  does not separately announce the attendable event itself, return no events.
-- If the text is only an intro for attached posters/cards/images (e.g. "листайте афиши", "смотрите карточки") and the
-  concrete event details are not present in the text itself, return no events instead of guessing from the wrapper text.
 - Do NOT treat administrative deadlines as event dates. If the only date in the text is a "до <date>" deadline
   (e.g. "подать заявку до 16 февраля", "утвердят до 1 марта") and there is no attendable event with date+venue,
   return no events.
@@ -150,6 +152,12 @@ Guidelines:
   Dates/times in such posts describe opening hours, not event schedule.
   Return no events unless the post explicitly announces an attendable activity with action wording
   (e.g. "состоится", "пройдет", "приглашаем") and concrete event details.
+- Do NOT create events out of post-event reports / recaps. If the text mainly describes what already happened
+  (past-tense narrative like "мы провели/исследовали/работали", after-the-fact summary like "было здорово",
+  gratitude/wrap-up like "спасибо ...", "скоро увидимся вновь") and there is no concrete attendable future anchor,
+  return no events.
+- If a post mixes recap/background about past meetings with a real future invite, ignore the recap part and extract
+  only the future attendable event with its explicit future anchor (date/venue/time/registration/ticket).
 - Do NOT assume a date when none is given. If there is no explicit date (DD.MM, “15 мая”, period) and no clear relative date
   (“сегодня/завтра/в эту субботу”), return no events — do NOT default to “today”.
 - The “Known venues” list is for normalising venues that are explicitly mentioned (or provided as an explicit default hint).

@@ -1,153 +1,133 @@
+import os
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
 from db import Database
-from handlers import recent_imports_cmd as recent
+from handlers import recent_imports_cmd
 from models import Event, EventSource
 
 
+def test_parse_hours_arg_defaults_and_validates():
+    assert recent_imports_cmd._parse_hours_arg("/recent_imports") == 24
+    assert recent_imports_cmd._parse_hours_arg("/recent_imports 48") == 48
+    with pytest.raises(ValueError):
+        recent_imports_cmd._parse_hours_arg("/recent_imports many")
+    with pytest.raises(ValueError):
+        recent_imports_cmd._parse_hours_arg("/recent_imports 0")
+
+
 @pytest.mark.asyncio
-async def test_recent_imports_load_rows_groups_created_vs_updated(tmp_path):
+async def test_load_recent_import_items_groups_sources_and_created_flag(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    start = now - timedelta(hours=24)
-    try:
-        async with db.get_session() as session:
-            ev_tg_new = Event(
-                title="TG New",
-                description="desc",
-                date="2026-03-09",
-                time="19:00",
-                location_name="Loc",
-                source_text="src",
-                telegraph_url="https://telegra.ph/tg-new",
-                added_at=now - timedelta(hours=2),
-            )
-            ev_tg_updated = Event(
-                title="TG Updated",
-                description="desc",
-                date="2026-03-10",
-                time="19:00",
-                location_name="Loc",
-                source_text="src",
-                telegraph_path="tg-updated",
-                added_at=now - timedelta(days=3),
-            )
-            ev_vk_updated = Event(
-                title="VK Updated",
-                description="desc",
-                date="2026-03-11",
-                time="19:00",
-                location_name="Loc",
-                source_text="src",
-                telegraph_url="https://telegra.ph/vk-updated",
-                added_at=now - timedelta(days=2),
-            )
-            ev_parse_new = Event(
-                title="Parse New",
-                description="desc",
-                date="2026-03-12",
-                time="19:00",
-                location_name="Loc",
-                source_text="src",
-                telegraph_path="parse-new",
-                added_at=now - timedelta(hours=3),
-            )
-            session.add_all([ev_tg_new, ev_tg_updated, ev_vk_updated, ev_parse_new])
-            await session.flush()
-            session.add_all(
-                [
-                    EventSource(
-                        event_id=int(ev_tg_new.id),
-                        source_type="telegram",
-                        source_url="https://t.me/source/1",
-                        imported_at=now - timedelta(hours=1),
-                    ),
-                    EventSource(
-                        event_id=int(ev_tg_updated.id),
-                        source_type="tg",
-                        source_url="https://t.me/source/2",
-                        imported_at=now - timedelta(hours=4),
-                    ),
-                    EventSource(
-                        event_id=int(ev_vk_updated.id),
-                        source_type="vk",
-                        source_url="https://vk.com/wall-1_2",
-                        imported_at=now - timedelta(hours=5),
-                    ),
-                    EventSource(
-                        event_id=int(ev_parse_new.id),
-                        source_type="parser:theatres",
-                        source_url="https://example.com/event",
-                        imported_at=now - timedelta(hours=2),
-                    ),
-                    EventSource(
-                        event_id=int(ev_parse_new.id),
-                        source_type="parser:theatres",
-                        source_url="https://example.com/event-duplicate",
-                        imported_at=now - timedelta(hours=1, minutes=30),
-                    ),
-                ]
-            )
-            await session.commit()
+    now = datetime(2026, 3, 11, 8, 0, tzinfo=timezone.utc)
 
-        grouped = await recent._load_recent_import_rows(db, start_utc=start, end_utc=now)
-
-        tg_rows = grouped["telegram"]
-        vk_rows = grouped["vk"]
-        parse_rows = grouped["parse"]
-
-        assert [row.title for row in tg_rows] == ["TG New", "TG Updated"]
-        assert tg_rows[0].status == "created"
-        assert tg_rows[1].status == "updated"
-        assert tg_rows[1].telegraph_url == "https://telegra.ph/tg-updated"
-
-        assert len(vk_rows) == 1
-        assert vk_rows[0].title == "VK Updated"
-        assert vk_rows[0].status == "updated"
-
-        assert len(parse_rows) == 1
-        assert parse_rows[0].title == "Parse New"
-        assert parse_rows[0].status == "created"
-        assert parse_rows[0].telegraph_url == "https://telegra.ph/parse-new"
-    finally:
-        await db.close()
-
-
-def test_recent_imports_render_pages_splits_long_output(monkeypatch):
-    monkeypatch.setattr(recent, "_MAX_TG_MESSAGE_LEN", 240)
-    rows = [
-        recent._RecentImportRow(
-            source_group="telegram",
-            event_id=idx,
-            title=f"Event {idx}",
-            telegraph_url=f"https://telegra.ph/event-{idx}",
-            status="created" if idx % 2 else "updated",
-            last_imported_at=None,
-        )
-        for idx in range(1, 10)
-    ]
-    pages = recent._render_pages(
-        hours=24,
-        start_local=datetime(2026, 3, 8, 10, 0, tzinfo=timezone.utc),
-        end_local=datetime(2026, 3, 9, 10, 0, tzinfo=timezone.utc),
-        tz_label="UTC",
-        grouped_rows={"telegram": rows, "vk": rows, "parse": rows},
+    created_event = Event(
+        title="TG import",
+        description="desc",
+        date="2026-03-20",
+        time="19:00",
+        location_name="Club",
+        source_text="src",
+        telegraph_url="https://telegra.ph/tg-import",
+        added_at=now - timedelta(hours=2),
+    )
+    updated_event = Event(
+        title="Merged import",
+        description="desc",
+        date="2026-03-21",
+        time="18:30",
+        location_name="Hall",
+        source_text="src",
+        telegraph_path="merged-import",
+        added_at=now - timedelta(days=5),
+    )
+    old_event = Event(
+        title="Old import",
+        description="desc",
+        date="2026-03-22",
+        time="17:00",
+        location_name="Old hall",
+        source_text="src",
+        added_at=now - timedelta(days=6),
     )
 
-    assert len(pages) > 1
-    assert pages[0].startswith("🧾 <b>События из Telegram / VK / /parse за последние 24 ч.</b>")
-    assert "Страница 1/" in pages[0]
-    assert any("Страница 2/" in page for page in pages[1:])
-    assert any('href="https://telegra.ph/event-1"' in page for page in pages)
-    assert any("id=1 ✅" in page for page in pages)
-    assert any("id=2 🔄" in page for page in pages)
+    async with db.get_session() as session:
+        session.add_all([created_event, updated_event, old_event])
+        await session.commit()
+        await session.refresh(created_event)
+        await session.refresh(updated_event)
+        await session.refresh(old_event)
+        session.add_all(
+            [
+                EventSource(
+                    event_id=created_event.id,
+                    source_type="telegram",
+                    source_url="https://t.me/source/1",
+                    imported_at=now - timedelta(hours=2),
+                ),
+                EventSource(
+                    event_id=updated_event.id,
+                    source_type="vk",
+                    source_url="https://vk.com/wall-1_2",
+                    imported_at=now - timedelta(hours=1),
+                ),
+                EventSource(
+                    event_id=updated_event.id,
+                    source_type="parser:dramteatr",
+                    source_url="https://dramteatr39.ru/event",
+                    imported_at=now - timedelta(minutes=30),
+                ),
+                EventSource(
+                    event_id=old_event.id,
+                    source_type="telegram",
+                    source_url="https://t.me/source/2",
+                    imported_at=now - timedelta(hours=30),
+                ),
+            ]
+        )
+        await session.commit()
 
+    items, start_utc, end_utc = await recent_imports_cmd._load_recent_import_items(
+        db,
+        hours=24,
+        now_utc=now,
+    )
 
-def test_recent_imports_parse_hours_arg():
-    assert recent._parse_hours_arg("/recent_imports") == 24
-    assert recent._parse_hours_arg("/recent_imports 48") == 48
-    with pytest.raises(ValueError):
-        recent._parse_hours_arg("/recent_imports abc")
+    assert start_utc == now - timedelta(hours=24)
+    assert end_utc == now
+    assert [item.event_id for item in items] == [updated_event.id, created_event.id]
+
+    assert items[0].is_created is False
+    assert items[0].source_labels == {"VK", "/parse"}
+    assert items[0].telegraph_url == "https://telegra.ph/merged-import"
+
+    assert items[1].is_created is True
+    assert items[1].source_labels == {"Telegram"}
+
+    lines = recent_imports_cmd._render_recent_imports_lines(
+        items,
+        hours=24,
+        start_utc=start_utc,
+        end_utc=end_utc,
+        tz=timezone.utc,
+    )
+    assert lines[0] == "📥 <b>Недавние импорты событий</b>"
+    assert any(
+        line.startswith(
+            f'{updated_event.id} 🔄 <a href="https://telegra.ph/merged-import">Merged import</a> |'
+        )
+        and "VK, /parse" in line
+        for line in lines
+    )
+    assert any(
+        line.startswith(
+            f'{created_event.id} ✅ <a href="https://telegra.ph/tg-import">TG import</a> |'
+        )
+        and "Telegram" in line
+        for line in lines
+    )

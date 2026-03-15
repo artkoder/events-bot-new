@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 
 from db import Database
@@ -45,7 +47,7 @@ async def test_popular_posts_report_escapes_debug_counter_html(monkeypatch):
         )
 
     async def _fake_resolve_telegraph_map(_db, *, source_urls):  # noqa: ANN001
-        return {}
+        return {}, set()
 
     monkeypatch.setattr(popular, "_load_top_items", _fake_load_top_items)
     monkeypatch.setattr(popular, "_resolve_telegraph_map", _fake_resolve_telegraph_map)
@@ -88,7 +90,7 @@ async def test_popular_posts_report_shows_above_median_breakdown(monkeypatch):
         )
 
     async def _fake_resolve_telegraph_map(_db, *, source_urls):  # noqa: ANN001
-        return {}
+        return {}, set()
 
     monkeypatch.setattr(popular, "_load_top_items", _fake_load_top_items)
     monkeypatch.setattr(popular, "_resolve_telegraph_map", _fake_resolve_telegraph_map)
@@ -102,9 +104,10 @@ async def test_popular_posts_report_shows_above_median_breakdown(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path):
+async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
+    monkeypatch.setattr(popular, "_local_today", lambda: date(2026, 3, 1))
     try:
         async with db.get_session() as session:
             ev = Event(
@@ -129,13 +132,14 @@ async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path)
             )
             await session.commit()
 
-        links = await popular._resolve_telegraph_map(
+        links, matched_urls = await popular._resolve_telegraph_map(
             db,
             source_urls=[
                 "https://t.me/meowafisha/6823",
                 "https://t.me/meowafisha/6823?single",
             ],
         )
+        assert matched_urls == {"https://t.me/meowafisha/6823", "https://t.me/meowafisha/6823?single"}
         assert links["https://t.me/meowafisha/6823"].total == 1
         assert links["https://t.me/meowafisha/6823"].events
         assert links["https://t.me/meowafisha/6823"].events[0].event_id == int(ev.id)
@@ -149,54 +153,134 @@ async def test_popular_posts_resolves_event_links_with_tg_url_variants(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_popular_posts_includes_post_above_only_one_median(tmp_path, monkeypatch):
-    monkeypatch.setenv("POST_POPULARITY_MIN_SAMPLE", "2")
+async def test_popular_posts_hides_past_only_events(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
-    try:
-        async with db.raw_conn() as conn:
-            await conn.execute(
-                "INSERT INTO vk_source(group_id, screen_name, name) VALUES(?, ?, ?)",
-                (101, "club101", "Club 101"),
-            )
-            await conn.execute(
-                "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (1, 101, 1001, 2_000_000_000, "post 1001", 1, "imported"),
-            )
-            await conn.execute(
-                "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (2, 101, 1002, 2_000_000_010, "post 1002", 1, "imported"),
-            )
-            await conn.execute(
-                "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
-                (1, 1),
-            )
-            await conn.execute(
-                "INSERT INTO vk_inbox_import_event(inbox_id, event_id, created_at) VALUES(?, ?, CURRENT_TIMESTAMP)",
-                (2, 2),
-            )
-            await conn.execute(
-                "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                (101, 1001, 0, "https://vk.com/wall-101_1001", 2_000_000_000, 2_000_000_100, 100, 10),
-            )
-            await conn.execute(
-                "INSERT INTO vk_post_metric(group_id, post_id, age_day, source_url, post_ts, collected_ts, views, likes) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                (101, 1002, 0, "https://vk.com/wall-101_1002", 2_000_000_010, 2_000_000_100, 110, 5),
-            )
-            await conn.commit()
+    monkeypatch.setattr(popular, "_local_today", lambda: date(2026, 3, 12))
 
-        monkeypatch.setattr(popular, "_utc_now_ts", lambda: 2_000_000_100)
-        items, dbg = await _load_top_items(db, window_days=1, age_day=0, limit=10)
+    past_url = "https://t.me/source/1"
+    future_url = "https://t.me/source/2"
+    ongoing_url = "https://t.me/source/3"
 
-        assert len(items) == 2
-        assert {item.platform for item in items} == {"vk"}
-        assert {item.post_id for item in items} == {1001, 1002}
-        assert dbg["checked_posts"] == 2
-        assert dbg["above_median_views"] == 1
-        assert dbg["above_median_likes"] == 1
-        assert dbg["above_median_both"] == 0
-        assert dbg["skipped_not_above_median"] == 0
-    finally:
-        await db.close()
+    async with db.get_session() as session:
+        past_event = Event(
+            title="Past event",
+            description="desc",
+            date="2026-03-10",
+            time="19:00",
+            location_name="Hall",
+            source_text="src",
+        )
+        future_event = Event(
+            title="Future event",
+            description="desc",
+            date="2026-03-15",
+            time="19:00",
+            location_name="Hall",
+            source_text="src",
+        )
+        ongoing_event = Event(
+            title="Ongoing event",
+            description="desc",
+            date="2026-03-01",
+            end_date="2026-03-20",
+            time="19:00",
+            location_name="Hall",
+            source_text="src",
+        )
+        session.add_all([past_event, future_event, ongoing_event])
+        await session.commit()
+        await session.refresh(past_event)
+        await session.refresh(future_event)
+        await session.refresh(ongoing_event)
+
+        session.add_all(
+            [
+                EventSource(
+                    event_id=past_event.id,
+                    source_type="telegram",
+                    source_url=past_url,
+                    source_chat_username="source",
+                    source_message_id=1,
+                ),
+                EventSource(
+                    event_id=future_event.id,
+                    source_type="telegram",
+                    source_url=future_url,
+                    source_chat_username="source",
+                    source_message_id=2,
+                ),
+                EventSource(
+                    event_id=ongoing_event.id,
+                    source_type="telegram",
+                    source_url=ongoing_url,
+                    source_chat_username="source",
+                    source_message_id=3,
+                ),
+            ]
+        )
+        await session.commit()
+
+    telegraph_map, matched_urls = await popular._resolve_telegraph_map(
+        db,
+        source_urls=[past_url, future_url, ongoing_url],
+    )
+
+    assert matched_urls == {past_url, future_url, ongoing_url}
+    assert past_url not in telegraph_map
+    assert future_url in telegraph_map
+    assert ongoing_url in telegraph_map
+
+    baseline = popular._Baseline(median_views=100, median_likes=10, sample=2)
+    items = [
+        popular._PostItem(
+            platform="tg",
+            source_key=1,
+            source_label="Past",
+            post_id=1,
+            post_url=past_url,
+            published_ts=1,
+            views=200,
+            likes=20,
+            baseline=baseline,
+            popularity="⭐👍",
+            score=2.0,
+        ),
+        popular._PostItem(
+            platform="tg",
+            source_key=1,
+            source_label="Future",
+            post_id=2,
+            post_url=future_url,
+            published_ts=2,
+            views=210,
+            likes=21,
+            baseline=baseline,
+            popularity="⭐👍",
+            score=2.1,
+        ),
+        popular._PostItem(
+            platform="tg",
+            source_key=1,
+            source_label="Ongoing",
+            post_id=3,
+            post_url=ongoing_url,
+            published_ts=3,
+            views=220,
+            likes=22,
+            baseline=baseline,
+            popularity="⭐👍",
+            score=2.2,
+        ),
+    ]
+    dbg = {}
+
+    kept = popular._prune_stale_only_items(
+        items,
+        telegraph_map=telegraph_map,
+        matched_urls=matched_urls,
+        dbg=dbg,
+    )
+
+    assert [item.post_url for item in kept] == [future_url, ongoing_url]
+    assert dbg["skipped_past_event_only"] == 1

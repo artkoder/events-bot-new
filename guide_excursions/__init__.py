@@ -1,0 +1,2 @@
+"""Guide excursions monitoring package."""
+

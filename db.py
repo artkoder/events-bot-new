@@ -521,9 +521,6 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_source_type_url ON event_source(source_type, source_url)"
             )
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS ix_event_source_imported_at ON event_source(imported_at)"
-            )
             # Smart Update часто проверяет идемпотентность по `source_url` без знания `event_id`.
             # Индексы (event_id, source_url) и (source_type, source_url) не ускоряют такой lookup,
             # поэтому держим отдельный индекс по source_url.
@@ -723,6 +720,245 @@ class Database:
             )
             await _add_column(conn, "telegram_post_metric", "reactions_json JSON")
 
+            dbg("guide_profile")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_profile(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    slug TEXT NOT NULL UNIQUE,
+                    profile_kind TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    marketing_name TEXT,
+                    source_links_json JSON,
+                    base_region TEXT,
+                    audience_strengths_json JSON,
+                    summary_short TEXT,
+                    facts_rollup_json JSON,
+                    first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_profile_kind ON guide_profile(profile_kind)"
+            )
+
+            dbg("guide_source")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_source(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT NOT NULL DEFAULT 'telegram',
+                    username TEXT NOT NULL,
+                    title TEXT,
+                    about_text TEXT,
+                    about_links_json JSON,
+                    primary_profile_id INTEGER,
+                    source_kind TEXT NOT NULL,
+                    trust_level TEXT,
+                    priority_weight REAL NOT NULL DEFAULT 1.0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    flags_json JSON,
+                    base_region TEXT,
+                    added_via TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_scanned_message_id INTEGER,
+                    last_scan_at TIMESTAMP,
+                    UNIQUE(platform, username),
+                    FOREIGN KEY(primary_profile_id) REFERENCES guide_profile(id) ON DELETE SET NULL
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_source_enabled ON guide_source(enabled)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_source_kind ON guide_source(source_kind)"
+            )
+            await _add_column(conn, "guide_source", "about_text TEXT")
+            await _add_column(conn, "guide_source", "about_links_json JSON")
+
+            dbg("guide_monitor_post")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_monitor_post(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    grouped_id INTEGER,
+                    post_date TIMESTAMP,
+                    source_url TEXT,
+                    text TEXT,
+                    views INTEGER,
+                    forwards INTEGER,
+                    reactions_total INTEGER,
+                    reactions_json JSON,
+                    content_hash TEXT,
+                    media_refs_json JSON,
+                    post_kind TEXT,
+                    prefilter_passed INTEGER NOT NULL DEFAULT 0,
+                    llm_status TEXT,
+                    title_hint TEXT,
+                    raw_facts_json JSON,
+                    first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_scanned_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source_id, message_id),
+                    FOREIGN KEY(source_id) REFERENCES guide_source(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_monitor_post_source_date ON guide_monitor_post(source_id, post_date)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_monitor_post_kind ON guide_monitor_post(post_kind)"
+            )
+
+            dbg("guide_template")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_template(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER,
+                    canonical_title TEXT NOT NULL,
+                    title_normalized TEXT NOT NULL,
+                    aliases_json JSON,
+                    base_city TEXT,
+                    availability_mode TEXT,
+                    audience_fit_json JSON,
+                    participant_profiles_json JSON,
+                    summary_short TEXT,
+                    facts_rollup_json JSON,
+                    first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(profile_id, title_normalized),
+                    FOREIGN KEY(profile_id) REFERENCES guide_profile(id) ON DELETE SET NULL
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_template_title_norm ON guide_template(title_normalized)"
+            )
+
+            dbg("guide_occurrence")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_occurrence(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    template_id INTEGER,
+                    primary_source_id INTEGER,
+                    primary_message_id INTEGER,
+                    source_fingerprint TEXT NOT NULL UNIQUE,
+                    canonical_title TEXT NOT NULL,
+                    title_normalized TEXT NOT NULL,
+                    participant_profiles_json JSON,
+                    guide_names_json JSON,
+                    organizer_names_json JSON,
+                    digest_eligible INTEGER NOT NULL DEFAULT 1,
+                    digest_eligibility_reason TEXT,
+                    is_last_call INTEGER NOT NULL DEFAULT 0,
+                    aggregator_only INTEGER NOT NULL DEFAULT 0,
+                    rescheduled_from_id INTEGER,
+                    date TEXT,
+                    time TEXT,
+                    duration_text TEXT,
+                    city TEXT,
+                    meeting_point TEXT,
+                    audience_fit_json JSON,
+                    price_text TEXT,
+                    booking_text TEXT,
+                    booking_url TEXT,
+                    channel_url TEXT,
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    seats_text TEXT,
+                    summary_one_liner TEXT,
+                    digest_blurb TEXT,
+                    views INTEGER,
+                    likes INTEGER,
+                    published_new_digest_issue_id INTEGER,
+                    published_last_call_digest_issue_id INTEGER,
+                    first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_post_at TIMESTAMP,
+                    FOREIGN KEY(template_id) REFERENCES guide_template(id) ON DELETE SET NULL,
+                    FOREIGN KEY(primary_source_id) REFERENCES guide_source(id) ON DELETE SET NULL,
+                    FOREIGN KEY(rescheduled_from_id) REFERENCES guide_occurrence(id) ON DELETE SET NULL
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_occurrence_date ON guide_occurrence(date)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_occurrence_digest ON guide_occurrence(digest_eligible, published_new_digest_issue_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_occurrence_last_call ON guide_occurrence(is_last_call, published_last_call_digest_issue_id)"
+            )
+
+            dbg("guide_occurrence_source")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_occurrence_source(
+                    occurrence_id INTEGER NOT NULL,
+                    post_id INTEGER NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'primary',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (occurrence_id, post_id),
+                    FOREIGN KEY(occurrence_id) REFERENCES guide_occurrence(id) ON DELETE CASCADE,
+                    FOREIGN KEY(post_id) REFERENCES guide_monitor_post(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_occurrence_source_role ON guide_occurrence_source(role)"
+            )
+
+            dbg("guide_fact_claim")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_fact_claim(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_kind TEXT NOT NULL,
+                    entity_id INTEGER NOT NULL,
+                    fact_key TEXT NOT NULL,
+                    fact_value TEXT,
+                    confidence REAL,
+                    source_post_id INTEGER,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(source_post_id) REFERENCES guide_monitor_post(id) ON DELETE SET NULL
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_fact_claim_entity ON guide_fact_claim(entity_kind, entity_id)"
+            )
+
+            dbg("guide_digest_issue")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS guide_digest_issue(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    family TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'preview',
+                    target_chat TEXT,
+                    title TEXT,
+                    text TEXT,
+                    items_json JSON,
+                    media_items_json JSON,
+                    run_id INTEGER,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    published_at TIMESTAMP,
+                    published_message_ids_json JSON,
+                    FOREIGN KEY(run_id) REFERENCES ops_run(id) ON DELETE SET NULL
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_guide_digest_issue_family_status ON guide_digest_issue(family, status, created_at)"
+            )
+
             # Canonical Telegram sources (safe seed).
             skip_tg_seed = (os.getenv("DB_INIT_SKIP_TG_SOURCES_SEED") or "").strip().lower() in {
                 "1",
@@ -736,6 +972,19 @@ class Database:
                     await seed_telegram_sources(conn)
                 except Exception:
                     logging.exception("telegram_source seed failed (non-fatal)")
+
+            skip_guide_seed = (os.getenv("DB_INIT_SKIP_GUIDE_SOURCES_SEED") or "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            if not skip_guide_seed:
+                try:
+                    from guide_excursions.seed import seed_guide_sources
+
+                    await seed_guide_sources(conn)
+                except Exception:
+                    logging.exception("guide_source seed failed (non-fatal)")
 
             await conn.execute(
                 """
@@ -841,6 +1090,17 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_monthpagepart_month ON monthpagepart(month)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS monthexhibitionspage(
+                    month TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    content_hash TEXT
+                )
+                """
             )
 
             await conn.execute(

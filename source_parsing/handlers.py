@@ -18,6 +18,7 @@ from urllib.parse import urlparse, urljoin
 from aiogram import Bot
 from sqlalchemy import select
 
+from admin_chat import resolve_superadmin_chat_id
 from db import Database
 from ops_run import finish_ops_run, start_ops_run
 from source_parsing.kaggle_runner import run_kaggle_kernel
@@ -401,6 +402,93 @@ def classify_add_event_outcome(
     if event_id and st:
         return "updated"
     return "failed"
+
+
+def _format_parser_ticket_price(
+    price_min: int | float | None,
+    price_max: int | float | None,
+) -> str:
+    if price_min is None and price_max is None:
+        return ""
+
+    def _to_text(value: int | float | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        return str(value)
+
+    min_text = _to_text(price_min)
+    max_text = _to_text(price_max)
+    if min_text and max_text and min_text != max_text:
+        return f"{min_text}-{max_text} RUB"
+    if min_text:
+        return f"от {min_text} RUB"
+    if max_text:
+        return f"до {max_text} RUB"
+    return ""
+
+
+def _format_parser_ticket_status(ticket_status: str | None) -> str:
+    normalized = str(ticket_status or "").strip().lower()
+    return {
+        "available": "доступны",
+        "sold_out": "распродано",
+        "unknown": "неизвестно",
+    }.get(normalized, normalized)
+
+
+def _build_parser_source_text(
+    theatre_event: TheatreEvent,
+    *,
+    full_description: str,
+    location_name: str,
+) -> str:
+    """Build structured parser input for LLM draft extraction.
+
+    Some site parsers, especially Qtickets, return short descriptions that omit
+    date/time/venue entirely. Include parser facts explicitly so LLM extraction
+    stays grounded and does not return an empty draft batch.
+    """
+
+    lines = [f"Название: {theatre_event.title}"]
+
+    date_text = str(theatre_event.parsed_date or theatre_event.date_raw or "").strip()
+    if date_text:
+        lines.append(f"Дата: {date_text}")
+
+    time_text = str(theatre_event.parsed_time or "").strip()
+    if time_text and time_text != "00:00":
+        lines.append(f"Время: {time_text}")
+
+    venue_text = str(location_name or theatre_event.location or "").strip()
+    if venue_text:
+        lines.append(f"Площадка: {venue_text}")
+
+    age_text = str(theatre_event.age_restriction or "").strip()
+    if age_text:
+        lines.append(f"Возраст: {age_text}")
+
+    ticket_status_text = _format_parser_ticket_status(theatre_event.ticket_status)
+    if ticket_status_text:
+        lines.append(f"Статус билетов: {ticket_status_text}")
+
+    price_text = _format_parser_ticket_price(
+        theatre_event.ticket_price_min,
+        theatre_event.ticket_price_max,
+    )
+    if price_text:
+        lines.append(f"Цена: {price_text}")
+
+    url_text = str(theatre_event.url or "").strip()
+    if url_text:
+        lines.append(f"Ссылка: {url_text}")
+
+    body = str(full_description or "").strip()
+    if body:
+        lines.extend(["", "Описание:", body])
+
+    return "\n".join(lines)
 
 
 async def _ensure_telegraph_url(db: Database, event_id: int) -> str | None:
@@ -842,12 +930,13 @@ async def add_new_event_via_queue(
         if theatre_event.scene:
             description_parts.append(f"Сцена: {theatre_event.scene}")
         
-        full_description = "\n\n".join(description_parts) if description_parts else theatre_event.title
-        
-        # Build source text for LLM - include title explicitly for normalization
-        source_text = f"Название: {theatre_event.title}\n\n{full_description}"
-        
         location_name = normalize_location_name(theatre_event.location, theatre_event.scene)
+        full_description = "\n\n".join(description_parts) if description_parts else theatre_event.title
+        source_text = _build_parser_source_text(
+            theatre_event,
+            full_description=full_description,
+            location_name=location_name,
+        )
         
         # Limit photos for source
         base_photos = list(theatre_event.photos or [])
@@ -2004,12 +2093,7 @@ async def resume_source_parsing_jobs(
         return 0
     notify_chat_id = chat_id
     if notify_chat_id is None:
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-        if admin_chat_id:
-            try:
-                notify_chat_id = int(admin_chat_id)
-            except ValueError:
-                notify_chat_id = None
+        notify_chat_id = await resolve_superadmin_chat_id(db)
     client = KaggleClient()
     recovered = 0
     for job in parse_jobs:

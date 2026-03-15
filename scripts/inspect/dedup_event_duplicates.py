@@ -17,6 +17,11 @@ _NONWORD_RE = re.compile(r"[^\w\s]+", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
 
 
+def _is_missing_relation_error(exc: sqlite3.OperationalError) -> bool:
+    msg = str(exc).lower()
+    return "no such table" in msg or "no such column" in msg
+
+
 def _time_anchor(raw: str | None) -> str:
     text = str(raw or "").strip()
     if not text:
@@ -327,15 +332,25 @@ def _merge_session_event_unique(
     """Merge tables that have UNIQUE(session_id, event_id)."""
 
     cur = con.cursor()
-    cur.execute(f"SELECT session_id FROM {table} WHERE event_id=?", (keep_id,))
+    try:
+        cur.execute(f"SELECT session_id FROM {table} WHERE event_id=?", (keep_id,))
+    except sqlite3.OperationalError as exc:
+        if _is_missing_relation_error(exc):
+            return 0, 0
+        raise
     keep_sessions = {int(sid) for (sid,) in cur.fetchall() if sid is not None}
 
     moved = 0
     removed = 0
-    cur.execute(
-        f"SELECT id, session_id FROM {table} WHERE event_id=? ORDER BY id",
-        (drop_id,),
-    )
+    try:
+        cur.execute(
+            f"SELECT id, session_id FROM {table} WHERE event_id=? ORDER BY id",
+            (drop_id,),
+        )
+    except sqlite3.OperationalError as exc:
+        if _is_missing_relation_error(exc):
+            return 0, 0
+        raise
     rows = [(int(rid), int(sid)) for rid, sid in cur.fetchall() if sid is not None]
     for row_id, session_id in rows:
         if session_id in keep_sessions:
@@ -352,25 +367,102 @@ def _repoint_event_id_simple(
     con: sqlite3.Connection, table: str, *, keep_id: int, drop_id: int
 ) -> int:
     cur = con.cursor()
-    cur.execute(f"UPDATE {table} SET event_id=? WHERE event_id=?", (keep_id, drop_id))
+    try:
+        cur.execute(f"UPDATE {table} SET event_id=? WHERE event_id=?", (keep_id, drop_id))
+    except sqlite3.OperationalError as exc:
+        if _is_missing_relation_error(exc):
+            return 0
+        raise
     return int(cur.rowcount or 0)
 
 
 def _repoint_vk_inbox_import_event(con: sqlite3.Connection, *, keep_id: int, drop_id: int) -> tuple[int, int]:
     cur = con.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO vk_inbox_import_event(inbox_id, event_id, created_at)
-        SELECT inbox_id, ?, created_at
-        FROM vk_inbox_import_event
-        WHERE event_id=?
-        """,
-        (keep_id, drop_id),
-    )
+    try:
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO vk_inbox_import_event(inbox_id, event_id, created_at)
+            SELECT inbox_id, ?, created_at
+            FROM vk_inbox_import_event
+            WHERE event_id=?
+            """,
+            (keep_id, drop_id),
+        )
+    except sqlite3.OperationalError as exc:
+        if _is_missing_relation_error(exc):
+            return 0, 0
+        raise
     inserted = int(cur.rowcount or 0)
     cur.execute("DELETE FROM vk_inbox_import_event WHERE event_id=?", (drop_id,))
     deleted = int(cur.rowcount or 0)
     return inserted, deleted
+
+
+def _repoint_vk_inbox_imported_event(
+    con: sqlite3.Connection, *, keep_id: int, drop_id: int
+) -> int:
+    cur = con.cursor()
+    try:
+        cur.execute(
+            "UPDATE vk_inbox SET imported_event_id=? WHERE imported_event_id=?",
+            (keep_id, drop_id),
+        )
+    except sqlite3.OperationalError as exc:
+        if _is_missing_relation_error(exc):
+            return 0
+        raise
+    return int(cur.rowcount or 0)
+
+
+def _rewrite_linked_event_ids(
+    con: sqlite3.Connection, *, keep_id: int, drop_id: int
+) -> int:
+    cur = con.cursor()
+    cur.execute(
+        """
+        SELECT id, linked_event_ids
+        FROM event
+        WHERE linked_event_ids IS NOT NULL
+          AND linked_event_ids != '[]'
+        """
+    )
+    changed = 0
+    for row_id_raw, raw_links in cur.fetchall():
+        row_id = int(row_id_raw)
+        if row_id == drop_id:
+            continue
+        try:
+            data = json.loads(str(raw_links or "").strip() or "[]")
+        except Exception:
+            continue
+        if not isinstance(data, list):
+            continue
+        updated: list[int] = []
+        seen: set[int] = set()
+        touched = False
+        for item in data:
+            try:
+                link_id = int(item)
+            except Exception:
+                continue
+            if link_id == drop_id:
+                link_id = keep_id
+                touched = True
+            if link_id == row_id:
+                touched = True
+                continue
+            if link_id in seen:
+                touched = True
+                continue
+            seen.add(link_id)
+            updated.append(link_id)
+        if touched:
+            cur.execute(
+                "UPDATE event SET linked_event_ids=? WHERE id=?",
+                (json.dumps(updated), row_id),
+            )
+            changed += 1
+    return changed
 
 
 def _merge_event_row_fields(
@@ -599,6 +691,7 @@ def main() -> int:
                     moved_sources = removed_sources = 0
                     moved_posters = removed_posters = 0
                     repointed_jobs = repointed_vkq = repointed_tsq = 0
+                    repointed_vk_inbox = linked_rows_updated = 0
                     inserted_inbox = deleted_inbox = 0
 
                     for drop_id in drop_ids:
@@ -626,6 +719,13 @@ def main() -> int:
                         inserted_inbox += ins
                         deleted_inbox += dele
 
+                        repointed_vk_inbox += _repoint_vk_inbox_imported_event(
+                            con, keep_id=keep.id, drop_id=drop_id
+                        )
+                        linked_rows_updated += _rewrite_linked_event_ids(
+                            con, keep_id=keep.id, drop_id=drop_id
+                        )
+
                         con.execute("DELETE FROM event WHERE id=?", (drop_id,))
 
                     con.commit()
@@ -640,7 +740,9 @@ def main() -> int:
                     f" joboutbox repointed={repointed_jobs};"
                     f" ticket_site_queue repointed={repointed_tsq};"
                     f" vk_publish_queue repointed={repointed_vkq};"
+                    f" vk_inbox repointed={repointed_vk_inbox};"
                     f" vk_inbox_import_event inserted={inserted_inbox} deleted={deleted_inbox}"
+                    f"; linked_event_ids updated={linked_rows_updated}"
                 )
 
         if args.apply and explicit_clusters:

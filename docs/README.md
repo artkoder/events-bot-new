@@ -15,6 +15,7 @@
 - Справочники: `docs/reference/` (локации, праздники, шаблоны)
 - Пайплайны/парсеры (каноника): `docs/features/source-parsing/` (в `docs/pipelines/` остаются redirect‑stub’ы для старых ссылок)
 - Фичи: `docs/features/`
+- 3D previews (`/3di`): `docs/features/preview-3d/README.md`
 - Бэклог (не реализовано): `docs/backlog/`
 - Отчёты и планы: `docs/reports/`
 - Инструменты: `docs/tools/`

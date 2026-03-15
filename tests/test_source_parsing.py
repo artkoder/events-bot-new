@@ -11,6 +11,7 @@ from source_parsing.parser import (
     fuzzy_title_match,
     limit_photos_for_source,
 )
+from source_parsing.handlers import _build_parser_source_text
 
 
 class TestParseDateRaw:
@@ -220,13 +221,13 @@ class TestShortDescriptionFallback:
         description = "Это первое предложение. Это второе предложение. И третье."
         first_sentence = description.split('.')[0].strip()
         assert first_sentence == "Это первое предложение"
-        
+
     def test_first_sentence_with_empty_result(self):
         """Empty description should not cause errors."""
         description = ""
         first_sentence = description.split('.')[0].strip()
         assert first_sentence == ""
-        
+
     def test_first_sentence_no_period(self):
         """Description without period returns full text."""
         description = "Текст без точки"
@@ -240,3 +241,41 @@ class TestShortDescriptionFallback:
         first_sentence = description.split('.')[0].strip() if description else ""
         result = first_sentence + '.' if first_sentence else title
         assert result == title
+
+
+class TestParserSourceText:
+    """Tests for parser-to-LLM source text assembly."""
+
+    def test_build_parser_source_text_includes_structured_fields(self):
+        event = TheatreEvent(
+            title="Euphoria party",
+            description="Ночная вечеринка с dj-сетами.",
+            date_raw="2026-04-18T17:00:00+02:00",
+            ticket_status="available",
+            url="https://kaliningrad.qtickets.events/221212-euphoria-party",
+            photos=[],
+            pushkin_card=False,
+            location="Клуб YALTA",
+            source_type="qtickets",
+            parsed_date="2026-04-18",
+            parsed_time="17:00",
+            age_restriction="18+",
+            ticket_price_min=700,
+            ticket_price_max=1200,
+        )
+
+        source_text = _build_parser_source_text(
+            event,
+            full_description="Ночная вечеринка с dj-сетами.",
+            location_name="YALTA",
+        )
+
+        assert "Название: Euphoria party" in source_text
+        assert "Дата: 2026-04-18" in source_text
+        assert "Время: 17:00" in source_text
+        assert "Площадка: YALTA" in source_text
+        assert "Возраст: 18+" in source_text
+        assert "Статус билетов: доступны" in source_text
+        assert "Цена: 700-1200 RUB" in source_text
+        assert "Ссылка: https://kaliningrad.qtickets.events/221212-euphoria-party" in source_text
+        assert "Описание:\nНочная вечеринка с dj-сетами." in source_text

@@ -20,8 +20,10 @@ from apscheduler.events import (
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from admin_chat import resolve_superadmin_chat_id
 from db import optimize, wal_checkpoint_truncate, vacuum
 from heavy_ops import current_heavy_meta, describe_heavy_meta, heavy_operation
+from ops_run import finish_ops_run, start_ops_run
 from runtime import get_running_main
 
 
@@ -397,6 +399,55 @@ _HEAVY_JOB_IDS: set[str] = {
     "telegraph_cache_sanitize",
 }
 
+_OPS_RUN_KIND_BY_JOB_ID: dict[str, str] = {
+    "3di_scheduler": "3di",
+    "source_parsing": "parse",
+    "source_parsing_day": "parse",
+}
+
+
+def _ops_run_kind_for_job(job_id: str) -> str:
+    return _OPS_RUN_KIND_BY_JOB_ID.get(job_id, job_id)
+
+
+async def _record_scheduler_skip(
+    db_obj: Any,
+    *,
+    job_id: str,
+    run_id: str | None,
+    reason: str,
+    blocked_by: Any | None = None,
+) -> None:
+    if db_obj is None or not hasattr(db_obj, "raw_conn"):
+        return
+    details: dict[str, Any] = {
+        "run_id": run_id,
+        "skip_reason": str(reason or "").strip() or "unknown",
+        "scheduler_job_id": str(job_id or "").strip() or "scheduler_job",
+    }
+    blocked_kind = str(getattr(blocked_by, "kind", "") or "").strip()
+    blocked_trigger = str(getattr(blocked_by, "trigger", "") or "").strip()
+    if blocked_kind:
+        details["blocked_by_kind"] = blocked_kind
+    if blocked_trigger:
+        details["blocked_by_trigger"] = blocked_trigger
+    try:
+        ops_run_id = await start_ops_run(
+            db_obj,
+            kind=_ops_run_kind_for_job(job_id),
+            trigger="scheduled",
+            operator_id=0,
+            details=details,
+        )
+        await finish_ops_run(
+            db_obj,
+            run_id=ops_run_id,
+            status="skipped",
+            details=details,
+        )
+    except Exception:
+        logging.warning("SCHED failed to record skipped ops_run job_id=%s", job_id, exc_info=True)
+
 
 def _job_next_run(job):
     return getattr(job, "next_run_time", None) or getattr(job, "next_run_at", None)
@@ -464,6 +515,13 @@ def _job_wrapper(job_id: str, func, *, notify_skip: Callable[[str, str], None] |
                     if not acquired:
                         meta = current_heavy_meta()
                         meta_txt = describe_heavy_meta(meta)
+                        await _record_scheduler_skip(
+                            args[0] if args else None,
+                            job_id=job_id,
+                            run_id=run_id,
+                            reason="heavy_busy",
+                            blocked_by=meta,
+                        )
                         logging.info(
                             "job_skip_heavy_busy job_id=%s run_id=%s current=%s",
                             job_id,
@@ -570,20 +628,21 @@ def startup(
 
     main_module = None
 
-    def _notify_admin_skip(job_name: str, reason: str) -> None:
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-        if not admin_chat_id:
-            return
-        try:
-            chat_id = int(admin_chat_id)
-        except (TypeError, ValueError):
-            logging.warning("SCHED invalid ADMIN_CHAT_ID=%r", admin_chat_id)
+    async def _notify_admin_skip_async(job_name: str, reason: str) -> None:
+        chat_id = await resolve_superadmin_chat_id(db)
+        if not chat_id:
             return
         if bot is None or not hasattr(bot, "send_message"):
             return
         text = f"⚠️ SCHED: пропуск {job_name}. Причина: {reason}"
         try:
-            asyncio.create_task(bot.send_message(chat_id, text))
+            await bot.send_message(chat_id, text)
+        except Exception:
+            logging.exception("SCHED failed to notify admin chat")
+
+    def _notify_admin_skip(job_name: str, reason: str) -> None:
+        try:
+            asyncio.create_task(_notify_admin_skip_async(job_name, reason))
         except RuntimeError:
             logging.warning("SCHED failed to notify admin: no running event loop")
         except Exception:
@@ -834,7 +893,9 @@ def startup(
     if enable_vk_auto_import:
         from vk_auto_queue import vk_auto_import_scheduler
 
-        vk_auto_times = os.getenv("VK_AUTO_IMPORT_TIMES_LOCAL", "06:30,18:30").strip()
+        vk_auto_times = os.getenv(
+            "VK_AUTO_IMPORT_TIMES_LOCAL", "06:15,10:15,12:00,18:30"
+        ).strip()
         vk_auto_tz = os.getenv("VK_AUTO_IMPORT_TZ", "Europe/Kaliningrad").strip()
         for idx, t in enumerate(vk_auto_times.split(",")):
             t = t.strip()
@@ -883,13 +944,7 @@ def startup(
                         limit = parsed_limit
                 except ValueError:
                     logging.warning("invalid FESTIVAL_QUEUE_LIMIT=%r; using no limit", limit_raw)
-            admin_chat_raw = (os.getenv("ADMIN_CHAT_ID") or "").strip()
-            admin_chat_id: int | None = None
-            if admin_chat_raw:
-                try:
-                    admin_chat_id = int(admin_chat_raw)
-                except ValueError:
-                    logging.warning("invalid ADMIN_CHAT_ID=%r for festival queue scheduler", admin_chat_raw)
+            admin_chat_id = await resolve_superadmin_chat_id(db_obj)
             report = await process_festival_queue(
                 db_obj,
                 bot=bot_obj,
@@ -956,13 +1011,7 @@ def startup(
                         limit = parsed_limit
                 except ValueError:
                     logging.warning("invalid TICKET_SITES_QUEUE_LIMIT=%r; using default", limit_raw)
-            admin_chat_raw = (os.getenv("ADMIN_CHAT_ID") or "").strip()
-            admin_chat_id: int | None = None
-            if admin_chat_raw:
-                try:
-                    admin_chat_id = int(admin_chat_raw)
-                except ValueError:
-                    logging.warning("invalid ADMIN_CHAT_ID=%r for ticket sites queue scheduler", admin_chat_raw)
+            admin_chat_id = await resolve_superadmin_chat_id(db_obj)
             report = await process_ticket_sites_queue(
                 db_obj,
                 bot=bot_obj,
@@ -1009,8 +1058,21 @@ def startup(
     enable_3di = _env_enabled("ENABLE_3DI_SCHEDULED", default=is_prod)
     if enable_3di:
         from preview_3d.handlers import run_3di_new_only_scheduler
-        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
-        run_chat_id = int(admin_chat_id) if admin_chat_id else None
+
+        async def preview_3di_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            run_id: str | None = None,
+        ) -> None:
+            run_chat_id = await resolve_superadmin_chat_id(db_obj)
+            await run_3di_new_only_scheduler(
+                db_obj,
+                bot_obj,
+                chat_id=run_chat_id,
+                run_id=run_id,
+            )
+
         three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "05:30,15:15,17:15")
         three_di_tz = os.getenv("THREEDI_TZ", "Europe/Kaliningrad")
         for idx, t in enumerate(three_di_times.split(",")):
@@ -1026,13 +1088,12 @@ def startup(
             )
             _register_job(
                 f"3di_scheduler_{idx}",
-                _job_wrapper("3di_scheduler", run_3di_new_only_scheduler, notify_skip=_notify_admin_skip),
+                _job_wrapper("3di_scheduler", preview_3di_scheduler, notify_skip=_notify_admin_skip),
                 "cron",
                 id=f"3di_scheduler_{idx}",
                 hour=hour,
                 minute=minute,
                 args=[db, bot],
-                kwargs={"chat_id": run_chat_id},
                 replace_existing=True,
                 max_instances=1,
                 coalesce=True,
@@ -1041,6 +1102,82 @@ def startup(
     else:
         logging.info("SCHED skipping 3di_scheduler (ENABLE_3DI_SCHEDULED!=1)")
         _notify_admin_skip("3di_scheduler", "ENABLE_3DI_SCHEDULED!=1")
+
+    enable_guide_excursions = _env_enabled("ENABLE_GUIDE_EXCURSIONS_SCHEDULED", default=False)
+    if enable_guide_excursions:
+        from guide_excursions.service import run_guide_monitor
+
+        async def guide_excursions_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            mode: str,
+            run_id: str | None = None,
+        ) -> None:
+            target_chat_id = await resolve_superadmin_chat_id(db_obj)
+            await run_guide_monitor(
+                db_obj,
+                bot_obj,
+                chat_id=target_chat_id,
+                operator_id=None,
+                trigger="scheduled",
+                mode=mode,
+                send_progress=bool(target_chat_id),
+            )
+
+        guide_tz_name = os.getenv("GUIDE_EXCURSIONS_TZ", "Europe/Kaliningrad").strip()
+        light_times = (os.getenv("GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL", "09:05,13:20") or "").split(",")
+        for idx, value in enumerate(light_times):
+            raw_time = value.strip()
+            if not raw_time:
+                continue
+            hour, minute = _cron_from_local(
+                raw_time,
+                guide_tz_name,
+                default_hour="9",
+                default_minute="5",
+                label="GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL",
+            )
+            _register_job(
+                f"guide_excursions_light_{idx}",
+                _job_wrapper("guide_excursions_light", guide_excursions_scheduler, notify_skip=_notify_admin_skip),
+                "cron",
+                id=f"guide_excursions_light_{idx}",
+                hour=hour,
+                minute=minute,
+                args=[db, bot],
+                kwargs={"mode": "light"},
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+
+        full_time_raw = os.getenv("GUIDE_EXCURSIONS_FULL_TIME_LOCAL", "20:10").strip()
+        full_hour, full_minute = _cron_from_local(
+            full_time_raw,
+            guide_tz_name,
+            default_hour="20",
+            default_minute="10",
+            label="GUIDE_EXCURSIONS_FULL_TIME_LOCAL",
+        )
+        _register_job(
+            "guide_excursions_full",
+            _job_wrapper("guide_excursions_full", guide_excursions_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="guide_excursions_full",
+            hour=full_hour,
+            minute=full_minute,
+            args=[db, bot],
+            kwargs={"mode": "full"},
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping guide_excursions (ENABLE_GUIDE_EXCURSIONS_SCHEDULED!=1)")
+        _notify_admin_skip("guide_excursions", "ENABLE_GUIDE_EXCURSIONS_SCHEDULED!=1")
 
     enable_general_stats = _env_enabled("ENABLE_GENERAL_STATS", default=False)
     if enable_general_stats:
@@ -1082,13 +1219,7 @@ def startup(
             *,
             run_id: str | None = None,
         ) -> None:
-            admin_chat_raw = (os.getenv("ADMIN_CHAT_ID") or "").strip()
-            admin_chat_id: int | None = None
-            if admin_chat_raw:
-                try:
-                    admin_chat_id = int(admin_chat_raw)
-                except ValueError:
-                    logging.warning("invalid ADMIN_CHAT_ID=%r for telegraph cache scheduler", admin_chat_raw)
+            admin_chat_id = await resolve_superadmin_chat_id(db_obj)
             res = await run_telegraph_cache_sanitizer(
                 db_obj,
                 bot=bot_obj,

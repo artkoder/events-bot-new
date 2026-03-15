@@ -17,6 +17,7 @@ from sqlalchemy.exc import OperationalError
 
 from db import Database
 from event_utils import strip_city_from_address
+from location_reference import normalise_event_location_from_reference
 from models import (
     Channel,
     EventMediaAsset,
@@ -508,6 +509,8 @@ def _clean_url(value: str | None) -> str | None:
     raw = value.strip()
     if not raw:
         return None
+    if re.match(r"(?i)^tg://user\?id=\d+$", raw):
+        return raw
     if not re.match(r"https?://", raw):
         return None
     if re.match(r"^https?://t\.me/addlist/", raw):
@@ -536,6 +539,8 @@ def _coerce_url(value: str | None) -> str | None:
     raw = _TRAILING_URL_PUNCT_RE.sub("", raw).strip()
     if not raw:
         return None
+    if re.match(r"(?i)^tg://user\?id=\d+$", raw):
+        return raw
     if raw.lower().startswith(("http://", "https://")):
         return _clean_url(raw)
     if raw.lower().startswith(("t.me/", "vk.cc/", "clck.ru/")):
@@ -925,6 +930,87 @@ def _location_matches(a: str | None, b: str | None) -> bool:
     return False
 
 
+_LOCATION_EXPLICIT_STOPWORDS = {
+    "город",
+    "городская",
+    "городской",
+    "областная",
+    "областной",
+    "центральная",
+    "центральной",
+    "информационно",
+    "туристический",
+    "туристического",
+    "пространство",
+    "площадка",
+    "выставочное",
+    "театр",
+    "музей",
+    "галерея",
+    "центр",
+    "замок",
+    "библиотека",
+    "библиотеке",
+    "им",
+}
+
+
+def _normalize_location_probe_text(text: str | None) -> str:
+    if not text:
+        return ""
+    raw = str(text).replace("ё", "е").lower()
+    raw = re.sub(r"[«»\"'()]", " ", raw)
+    raw = re.sub(r"[^\w\s]+", " ", raw, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _location_probe_tokens(text: str | None) -> set[str]:
+    norm = _normalize_location_probe_text(text)
+    if not norm:
+        return set()
+    out: set[str] = set()
+    for tok in norm.split():
+        if tok.isdigit():
+            out.add(tok)
+            continue
+        if len(tok) < 4:
+            continue
+        if tok in _LOCATION_EXPLICIT_STOPWORDS:
+            continue
+        out.add(tok)
+    return out
+
+
+def _source_text_explicitly_mentions_location(
+    source_text: str | None,
+    *,
+    location_name: str | None,
+    location_address: str | None,
+) -> bool:
+    source_norm = _normalize_location_probe_text(source_text)
+    if not source_norm:
+        return False
+
+    addr_norm = _normalize_location_probe_text(location_address)
+    if addr_norm and len(addr_norm) >= 5 and addr_norm in source_norm:
+        return True
+
+    name_norm = _normalize_location_probe_text(location_name)
+    if name_norm and len(name_norm) >= 10 and name_norm in source_norm:
+        return True
+
+    source_tokens = set(source_norm.split())
+    name_hits = _location_probe_tokens(location_name) & source_tokens
+    if len(name_hits) >= 2:
+        return True
+
+    addr_hits = _location_probe_tokens(location_address) & source_tokens
+    if name_hits and addr_hits:
+        return True
+
+    return False
+
+
 _SCHED_LINE_RE = re.compile(r"(^|\s)(\d{1,2})[./](\d{1,2})\s*\|", re.IGNORECASE)
 _SCHED_LINE_START_RE = re.compile(r"^\s*\d{1,2}[./]\d{1,2}\s*\|", re.IGNORECASE)
 _TIME_TOKEN_RE = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
@@ -1148,6 +1234,25 @@ def _payload_to_poster_candidates(payload: list[dict[str, Any]] | None) -> list[
     return _dedupe_poster_candidates(out, limit=8)
 
 
+def _select_public_page_fallback_posters(
+    candidate: EventCandidate,
+    posters: list[PosterCandidate] | None,
+    *,
+    is_single_event_post: bool,
+) -> list[PosterCandidate]:
+    deduped = _dedupe_poster_candidates(list(posters or []), limit=5)
+    if not deduped:
+        return []
+    if is_single_event_post:
+        return deduped
+    return _filter_posters_for_event(
+        deduped,
+        event_title=str(candidate.title or "").strip() or None,
+        event_date=str(candidate.date or "").strip() or None,
+        event_time=str(candidate.time or "").strip() or None,
+    )
+
+
 def _canonical_tg_post_url(value: str | None) -> str | None:
     username, message_id = _parse_tg_source_url(value)
     uname = normalize_tg_username(username)
@@ -1337,11 +1442,14 @@ async def _fallback_fetch_posters_from_public_tg_page(
     username: str,
     message_id: int,
     limit: int = 3,
+    need_ocr: bool = False,
 ) -> list[PosterCandidate]:
     """Best-effort fallback: scrape poster URLs from public `t.me/s/...` HTML.
 
     This is used only when the Telegram monitoring payload contains no posters at all.
     It prevents events from being imported without images due to upstream media failures.
+    For multi-event posts we can optionally OCR the scraped images, so downstream logic
+    can keep image-only posters for every child event while still filtering schedule posters.
     """
     uname = normalize_tg_username(username)
     if not uname or not message_id:
@@ -1428,7 +1536,11 @@ async def _fallback_fetch_posters_from_public_tg_page(
     try:
         from poster_media import process_media
 
-        poster_items, _msg = await process_media(images, need_catbox=True, need_ocr=False)
+        poster_items, _msg = await process_media(
+            images,
+            need_catbox=True,
+            need_ocr=bool(need_ocr),
+        )
     except Exception:
         logger.debug(
             "tg_monitor.poster_fallback process_media failed source=%s message_id=%s",
@@ -1444,10 +1556,18 @@ async def _fallback_fetch_posters_from_public_tg_page(
         sha = str(getattr(item, "digest", None) or "").strip() or None
         if not url:
             continue
+        common_kwargs = {
+            "sha256": sha,
+            "ocr_text": getattr(item, "ocr_text", None),
+            "ocr_title": getattr(item, "ocr_title", None),
+            "prompt_tokens": int(getattr(item, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(item, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(item, "total_tokens", 0) or 0),
+        }
         if _looks_like_supabase_url(url):
-            posters.append(PosterCandidate(supabase_url=url, sha256=sha))
+            posters.append(PosterCandidate(supabase_url=url, **common_kwargs))
         else:
-            posters.append(PosterCandidate(catbox_url=url, sha256=sha))
+            posters.append(PosterCandidate(catbox_url=url, **common_kwargs))
     if posters:
         return posters
 
@@ -2324,6 +2444,10 @@ _TICKET_CONTACT_LINE_RE = re.compile(
 )
 _TG_HANDLE_IN_TEXT_RE = re.compile(r"(?i)@([a-z0-9_]{4,32})")
 _TG_LINK_IN_TEXT_RE = re.compile(r"(?i)(?:https?://)?t\.me/([a-z0-9_]{4,32})\b")
+_PHONE_IN_TEXT_RE = re.compile(
+    r"(?u)(?<!\d)(?:\+7|8)\s*\(?\d{3}\)?[\s-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)"
+)
+_EMAIL_IN_TEXT_RE = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 
 
 def _extract_ticket_link_from_text(text: str | None) -> str | None:
@@ -2354,6 +2478,37 @@ def _extract_ticket_link_from_text(text: str | None) -> str | None:
             if handle:
                 return f"https://t.me/{handle}"
     return None
+
+
+def _build_tg_user_link(username: str | None, user_id: Any) -> str | None:
+    uname = normalize_tg_username(username)
+    if uname:
+        return f"https://t.me/{uname}"
+    uid = _to_int(user_id)
+    if uid and uid > 0:
+        return f"tg://user?id={uid}"
+    return None
+
+
+def _infer_ticket_link_from_group_post_author(
+    message: dict[str, Any],
+    *,
+    text: str | None,
+) -> str | None:
+    source_type = str(message.get("source_type") or "").strip().lower()
+    if source_type not in {"group", "supergroup"}:
+        return None
+    author = message.get("post_author")
+    if not isinstance(author, dict):
+        return None
+    if not bool(author.get("is_user")):
+        return None
+    raw_text = str(text or "").strip()
+    if raw_text and (
+        _PHONE_IN_TEXT_RE.search(raw_text) or _EMAIL_IN_TEXT_RE.search(raw_text)
+    ):
+        return None
+    return _build_tg_user_link(author.get("username"), author.get("user_id"))
 
 
 def _norm_match(s: str | None) -> str:
@@ -2852,19 +3007,6 @@ def _build_candidate(
     location_address = event_data.get("location_address")
     extracted_location_address = location_address
     location_overridden_by_default = False
-    if extracted_location and source.default_location and not _location_matches(
-        extracted_location, source.default_location
-    ):
-        logger.warning(
-            "telegram: location mismatch for @%s msg=%s extracted=%s default=%s",
-            username,
-            message_id,
-            extracted_location,
-            source.default_location,
-        )
-        location_name = source.default_location
-        location_address = None
-        location_overridden_by_default = True
     if not location_name and location_address:
         location_name, location_address = location_address, None
     extracted_city = event_data.get("city")
@@ -2879,22 +3021,8 @@ def _build_candidate(
             last_part = ""
         if last_part and not re.search(r"\d", last_part):
             default_city = _infer_city_from_location_string(location_name)
-    if default_city:
-        if extracted_city and str(extracted_city).strip().casefold() != str(default_city).strip().casefold():
-            logger.warning(
-                "telegram: city mismatch for @%s msg=%s extracted=%s default=%s",
-                username,
-                message_id,
-                extracted_city,
-                default_city,
-            )
-            city_overridden_by_default = True
-        city = default_city
-    else:
-        city = extracted_city or "Калининград"
-    if location_address:
-        location_address = strip_city_from_address(location_address, city)
     ticket_link = _coerce_url(event_data.get("ticket_link")) or _coerce_url(source.default_ticket_link)
+    ticket_link_from_post_author = False
     ticket_price_min = _to_int(event_data.get("ticket_price_min"))
     ticket_price_max = _to_int(event_data.get("ticket_price_max"))
     ticket_status = event_data.get("ticket_status")
@@ -3029,6 +3157,97 @@ def _build_candidate(
                 location_name,
             )
 
+    if extracted_location and source.default_location and not _location_matches(
+        extracted_location, source.default_location
+    ):
+        logger.warning(
+            "telegram: location mismatch for @%s msg=%s extracted=%s default=%s",
+            username,
+            message_id,
+            extracted_location,
+            source.default_location,
+        )
+        explicit_offsite = _source_text_explicitly_mentions_location(
+            message_text_s or event_source_text,
+            location_name=extracted_location,
+            location_address=extracted_location_address,
+        )
+        if explicit_offsite:
+            logger.info(
+                "telegram: keeping explicit extracted location over default for @%s msg=%s extracted=%s",
+                username,
+                message_id,
+                extracted_location,
+            )
+            location_name = extracted_location
+            location_address = extracted_location_address
+        else:
+            location_name = source.default_location
+            location_address = None
+            location_overridden_by_default = True
+
+    kept_explicit_location = bool(
+        extracted_location
+        and location_name
+        and str(extracted_location).strip().casefold()
+        == str(location_name).strip().casefold()
+        and source.default_location
+        and not _location_matches(extracted_location, source.default_location)
+    )
+
+    if default_city:
+        if (
+            extracted_city
+            and str(extracted_city).strip().casefold() != str(default_city).strip().casefold()
+        ):
+            logger.warning(
+                "telegram: city mismatch for @%s msg=%s extracted=%s default=%s",
+                username,
+                message_id,
+                extracted_city,
+                default_city,
+            )
+            if kept_explicit_location:
+                city = extracted_city
+            else:
+                city_overridden_by_default = True
+                city = default_city
+        else:
+            city = default_city
+    else:
+        city = extracted_city or "Калининград"
+    if location_address:
+        location_address = strip_city_from_address(location_address, city)
+
+    location_payload = {
+        "location_name": str(location_name).strip() if location_name else None,
+        "location_address": str(location_address).strip() if location_address else None,
+        "city": str(city).strip() if city else None,
+    }
+    matched_venue = normalise_event_location_from_reference(location_payload)
+    normalized_location_name = (location_payload.get("location_name") or "").strip() or None
+    normalized_location_address = (location_payload.get("location_address") or "").strip() or None
+    normalized_city = (location_payload.get("city") or "").strip() or None
+    if matched_venue and (
+        normalized_location_name != (str(location_name).strip() if location_name else None)
+        or normalized_location_address != (str(location_address).strip() if location_address else None)
+        or normalized_city != (str(city).strip() if city else None)
+    ):
+        logger.info(
+            "telegram: normalized known venue source=%s message_id=%s before=%r/%r/%r after=%r/%r/%r",
+            username,
+            message_id,
+            location_name,
+            location_address,
+            city,
+            normalized_location_name,
+            normalized_location_address,
+            normalized_city,
+        )
+    location_name = normalized_location_name
+    location_address = normalized_location_address
+    city = normalized_city
+
     # Extract a booking contact from the message when ticket_link is missing.
     if not ticket_link:
         inferred_from_links = _infer_ticket_link_from_message_links(_extract_message_links(message))
@@ -3062,6 +3281,24 @@ def _build_candidate(
             ticket_link = inferred_text_url
             logger.info(
                 "telegram: inferred missing ticket link from message urls source=%s message_id=%s title=%r ticket_link=%s",
+                username,
+                message_id,
+                title,
+                ticket_link,
+            )
+
+    if not ticket_link:
+        inferred_author_link = _infer_ticket_link_from_group_post_author(
+            message,
+            text="\n".join(
+                part for part in (message_text_s, event_source_text) if str(part or "").strip()
+            ),
+        )
+        if inferred_author_link:
+            ticket_link = inferred_author_link
+            ticket_link_from_post_author = True
+            logger.info(
+                "telegram: inferred missing ticket link from post author source=%s message_id=%s title=%r ticket_link=%s",
                 username,
                 message_id,
                 title,
@@ -3251,7 +3488,9 @@ def _build_candidate(
             if extracted_location_address
             else None,
             "tg_location_overridden_by_default": bool(location_overridden_by_default),
+            "tg_location_kept_extracted": kept_explicit_location,
             "tg_city_overridden_by_default": bool(city_overridden_by_default),
+            "tg_ticket_link_from_post_author": bool(ticket_link_from_post_author),
         }
     )
 
@@ -4389,15 +4628,17 @@ async def process_telegram_results(
                             message_id,
                             exc_info=True,
                         )
-                # Fallback poster scraping: only when we have no posters at all.
+                # Fallback poster scraping: when the payload brought no poster URLs at all.
                 # Do it once per message and reuse for all extracted events if needed.
-                if is_single_event_post and not _has_poster_urls(list(candidate.posters or [])):
+                if not _has_poster_urls(list(candidate.posters or [])):
                     try:
                         if scraped_posters is None:
+                            fallback_limit = 2 if is_single_event_post else 5
                             scraped_posters = await _fallback_fetch_posters_from_public_tg_page(
                                 username=username,
                                 message_id=int(message_id or 0),
-                                limit=2,
+                                limit=fallback_limit,
+                                need_ocr=not is_single_event_post,
                             )
                             logger.info(
                                 "tg_monitor.poster_fallback source=%s message_id=%s posters=%d",
@@ -4405,11 +4646,20 @@ async def process_telegram_results(
                                 message_id,
                                 len(scraped_posters or []),
                             )
-                        if scraped_posters:
-                            candidate.posters = list(scraped_posters)
-                            candidate.poster_scope_hashes = sorted(
-                                {p.sha256 for p in candidate.posters if (p.sha256 or "").strip()}
+                        selected_fallback_posters = _select_public_page_fallback_posters(
+                            candidate,
+                            scraped_posters,
+                            is_single_event_post=is_single_event_post,
+                        )
+                        if selected_fallback_posters:
+                            candidate.posters = list(selected_fallback_posters)
+                            scope_hashes = {h for h in (candidate.poster_scope_hashes or []) if h}
+                            scope_hashes.update(
+                                str(p.sha256 or "").strip()
+                                for p in (scraped_posters or [])
+                                if str(p.sha256 or "").strip()
                             )
+                            candidate.poster_scope_hashes = sorted(scope_hashes)
                     except Exception:
                         logger.debug(
                             "tg_monitor.poster_fallback failed source=%s message_id=%s",

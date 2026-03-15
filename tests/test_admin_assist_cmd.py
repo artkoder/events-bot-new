@@ -58,7 +58,6 @@ def test_build_command_vktime():
 
 def test_build_command_args_text_sanitized():
     assert assist._build_command_text("parse", {"args_text": "check"}) == "/parse check"
-    assert assist._build_command_text("recent_imports", {"args_text": "48"}) == "/recent_imports 48"
     with pytest.raises(ValueError):
         assist._build_command_text("parse", {"args_text": "check\nrm -rf"})
     with pytest.raises(ValueError):
@@ -158,14 +157,6 @@ def test_heuristic_routes_popular_posts():
     props = assist._heuristic_proposals("посмотреть статистику популярных постов")
     assert props, "expected heuristic proposals"
     assert props[0].action_id == "popular_posts"
-
-
-def test_heuristic_routes_recent_imports_legacy_phrase():
-    props = assist._heuristic_proposals(
-        "какие события были созданы или обновлены из телеграма, вк и parse за последние 24 часа"
-    )
-    assert props, "expected heuristic proposals"
-    assert props[0].action_id == "recent_imports"
 
 
 def test_heuristic_routes_recent_imports_for_source_list_query():

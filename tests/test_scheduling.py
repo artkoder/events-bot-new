@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
 import sys
+import time
+from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
+
+import pytest
 
 import scheduling
 import vk_intake
+from db import Database
+from heavy_ops import HeavyOpMeta
 
 
 def test_scheduler_and_extract_do_not_import_main(monkeypatch):
@@ -77,3 +84,48 @@ def test_scheduler_and_extract_do_not_import_main(monkeypatch):
         else:
             sys.modules.pop("main", None)
 
+
+@pytest.mark.asyncio
+async def test_job_wrapper_records_skipped_heavy_ops_run(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    monkeypatch.setenv("SCHED_HEAVY_GUARD_MODE", "skip")
+    monkeypatch.delenv("SCHED_SERIALIZE_HEAVY_JOBS", raising=False)
+
+    @asynccontextmanager
+    async def fake_heavy_operation(**_kwargs):
+        yield False
+
+    async def should_not_run(*_args, **_kwargs):
+        raise AssertionError("scheduled job body must not run when heavy guard skips it")
+
+    blocked_meta = HeavyOpMeta(
+        kind="tg_monitoring",
+        trigger="scheduled",
+        started_monotonic=time.monotonic(),
+        run_id="blocked-run",
+        operator_id=0,
+        chat_id=None,
+    )
+
+    monkeypatch.setattr(scheduling, "heavy_operation", fake_heavy_operation)
+    monkeypatch.setattr(scheduling, "current_heavy_meta", lambda: blocked_meta)
+
+    wrapped = scheduling._job_wrapper("vk_auto_import", should_not_run)
+    await wrapped(db, None)
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT kind, trigger, status, details_json FROM ops_run ORDER BY id ASC"
+        )
+        row = await cur.fetchone()
+
+    assert row is not None
+    kind, trigger, status, details_raw = row
+    details = json.loads(details_raw)
+    assert kind == "vk_auto_import"
+    assert trigger == "scheduled"
+    assert status == "skipped"
+    assert details["skip_reason"] == "heavy_busy"
+    assert details["blocked_by_kind"] == "tg_monitoring"

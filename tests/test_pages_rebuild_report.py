@@ -1,6 +1,13 @@
 import pytest
 from datetime import date
 import main
+import main_part2
+
+
+def test_weekends_for_months_helper_has_defaultdict_import():
+    weekends, mapping = main_part2._weekends_for_months(["2025-09"])
+    assert weekends == ["2025-09-06", "2025-09-13", "2025-09-20", "2025-09-27"]
+    assert mapping["2025-09"] == weekends
 
 
 @pytest.mark.asyncio

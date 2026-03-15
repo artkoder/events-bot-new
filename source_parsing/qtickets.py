@@ -276,41 +276,83 @@ def parse_qtickets_output(file_paths: list[str]) -> list[TheatreEvent]:
                 if not title:
                     continue
                 
-                # Parse date - kernel outputs "date" in "YYYY-MM-DD" format
-                date_str = (item.get("date") or "").strip()
-                time_str = (item.get("time") or "").strip()
-                
-                parsed_date = None
-                if date_str:
+                # Current Kaggle contract emits:
+                # - date_raw
+                # - parsed_date / parsed_time
+                # - photos[]
+                # - ticket_price_min / ticket_price_max
+                # - ticket_status
+                #
+                # Keep backward compatibility with older dumps that used
+                # date/time/image_url/price_min/price_max.
+                date_raw = (
+                    (item.get("date_raw") or "").strip()
+                    or (item.get("date") or "").strip()
+                    or (item.get("parsed_date") or "").strip()
+                )
+                parsed_date = (item.get("parsed_date") or "").strip()
+                parsed_time = (
+                    (item.get("parsed_time") or "").strip()
+                    or (item.get("time") or "").strip()
+                )
+
+                if not parsed_date and date_raw:
                     try:
-                        parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                        parsed_date = datetime.strptime(date_raw, "%Y-%m-%d").date().isoformat()
                     except ValueError:
-                        # Try parsing via parse_date_raw
-                        parsed_date, _ = parse_date_raw(date_str)
-                
-                parsed_time = time_str if time_str else "00:00"
-                
-                # Location (already normalized by parser)
-                location = (item.get("location") or "").strip()
-                
-                # Photos
-                image_url = item.get("image_url")
-                photos = [image_url] if image_url else []
-                
-                # Ticket info
-                ticket_status = "available"  # Qtickets events are available by definition
+                        try:
+                            parsed_dt = datetime.fromisoformat(date_raw)
+                        except ValueError:
+                            parsed_dt = None
+                        if parsed_dt is not None:
+                            parsed_date = parsed_dt.date().isoformat()
+                            if not parsed_time:
+                                parsed_time = parsed_dt.strftime("%H:%M")
+                        else:
+                            parsed_date, inferred_time = parse_date_raw(date_raw)
+                            if not parsed_time and inferred_time:
+                                parsed_time = inferred_time
+
+                if not parsed_time:
+                    parsed_time = "00:00"
+
+                location = (
+                    (item.get("location") or "").strip()
+                    or (item.get("location_name") or "").strip()
+                )
+
+                photos_raw = item.get("photos")
+                photos: list[str] = []
+                if isinstance(photos_raw, list):
+                    photos = [str(url).strip() for url in photos_raw if str(url or "").strip()]
+                elif isinstance(photos_raw, str) and photos_raw.strip():
+                    photos = [photos_raw.strip()]
+                if not photos:
+                    image_url = str(item.get("image_url") or "").strip()
+                    if image_url:
+                        photos = [image_url]
+
+                ticket_status = (item.get("ticket_status") or "").strip()
                 ticket_link = (item.get("url") or "").strip()
-                
-                # Prices
-                price_min = item.get("price_min")
-                price_max = item.get("price_max")
+                if not ticket_status:
+                    if item.get("ticket_price_min") is not None or item.get("price_min") is not None:
+                        ticket_status = "available"
+                    else:
+                        ticket_status = "unknown"
+
+                price_min = item.get("ticket_price_min")
+                if price_min is None:
+                    price_min = item.get("price_min")
+                price_max = item.get("ticket_price_max")
+                if price_max is None:
+                    price_max = item.get("price_max")
                 
                 # Age restriction
                 age_restriction = (item.get("age_restriction") or "").strip()
                 
                 event = TheatreEvent(
                     title=title,
-                    date_raw=date_str,
+                    date_raw=date_raw,
                     ticket_status=ticket_status,
                     url=ticket_link,
                     photos=photos,

@@ -35,6 +35,13 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
         await conn.execute(
             "INSERT INTO telegram_source(id, username, enabled) VALUES(1002, 'src2_test', 1)"
         )
+        await conn.execute(
+            "INSERT INTO guide_profile(id, slug, profile_kind, display_name) VALUES(2001, 'guide-test', 'person', 'Guide Test')"
+        )
+        await conn.execute(
+            "INSERT INTO guide_source(id, username, platform, enabled, primary_profile_id, source_kind, trust_level) "
+            "VALUES(2001, 'guide_test', 'telegram', 1, 2001, 'guide_personal', 'high')"
+        )
 
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status, created_at) "
@@ -89,6 +96,22 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
             "VALUES(1002, 20, ?, 'done', 0, 2)",
             (in_window_2,),
         )
+        await conn.execute(
+            "INSERT INTO guide_monitor_post(source_id, message_id, post_date, source_url, text, prefilter_passed, last_scanned_at) "
+            "VALUES(2001, 501, ?, 'https://t.me/guide_test/501', 'Экскурсия 14 марта', 1, ?)",
+            (in_window_1, in_window_1),
+        )
+        await conn.execute(
+            "INSERT INTO guide_occurrence(id, primary_source_id, primary_message_id, source_fingerprint, canonical_title, title_normalized, "
+            "digest_eligible, date, summary_one_liner, first_seen_at, updated_at, last_seen_post_at) "
+            "VALUES(3001, 2001, 501, 'fp-guide-1', 'Экскурсия по району', 'по району', 1, '2026-02-20', 'Описание', ?, ?, ?)",
+            (in_window_1, in_window_1, in_window_1),
+        )
+        await conn.execute(
+            "INSERT INTO guide_digest_issue(id, family, status, published_at, target_chat) "
+            "VALUES(4001, 'new_occurrences', 'published', ?, '@keniggpt')",
+            (in_window_2,),
+        )
 
         await conn.execute(
             "INSERT INTO event(id, title, description, date, time, location_name, source_text, added_at) "
@@ -134,31 +157,6 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
         await conn.execute(
             "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
             "VALUES(5, 4, 'tg', 'u5', ?)",
-            (out_before,),
-        )
-        await conn.execute(
-            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
-            "VALUES(6, 2, 'parser:dramteatr', 'p1', ?)",
-            (in_window_1,),
-        )
-        await conn.execute(
-            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
-            "VALUES(7, 3, 'parser:qtickets', 'p2', ?)",
-            (in_window_2,),
-        )
-        await conn.execute(
-            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
-            "VALUES(8, 3, 'telegram', 'tg-created', ?)",
-            (in_window_2,),
-        )
-        await conn.execute(
-            "INSERT INTO event(id, title, description, date, time, location_name, source_text, added_at) "
-            "VALUES(5, 'PastEvent', 'd', '2026-02-10', '18:00', 'loc', 'src', ?)",
-            (out_before,),
-        )
-        await conn.execute(
-            "INSERT INTO event_source(id, event_id, source_type, source_url, imported_at) "
-            "VALUES(9, 5, 'vk', 'past-vk', ?)",
             (out_before,),
         )
 
@@ -244,18 +242,12 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
         )
         await conn.execute(
             "INSERT INTO ops_run(kind, trigger, started_at, finished_at, status, metrics_json, details_json) "
-            "VALUES('tg_monitoring', 'scheduled', ?, ?, 'success', ?, '{}')",
+            "VALUES('guide_monitoring', 'manual', ?, ?, 'success', ?, '{}')",
             (
                 in_window_2,
                 in_window_2,
                 json.dumps(
-                    {
-                        "sources_scanned": 2,
-                        "messages_processed": 3,
-                        "messages_with_events": 2,
-                        "events_created": 1,
-                        "events_merged": 2,
-                    },
+                    {"sources_scanned": 1, "posts_scanned": 2, "occurrences_created": 1, "occurrences_updated": 0},
                     ensure_ascii=False,
                 ),
             ),
@@ -280,25 +272,15 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert metrics["telegram"]["sources_scanned"] == 2
     assert metrics["telegram"]["messages_with_events"] == 2
     assert metrics["telegram"]["sources_with_events"] == 2
-    assert metrics["telegram"]["events_created"] == 1
-    assert metrics["telegram"]["events_updated"] == 2
-    assert len(metrics["telegram"]["tg_monitoring_runs"]) == 1
+    assert metrics["guide_excursions"]["sources_scanned"] == 1
+    assert metrics["guide_excursions"]["posts_prefiltered"] == 1
+    assert metrics["guide_excursions"]["occurrences_new"] == 1
+    assert metrics["guide_excursions"]["digest_published"] == 1
+    assert len(metrics["guide_excursions"]["guide_monitoring_runs"]) == 1
 
     assert metrics["events"]["events_created"] == 2
     assert metrics["events"]["events_updated"] == 2
     assert metrics["events"]["updated_sources_distribution"] == {2: 1, 3: 1}
-    source_share = metrics["events"]["source_share"]
-    assert source_share["period_total_events"] == 4
-    assert source_share["period_by_source"]["parse"]["count"] == 2
-    assert source_share["period_by_source"]["parse"]["percent"] == 50
-    assert source_share["period_by_source"]["telegram"]["count"] == 2
-    assert source_share["period_by_source"]["telegram"]["percent"] == 50
-    assert source_share["period_by_source"]["vk"]["count"] == 1
-    assert source_share["period_by_source"]["vk"]["percent"] == 25
-    assert source_share["future_total_events"] == 4
-    assert source_share["future_by_source"]["parse"]["count"] == 2
-    assert source_share["future_by_source"]["telegram"]["count"] == 2
-    assert source_share["future_by_source"]["vk"]["count"] == 1
 
     assert metrics["geo"]["new_cities_count"] == 1
     assert metrics["geo"]["new_cities"][0]["city_norm"] == "newcity"
@@ -314,15 +296,8 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert parse_breakdown["qtickets"]["processed"] == 1
 
     text = format_general_stats_message(snapshot)
-    assert "events_created: 1" in text
-    assert "events_updated: 2" in text
-    assert "events_created=1 events_updated=2" in text
-    assert "source_share_period: total_events=4" in text
-    assert "/parse: 50% (2/4)" in text
-    assert "telegram: 50% (2/4)" in text
-    assert "vk: 25% (1/4)" in text
-    assert "source_share_future_active: total_events=4" in text
-    assert "source_share_note: проценты могут пересекаться" in text
+    assert "Guide excursions:" in text
+    assert "- posts_prefiltered: 1" in text
 
 
 @pytest.mark.asyncio
@@ -350,6 +325,42 @@ async def test_collect_general_stats_uses_half_open_window(tmp_path):
 
     snapshot = await collect_general_stats(db, tz_name="Europe/Kaliningrad", now=now_local)
     assert snapshot.metrics["vk"]["vk_posts_added"] == 1
+
+
+@pytest.mark.asyncio
+async def test_format_general_stats_message_shows_trigger_and_skip_reason(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    tz = ZoneInfo("Europe/Kaliningrad")
+    now_local = datetime(2026, 2, 16, 7, 30, tzinfo=tz)
+    start_utc = (now_local - timedelta(hours=24)).astimezone(timezone.utc)
+    in_window = _utc_sql(start_utc + timedelta(hours=1))
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO ops_run(kind, trigger, started_at, finished_at, status, metrics_json, details_json) "
+            "VALUES('vk_auto_import', 'scheduled', ?, ?, 'skipped', '{}', ?)",
+            (
+                in_window,
+                in_window,
+                json.dumps(
+                    {
+                        "skip_reason": "heavy_busy",
+                        "blocked_by_kind": "tg_monitoring",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await conn.commit()
+
+    snapshot = await collect_general_stats(db, tz_name="Europe/Kaliningrad", now=now_local)
+    text = format_general_stats_message(snapshot)
+
+    assert "trigger=scheduled" in text
+    assert "reason=heavy_busy" in text
+    assert "blocked_by=tg_monitoring" in text
 
 
 class _FakeSupabaseResponse:

@@ -155,6 +155,139 @@ async def test_same_post_longrun_exact_title_merges_same_source_time_noise(
 
 
 @pytest.mark.asyncio
+async def test_same_post_longrun_exact_title_survives_time_filtered_shortlist(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    source_url = "https://vk.com/wall-152679358_23836"
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="Женственность через века",
+                date="2026-03-05",
+                time="12:00",
+                end_date="2026-06-05",
+                location_name="Информационно-туристический центр",
+                city="Черняховск",
+                event_type="выставка",
+                source_text="Выставка работает до 5 июня. Экскурсии в 12:00 и 15:00.",
+                source_post_url=source_url,
+                source_vk_post_url=source_url,
+            )
+        )
+        session.add(
+            _base_event(
+                id=2,
+                title="Другая выставка",
+                date="2026-03-05",
+                time="15:00",
+                location_name="Информационно-туристический центр",
+                city="Черняховск",
+                event_type="выставка",
+                source_text="Отвлекающая выставка на тот же слот.",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url=source_url,
+        source_text="Выставка работает до 5 июня. Экскурсии в 12:00 и 15:00.",
+        raw_excerpt="Экскурсия по выставке.",
+        title="Женственность через века",
+        date="2026-03-05",
+        time="15:00",
+        end_date="2026-06-05",
+        location_name="Информационно-туристический центр",
+        city="Черняховск",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+
+@pytest.mark.asyncio
+async def test_cross_source_longrun_exact_title_merges_later_in_period_mention(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    museum = "Музей Изобразительных искусств, Ленинский проспект 83, Калининград"
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="Путешествие Матрешки",
+                date="2026-03-05",
+                time="",
+                end_date="2026-04-05",
+                location_name=museum,
+                location_address="Ленинский проспект 83",
+                city="Калининград",
+                event_type="выставка",
+                source_text="Выставка «Путешествие Матрешки» работает по 5 апреля.",
+                source_post_url="https://vk.com/wall-9118984_23492",
+                source_vk_post_url="https://vk.com/wall-9118984_23492",
+            )
+        )
+        session.add(
+            _base_event(
+                id=2,
+                title="Другая выставка в музее",
+                date="2026-03-10",
+                time="",
+                end_date="2026-04-10",
+                location_name=museum,
+                city="Калининград",
+                event_type="выставка",
+                source_text="Другая выставка в музее.",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="telegram",
+        source_url="https://t.me/kaliningradartmuseum/7748",
+        source_text=(
+            "Благотворительная выставка «Путешествие Матрешки» продолжается. "
+            "Красны девицы гостят в музее до 5 апреля."
+        ),
+        raw_excerpt="Выставка в музее до 5 апреля.",
+        title="Путешествие Матрешки",
+        date="2026-03-10",
+        time="",
+        end_date="2026-04-05",
+        location_name="Музей",
+        city="Калининград",
+        event_type="выставка",
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+    async with db.get_session() as session:
+        source_row = (
+            await session.execute(
+                select(EventSource).where(
+                    EventSource.source_url == "https://t.me/kaliningradartmuseum/7748"
+                )
+            )
+        ).scalar_one()
+        assert source_row.event_id == 1
+
+
+@pytest.mark.asyncio
 async def test_same_source_anchor_message_id_merges_without_event_source_row(
     tmp_path, monkeypatch
 ):
@@ -243,6 +376,65 @@ async def test_cross_source_exact_match_merges_emoji_prefixed_titles_without_llm
 
 
 @pytest.mark.asyncio
+async def test_cross_source_exact_match_merges_tretyakov_short_location_alias_without_llm(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    parser_url = "https://kaliningrad.tretyakovgallery.ru/tickets/#buy/event/44751/2026-03-14/17:00:00"
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="ПАЛЛАДИО. ВЛАСТЬ АРХИТЕКТУРЫ",
+                date="2026-03-14",
+                time="17:00",
+                location_name="Филиал Третьяковской галереи (Кинозал)",
+                location_address="Парадная наб. 3",
+                city="Калининград",
+                ticket_link=parser_url,
+                source_text="«Палладио. Власть архитектуры», 12+ (Италия, 2019).",
+                source_post_url=parser_url,
+            )
+        )
+        session.add(
+            EventSource(
+                event_id=1,
+                source_type="parser:tretyakov",
+                source_url=parser_url,
+                source_text="«Палладио. Власть архитектуры», 12+ (Италия, 2019).",
+                trust_level="high",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-212760444_4577",
+        source_text=(
+            "Дайджест событий в музее 10-15 марта:\n\n"
+            "📍Кинозал:\n"
+            "14 марта в 17:00 - кинопоказ «Палладио. Власть архитектуры», 12+ (Италия, 2019)\n"
+            "Билеты: https://vk.cc/cVfPQB"
+        ),
+        raw_excerpt="Кинопоказ в Третьяковке.",
+        title="«Палладий. Власть архитектуры» — Кинопоказ",
+        date="2026-03-14",
+        time="17:00",
+        location_name="Третьяковская галерея",
+        city="Калининград",
+        ticket_link="https://vk.cc/cVfPQB",
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+
+@pytest.mark.asyncio
 async def test_specific_ticket_same_slot_merges_only_via_narrow_rule(
     tmp_path, monkeypatch
 ):
@@ -303,7 +495,7 @@ async def test_doors_start_ticket_bridge_merges_bar_sovetov_pair_without_llm(
                 title="Громкая связь: комедийное шоу",
                 date="2026-03-06",
                 time="20:00",
-                location_name="Бар Sovetov, Мира 118, Калининград",
+                location_name="Бар Советов, Мира 118, Калининград",
                 ticket_link=shared_ticket,
                 source_text=shared_text,
                 source_post_url="https://vk.com/wall-214027639_10783",

@@ -25,6 +25,17 @@ from enum import Enum
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from location_reference import (
+    KnownVenue as _KnownVenue,
+    match_known_venue as _match_known_venue_ref,
+    match_known_venue_by_address as _match_known_venue_by_address_ref,
+    normalise_event_location_from_reference as _normalise_event_location_from_reference_ref,
+    normalize_address_key as _normalize_address_key_ref,
+    normalize_venue_key as _normalize_venue_key_ref,
+    read_known_venues as _read_known_venues_ref,
+    read_known_venues_lines as _read_known_venues_lines_ref,
+)
+
 
 class DeduplicateFilter(logging.Filter):
     """Limit repeating DEBUG messages to avoid log spam."""
@@ -167,6 +178,7 @@ import vk_review
 import poster_ocr
 from handlers.ik_poster_cmd import ik_poster_router
 from handlers.special_cmd import special_router
+from guide_excursions.commands import guide_excursions_router
 from source_parsing.telegram.commands import tg_monitor_router
 from poster_media import (
     PosterMedia,
@@ -279,6 +291,7 @@ from models import (
     EventPoster,
     JobOutbox,
     MonthPagePart,
+    MonthExhibitionsPage,
     JobTask,
     JobStatus,
     OcrUsage,
@@ -1545,6 +1558,7 @@ _ADD_EVENT_LAST_DEQUEUE_TS: float = 0.0
 
 
 async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
+    global _ADD_EVENT_LAST_DEQUEUE_TS
     worker: asyncio.Task = app["add_event_worker"]
     STALL_GUARD_SECS = int(os.getenv("STALL_GUARD_SECS", str(ADD_EVENT_TIMEOUT + 30)))
     while True:
@@ -1582,7 +1596,7 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
                     stalled_for,
                 )
                 worker.cancel()
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await worker
                 worker = asyncio.create_task(add_event_queue_worker(db, bot))
                 app["add_event_worker"] = worker
@@ -2762,6 +2776,26 @@ HELP_COMMANDS = [
     {
         "usage": "/general_stats",
         "desc": "Daily general system report for the previous 24 hours",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_excursions",
+        "desc": "Guide excursions monitoring: scan, preview, publish",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_sources",
+        "desc": "Show configured guide-excursion sources and coverage",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_recent",
+        "desc": "Preview current new-occurrences guide digest",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_digest",
+        "desc": "Publish current guide digest to the test channel",
         "roles": {"superadmin"},
     },
     {
@@ -5465,114 +5499,6 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     return addr
 
 
-def _normalize_location_fragment(part: str | None) -> str:
-    if not part:
-        return ""
-    normalized = unicodedata.normalize("NFKC", str(part))
-    normalized = normalized.replace("\xa0", " ")
-    normalized = re.sub(r"[^\w\s]", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized.casefold()
-
-
-def _contains_token_subsequence(
-    haystack: Sequence[str], needle: Sequence[str]
-) -> bool:
-    if not haystack or not needle or len(needle) > len(haystack):
-        return False
-    haystack_items = list(haystack)
-    needle_items = list(needle)
-    for idx in range(len(haystack_items) - len(needle_items) + 1):
-        if haystack_items[idx : idx + len(needle_items)] == needle_items:
-            return True
-    return False
-
-
-def _location_fragment_has_number(tokens: Sequence[str]) -> bool:
-    return any(any(ch.isdigit() for ch in token) for token in tokens)
-
-
-def _location_name_already_contains_address(
-    location_name: str | None,
-    location_address: str | None,
-) -> bool:
-    name_norm = _normalize_location_fragment(location_name)
-    addr_norm = _normalize_location_fragment(location_address)
-    if not name_norm or not addr_norm:
-        return False
-    if addr_norm == name_norm:
-        return True
-    if len(addr_norm) >= 8 and addr_norm in name_norm:
-        return True
-
-    addr_tokens = addr_norm.split()
-    name_fragments = [str(location_name or "").strip()]
-    name_fragments.extend(
-        fragment.strip()
-        for fragment in str(location_name or "").split(",")
-        if fragment.strip()
-    )
-    for fragment in name_fragments:
-        fragment_norm = _normalize_location_fragment(fragment)
-        if not fragment_norm:
-            continue
-        if fragment_norm == addr_norm:
-            return True
-        if len(addr_norm) >= 8 and addr_norm in fragment_norm:
-            return True
-        fragment_tokens = fragment_norm.split()
-        shorter_tokens = fragment_tokens
-        longer_tokens = addr_tokens
-        if len(fragment_tokens) > len(addr_tokens):
-            shorter_tokens = addr_tokens
-            longer_tokens = fragment_tokens
-        if (
-            len(shorter_tokens) >= 2
-            and _location_fragment_has_number(shorter_tokens)
-            and _contains_token_subsequence(longer_tokens, shorter_tokens)
-        ):
-            return True
-    return False
-
-
-def _compose_event_location(
-    location_name: str | None,
-    location_address: str | None,
-    city: str | None,
-    *,
-    city_hashtag: bool,
-) -> str:
-    name = str(location_name or "").strip()
-    city_value = str(city or "").lstrip("#").strip()
-    address = str(location_address or "").strip()
-    if address and city_value:
-        address = strip_city_from_address(address, city_value) or ""
-
-    name_norm = _normalize_location_fragment(name)
-    address_norm = _normalize_location_fragment(address)
-    city_norm = _normalize_location_fragment(city_value)
-
-    parts: list[str] = []
-    if name:
-        parts.append(name)
-    if address and not _location_name_already_contains_address(name, address):
-        parts.append(address)
-
-    drop_city = False
-    if city_value:
-        if city_norm and len(city_norm) >= 4:
-            drop_city = city_norm in name_norm or city_norm in address_norm
-        if not drop_city and re.search(
-            r"(?i)\b(ул\.?|улица|просп\.?|пр-т|проспект|дом|д\.|корп\.?|корпус|кв\.?|\d)\b",
-            city_value,
-        ):
-            drop_city = True
-    if city_value and not drop_city:
-        parts.append(f"#{city_value}" if city_hashtag else city_value)
-
-    return ", ".join(part for part in parts if part)
-
-
 def normalize_event_type(
     title: str, description: str, event_type: str | None
 ) -> str | None:
@@ -8163,289 +8089,30 @@ def _read_base_prompt() -> str:
 
 @lru_cache(maxsize=1)
 def _read_known_venues_lines() -> tuple[str, ...]:
-    loc_path = os.path.join("docs", "reference", "locations.md")
-    if not os.path.exists(loc_path):
-        return ()
-    try:
-        with open(loc_path, "r", encoding="utf-8") as f:
-            locations = [
-                line.strip()
-                for line in f
-                if line.strip() and not line.lstrip().startswith("#")
-            ]
-    except Exception:
-        return ()
-    return tuple(locations)
-
-
-_LOCATION_NOISE_PREFIXES_RE = re.compile(
-    r"^(?:"
-    r"кинотеатр|"
-    r"арт[- ]?пространство|"
-    r"пространство|"
-    r"арт[- ]?площадка|"
-    r"культурн(?:ый|ое) центр|"
-    r"центр|"
-    r"площадка|"
-    r"клуб"
-    r")\s+",
-    re.IGNORECASE,
-)
+    return _read_known_venues_lines_ref()
 
 
 def _normalize_venue_key(value: str | None) -> str:
-    if not value:
-        return ""
-    text = str(value).strip()
-    if not text:
-        return ""
-    text = (
-        text.replace("\u00ab", " ")
-        .replace("\u00bb", " ")
-        .replace("\u201c", " ")
-        .replace("\u201d", " ")
-        .replace("\u201e", " ")
-        .replace("\u2019", " ")
-        .replace('"', " ")
-        .replace("'", " ")
-        .replace("`", " ")
-    )
-    text = _LOCATION_NOISE_PREFIXES_RE.sub("", text).strip()
-    text = text.casefold().replace("ё", "е")
-    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-_ADDRESS_ABBR_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Russian address abbreviations commonly seen in VK/TG posts.
-    (re.compile(r"(?i)\b(?:проспект|пр(?:\s*|-)?(?:кт|т)|пр\.)\b"), "пр"),
-    (re.compile(r"(?i)\b(?:улица|ул\.)\b"), "ул"),
-    (re.compile(r"(?i)\b(?:площадь|пл\.)\b"), "пл"),
-    (re.compile(r"(?i)\b(?:набережная|наб\.)\b"), "наб"),
-    (re.compile(r"(?i)\b(?:бульвар|бул\.?)\b"), "бульвар"),
-    (re.compile(r"(?i)\b(?:переулок|пер\.)\b"), "пер"),
-)
+    return _normalize_venue_key_ref(value)
 
 
 def _normalize_address_key(value: str | None, *, city: str | None = None) -> str:
-    raw = (value or "").strip()
-    if not raw:
-        return ""
-    text = raw.casefold().replace("ё", "е")
-    text = re.sub(r"[«»\"'`]", " ", text)
-    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip()
-    for patt, repl in _ADDRESS_ABBR_REPLACEMENTS:
-        text = patt.sub(repl, text)
-    text = re.sub(r"\s+", " ", text).strip()
-    city_key = _normalize_venue_key(city)
-    if city_key:
-        text = re.sub(rf"(?i)\b{re.escape(city_key)}\b", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-    # Drop generic "г"/"город" markers (often present in pasted addresses).
-    text = re.sub(r"(?i)\b(?:г|город)\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-@dataclass(frozen=True)
-class _KnownVenue:
-    canonical_line: str
-    name: str
-    address: str
-    city: str
-    name_key: str
-    line_key: str
+    return _normalize_address_key_ref(value, city=city)
 
 
 @lru_cache(maxsize=1)
 def _read_known_venues() -> tuple[_KnownVenue, ...]:
-    venues: list[_KnownVenue] = []
-    for line in _read_known_venues_lines():
-        parts = [p.strip() for p in line.split(",") if p.strip()]
-        if not parts:
-            continue
-        name = parts[0]
-        city = parts[-1] if len(parts) >= 2 else ""
-        address = ", ".join(parts[1:-1]).strip() if len(parts) >= 3 else ""
-        city_clean = city.lstrip("#").strip()
-        venues.append(
-            _KnownVenue(
-                canonical_line=line,
-                name=name,
-                address=address,
-                city=city_clean,
-                name_key=_normalize_venue_key(name),
-                line_key=_normalize_venue_key(line),
-            )
-        )
-    return tuple(venues)
+    return _read_known_venues_ref()
 
 
 def _match_known_venue_by_address(
     address: str | None, *, city: str | None = None
 ) -> _KnownVenue | None:
-    addr_key = _normalize_address_key(address, city=city)
-    if not addr_key:
-        return None
-    venues = _read_known_venues()
-    if not venues:
-        return None
-
-    city_key = _normalize_venue_key(city)
-    if city_key:
-        by_city = [v for v in venues if _normalize_venue_key(v.city) == city_key]
-        if by_city:
-            venues = tuple(by_city)
-
-    exact: list[_KnownVenue] = []
-    for v in venues:
-        if not v.address:
-            continue
-        v_key = _normalize_address_key(v.address, city=v.city or city)
-        if v_key and v_key == addr_key:
-            exact.append(v)
-    if len(exact) == 1:
-        return exact[0]
-
-    fuzzy: list[_KnownVenue] = []
-    for v in venues:
-        if not v.address:
-            continue
-        v_key = _normalize_address_key(v.address, city=v.city or city)
-        if not v_key:
-            continue
-        if addr_key in v_key or v_key in addr_key:
-            fuzzy.append(v)
-    if len(fuzzy) == 1:
-        return fuzzy[0]
-    return None
+    return _match_known_venue_by_address_ref(address, city=city)
 
 
 def _match_known_venue(value: str | None, *, city: str | None = None) -> _KnownVenue | None:
-    key = _normalize_venue_key(value)
-    if not key:
-        return None
-    venues = _read_known_venues()
-    if not venues:
-        return None
-
-    city_key = _normalize_venue_key(city)
-    if city_key:
-        by_city = [v for v in venues if _normalize_venue_key(v.city) == city_key]
-        if by_city:
-            venues = tuple(by_city)
-
-    for venue in venues:
-        if key == venue.line_key or key == venue.name_key:
-            return venue
-
-    matches = [
-        venue
-        for venue in venues
-        if venue.name_key and (key == venue.name_key or key in venue.name_key or venue.name_key in key)
-    ]
-    if len(matches) == 1:
-        return matches[0]
-
-    try:
-        from difflib import SequenceMatcher
-    except Exception:
-        return None
-
-    scored: list[tuple[float, _KnownVenue]] = []
-    for venue in venues:
-        if not venue.name_key:
-            continue
-        ratio = SequenceMatcher(None, key, venue.name_key).ratio()
-        scored.append((ratio, venue))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    if not scored:
-        return None
-    best_score, best_venue = scored[0]
-    second = scored[1][0] if len(scored) > 1 else 0.0
-    if best_score >= 0.92 and (best_score - second) >= 0.05:
-        return best_venue
-
-    # Token-based fallback for common alias patterns where difflib similarity is too low,
-    # but one discriminative token uniquely identifies a venue (e.g. "филармония").
-    stop = {
-        "г",
-        "город",
-        "им",
-        "имени",
-        "ул",
-        "улица",
-        "проспект",
-        "пр",
-        "пл",
-        "дом",
-        "д",
-        "к",
-        "корп",
-        "офис",
-        "зал",
-        "сцена",
-        "театр",
-        "музей",
-        "бар",
-        "клуб",
-        "центр",
-        "пространство",
-        "школа",
-        "библиотека",
-        "галерея",
-        "арена",
-        "дворец",
-        "музыкальная",
-        "областная",
-        "городская",
-        "детская",
-    }
-
-    def _tokens(s: str) -> set[str]:
-        parts = re.findall(r"[a-zа-яё0-9]{4,}", s, flags=re.IGNORECASE)
-        out = {p.casefold().replace("ё", "е") for p in parts if p}
-        return {t for t in out if t not in stop and len(t) >= 4}
-
-    key_tokens = _tokens(key)
-    if not key_tokens:
-        return None
-
-    from collections import Counter
-
-    freq: Counter[str] = Counter()
-    venue_tokens: list[tuple[_KnownVenue, set[str]]] = []
-    for v in venues:
-        vt = _tokens(v.name_key)
-        venue_tokens.append((v, vt))
-        for t in vt:
-            freq[t] += 1
-
-    best: tuple[int, _KnownVenue, set[str]] | None = None
-    second_score = 0
-    for v, vt in venue_tokens:
-        score = len(key_tokens & vt)
-        if best is None or score > best[0]:
-            if best is not None:
-                second_score = max(second_score, best[0])
-            best = (score, v, vt)
-        elif score > second_score:
-            second_score = score
-
-    if not best or best[0] <= 0:
-        return None
-
-    overlap = key_tokens & best[2]
-    if best[0] >= 2 and (best[0] - second_score) >= 1:
-        return best[1]
-    if best[0] == 1 and (best[0] - second_score) >= 1:
-        # Accept a unique-overlap token (appears in exactly one venue).
-        only = next(iter(overlap)) if overlap else ""
-        if only and freq.get(only, 0) == 1:
-            return best[1]
-    return None
+    return _match_known_venue_ref(value, city=city)
 
 
 def _normalize_known_venue_mentions(
@@ -8487,46 +8154,7 @@ def _normalize_known_venue_mentions(
 
 
 def _normalise_event_location_from_reference(event_obj: dict[str, Any]) -> None:
-    if not isinstance(event_obj, dict):
-        return
-    raw_city = event_obj.get("city")
-    raw_location_name = event_obj.get("location_name")
-    raw_location_address = event_obj.get("location_address")
-
-    venue_by_name = _match_known_venue(raw_location_name, city=raw_city)
-    venue_by_addr = _match_known_venue_by_address(raw_location_address, city=raw_city)
-
-    venue = venue_by_name
-    addr_raw = str(raw_location_address or "").strip()
-    addr_conflicts_with_name_match = False
-    if venue_by_name is not None and addr_raw:
-        raw_addr_key = _normalize_address_key(addr_raw, city=raw_city)
-        venue_addr_key = _normalize_address_key(
-            venue_by_name.address,
-            city=venue_by_name.city or raw_city,
-        )
-        if raw_addr_key and venue_addr_key and raw_addr_key != venue_addr_key:
-            addr_conflicts_with_name_match = True
-
-    if venue_by_addr is not None and venue_by_addr != venue_by_name:
-        # Address is usually a stronger signal than a guessed venue name. Prefer it
-        # only when we can map it to a single known venue.
-        venue = venue_by_addr
-    elif addr_conflicts_with_name_match:
-        # Unknown venues often get fuzzy-matched to a known place by a generic token
-        # like "школа". If the post also contains an explicit conflicting address,
-        # keep the raw location fields instead of creating a hybrid known+raw line.
-        return
-
-    if venue is None:
-        return
-
-    event_obj["location_name"] = venue.name
-    if venue.address:
-        if (not addr_raw) or (_normalize_address_key(addr_raw, city=raw_city) == _normalize_address_key(venue.address, city=venue.city or raw_city)):
-            event_obj["location_address"] = venue.address
-    if venue.city and not (str(raw_city or "").strip()):
-        event_obj["city"] = venue.city
+    _normalise_event_location_from_reference_ref(event_obj)
 
 
 @lru_cache(maxsize=8)
@@ -8768,9 +8396,7 @@ async def _parse_event_via_gemma(
     full_prompt = (
         prompt
         + "\n\n"
-        + "Return ONLY JSON: either a JSON array of events or a JSON object with an `events` array.\n"
-        + "If the text is only an intro for attached posters/cards and the concrete event details are not present in the text itself, return [] as a valid empty JSON array.\n"
-        + "CRITICAL: No comments. No markdown. No trailing commas. No text outside JSON.\n\n"
+        + "Return ONLY valid JSON. No explanations. No markdown.\n\n"
         + user_msg
     )
     model = (os.getenv("EVENT_PARSE_GEMMA_MODEL", "gemma-3-27b-it") or "").strip() or "gemma-3-27b-it"
@@ -8803,9 +8429,7 @@ async def _parse_event_via_gemma(
         # Best-effort repair attempt (Gemma may occasionally emit a trailing comma / commentary).
         repair_prompt = (
             "Your previous answer was NOT valid JSON.\n"
-            "Return ONLY corrected JSON: either a JSON array of events or a JSON object with an `events` array.\n"
-            "If the source text itself has no concrete event details and only points to posters/cards/images, return [] as a valid empty JSON array.\n"
-            "No markdown. No explanations. No comments. No trailing commas. No text outside JSON.\n"
+            "Return ONLY corrected JSON. No markdown. No explanations.\n"
             "Do NOT change the meaning or drop fields; only fix formatting so it parses.\n\n"
             "Original input:\n"
             + (text or "")[:7000]
@@ -8821,37 +8445,6 @@ async def _parse_event_via_gemma(
         data = _event_parse_extract_json(raw2 or "")
     if data is None:
         logging.error("Invalid JSON from Gemma parse: %s", (raw or "")[:2000])
-        if (os.getenv("FOUR_O_TOKEN") or "").strip():
-            try:
-                await notify_llm_incident(
-                    "event_parse_gemma_fallback_4o",
-                    {
-                        "severity": "warning",
-                        "consumer": "event_parse",
-                        "requested_model": model,
-                        "model": model,
-                        "attempt_no": 2,
-                        "max_retries": 2,
-                        "next_model": "gpt-4o",
-                        "message": "Gemma parse JSON failed after repair; switching to 4o",
-                        "error": "bad gemma parse response",
-                    },
-                )
-            except Exception:
-                logging.exception("event_parse: failed to notify fallback incident")
-            try:
-                return await _parse_event_via_4o(
-                    text,
-                    source_channel,
-                    festival_names=festival_names,
-                    festival_alias_pairs=festival_alias_pairs,
-                    poster_texts=poster_texts,
-                    poster_summary=poster_summary,
-                    **extra,
-                )
-            except Exception:
-                logging.exception("event_parse: 4o fallback failed after gemma parse JSON error")
-                raise
         raise RuntimeError("bad gemma parse response")
     return _event_parse_normalize_parsed_events(data)
 
@@ -15334,6 +14927,8 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
+        prev_telegraph_url = str(getattr(ev, "telegraph_url", "") or "").strip()
+        prev_telegraph_path = str(getattr(ev, "telegraph_path", "") or "").strip()
         from models import EventMediaAsset, EventPoster, EventSource, EventSourceFact
         # Backfill legacy single-source fields into event_source so Telegraph footer
         # shows a meaningful "Источников: N" even for older events.
@@ -15982,9 +15577,24 @@ async def update_telegraph_event_page(
         session.add(ev)
         await session.commit()
         url = ev.telegraph_url
+        path = ev.telegraph_path
 
     # Month/weekend pages are updated via debounced JobOutbox tasks (see schedule_event_update_tasks).
     logline("TG-EVENT", event_id, "done", url=url)
+
+    telegraph_ref_changed = (
+        prev_telegraph_url != str(url or "").strip()
+        or prev_telegraph_path != str(path or "").strip()
+    )
+    if telegraph_ref_changed:
+        try:
+            await update_month_pages_for(event_id, db, bot)
+        except Exception:
+            logging.warning(
+                "telegraph: failed to refresh month pages after event %s telegraph update",
+                event_id,
+                exc_info=True,
+            )
 
     # Optional warm-up: trigger Telegram web preview generation for the Telegraph URL.
     #
@@ -16149,6 +15759,7 @@ async def optimize_month_chunks(
     events: list[Event],
     exhibitions: list[Event],  # Usually put on the last page
     nav_block: str,
+    exhibitions_page_url: str | None = None,
 ) -> tuple[list[tuple[list[Event], list[Event]]], bool, bool]:
     """
     Split events into chunks that fit into Telegraph pages.
@@ -16158,114 +15769,170 @@ async def optimize_month_chunks(
     """
     from telegraph.utils import nodes_to_html
 
+    async def render_chunk_size(
+        chunk_events: list[Event],
+        chunk_exhibitions: list[Event],
+        *,
+        page_num: int,
+        continuation_url: str | None,
+        inc_ics: bool,
+        inc_det: bool,
+    ) -> int:
+        p_first_date = None
+        p_last_date = None
+        if chunk_events:
+            try:
+                p_first_date = parse_iso_date(chunk_events[0].date)
+                p_last_date = parse_iso_date(chunk_events[-1].date)
+            except Exception:
+                p_first_date = None
+                p_last_date = None
+
+        build_kwargs = {
+            "include_ics": inc_ics,
+            "include_details": inc_det,
+            "continuation_url": continuation_url,
+            "page_number": page_num,
+            "first_date": p_first_date,
+            "last_date": p_last_date,
+        }
+        if exhibitions_page_url:
+            build_kwargs["exhibitions_page_url"] = exhibitions_page_url
+        _, content, _ = await build_month_page_content(
+            db,
+            month,
+            chunk_events,
+            chunk_exhibitions,
+            **build_kwargs,
+        )
+        html = unescape_html_comments(nodes_to_html(content))
+        html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
+        return len(html.encode())
+
     async def make_chunks(inc_ics: bool, inc_det: bool) -> list[tuple[list[Event], list[Event]]]:
         chunks_list = []
         rem_events = events[:]
-        # We only attach exhibitions to the very last chunk of the sequence.
-        # However, if we split, we might have multiple chunks.
-        # Strategy: Keep exhibitions for the end.
-        
-        while rem_events or exhibitions:
+        rem_exhibitions = exhibitions[:]
+
+        while rem_events or rem_exhibitions:
             page_num = len(chunks_list) + 1
-            
-            # Case 1: Try fitting EVERYTHING remaining (events + exhibitions)
-            # This is the "Final Page" scenario.
-            title, content, _ = await build_month_page_content(
-                db, month, rem_events, exhibitions,
-                include_ics=inc_ics, include_details=inc_det,
-                continuation_url=None, # Last page has no continuation
-                page_number=page_num
+
+            # Try fitting everything remaining on the final page.
+            total_size = await render_chunk_size(
+                rem_events,
+                rem_exhibitions,
+                page_num=page_num,
+                continuation_url=None,
+                inc_ics=inc_ics,
+                inc_det=inc_det,
             )
-            html = unescape_html_comments(nodes_to_html(content))
-            html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
-            
-            if len(html.encode()) <= TELEGRAPH_LIMIT:
-                chunks_list.append((rem_events, exhibitions))
-                logging.info("optimize_month_chunks: Case 1 success. Appended chunk with events=%d exhibitions=%d", len(rem_events), len(exhibitions))
+            if total_size <= TELEGRAPH_LIMIT:
+                chunks_list.append((rem_events, rem_exhibitions))
+                logging.info(
+                    "optimize_month_chunks: final chunk fits events=%d exhibitions=%d",
+                    len(rem_events),
+                    len(rem_exhibitions),
+                )
                 return chunks_list
 
-            # Case 2: Cannot fit all. Must split.
-            # We assume exhibitions go to the LAST page, so current intermediate page will have NO exhibitions.
-            # Unless we have NO events left? Then we must split exhibitions (not implemented, force fit).
-            
             if not rem_events:
-                # Only exhibitions left.
-                if exhibitions:
-                     logging.warning("optimize_month_chunks: Exhibitions remaining, forcing new page.")
-                     chunks_list.append(([], exhibitions))
-                else:
-                     logging.info("optimize_month_chunks: No events and no exhibitions left.")
-                return chunks_list
+                logging.info(
+                    "optimize_month_chunks: splitting exhibitions. Remaining=%d",
+                    len(rem_exhibitions),
+                )
+                low = 1
+                high = len(rem_exhibitions)
+                best_k = 1
+
+                while low <= high:
+                    mid = (low + high) // 2
+                    size_mid = await render_chunk_size(
+                        [],
+                        rem_exhibitions[:mid],
+                        page_num=page_num,
+                        continuation_url="x",
+                        inc_ics=inc_ics,
+                        inc_det=inc_det,
+                    )
+                    if size_mid <= TELEGRAPH_LIMIT:
+                        best_k = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+
+                chunks_list.append(([], rem_exhibitions[:best_k]))
+                rem_exhibitions = rem_exhibitions[best_k:]
+                continue
 
             logging.info("optimize_month_chunks: Splitting. Events left: %d", len(rem_events))
-            # Binary search for max events for this intermediate page
             low = 1
             high = len(rem_events)
             best_k = 1
-            
+
             while low <= high:
                 mid = (low + high) // 2
-                # Intermediate page: No exhibitions, YES continuation link
-                title, content, _ = await build_month_page_content(
-                    db, month, rem_events[:mid], [],
-                    include_ics=inc_ics, include_details=inc_det,
-                    continuation_url="x", # Placeholder for size estimation
-                    page_number=page_num
+                size_mid = await render_chunk_size(
+                    rem_events[:mid],
+                    [],
+                    page_num=page_num,
+                    continuation_url="x",
+                    inc_ics=inc_ics,
+                    inc_det=inc_det,
                 )
-                html = unescape_html_comments(nodes_to_html(content))
-                html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
-                
-                if len(html.encode()) <= TELEGRAPH_LIMIT:
+                if size_mid <= TELEGRAPH_LIMIT:
                     best_k = mid
                     low = mid + 1
                 else:
                     high = mid - 1
-            
-            # ATOMIC DATE SPLIT check
-            # We have best_k events.
-            # Check if we are splitting in the middle of a date.
-            # Condition: We are taking 'best_k', so the next event is at index 'best_k'.
-            # If best_k < len(rem_events) (meaning we haven't taken all),
-            # check if rem_events[best_k-1].date == rem_events[best_k].date
-            
+
             if best_k < len(rem_events):
                 last_included_date = rem_events[best_k - 1].date
                 first_excluded_date = rem_events[best_k].date
-                
                 if last_included_date == first_excluded_date:
                     logging.info("Atomic Split: Date %s cut at %d. Backtracking to prevent split.", last_included_date, best_k)
-                    
-                    # Backtrack best_k until date changes or we hit 0
                     original_k = best_k
                     while best_k > 0 and rem_events[best_k - 1].date == last_included_date:
                         best_k -= 1
-                    
                     if best_k == 0:
                         logging.warning("Atomic Split: Single date %s (%d events) too big to fit atomically. Forcing split at %d.", 
                                         last_included_date, len(rem_events), original_k)
-                        best_k = original_k # Revert to greedy split
+                        best_k = original_k
                     else:
                         logging.info("Atomic Split: Adjusted split to %d (End of %s)", best_k, rem_events[best_k-1].date)
 
             chunks_list.append((rem_events[:best_k], []))
             rem_events = rem_events[best_k:]
-            
+
         return chunks_list
 
-    # 1. Try Default Mode
-    res_default = await make_chunks(True, True)
-    
-    # If it fits in 1 or 2 pages, perfect.
-    if len(res_default) <= 2:
-        return res_default, True, True
+    successful: list[tuple[list[tuple[list[Event], list[Event]]], bool, bool]] = []
+    for inc_ics, inc_det in ((True, True), (False, True), (False, False)):
+        try:
+            chunks = await make_chunks(inc_ics, inc_det)
+        except TelegraphException as exc:
+            logging.warning(
+                "optimize_month_chunks mode failed month=%s ics=%s details=%s err=%s",
+                month,
+                inc_ics,
+                inc_det,
+                exc,
+            )
+            continue
+        successful.append((chunks, inc_ics, inc_det))
+        if len(chunks) <= 2:
+            return chunks, inc_ics, inc_det
 
-    # 2. Try Compact Mode (no ICS)
-    # Requirement: "If ... requires 3 or more pages, use compact" (implied preference for compact if big)
-    res_compact = await make_chunks(False, True)
-    
-    # If compact mode reduces pages OR we are just complying with "many pages = compact" rule:
-    # We use compact mode if default yielded > 2 pages.
-    return res_compact, False, True
+    if not successful:
+        raise TelegraphException("CONTENT_TOO_BIG")
+
+    min_pages = min(len(chunks) for chunks, _, _ in successful)
+    candidates = [
+        item for item in successful
+        if len(item[0]) == min_pages
+    ]
+    candidates.sort(key=lambda item: (int(item[1]) + int(item[2]),))
+    chunks, inc_ics, inc_det = candidates[0]
+    return chunks, inc_ics, inc_det
 
 
 async def split_month_until_ok(
@@ -16276,6 +15943,7 @@ async def split_month_until_ok(
     events: list[Event],
     exhibitions: list[Event],
     nav_block: str,
+    exhibitions_page_url: str | None = None,
 ) -> None:
     from telegraph.utils import nodes_to_html
 
@@ -16285,7 +15953,7 @@ async def split_month_until_ok(
 
     # 1. Calculate optimized chunks
     chunks, include_ics, include_details = await optimize_month_chunks(
-        db, month, events, exhibitions, nav_block
+        db, month, events, exhibitions, nav_block, exhibitions_page_url
     )
 
     # (p1 lookup block removed)
@@ -16328,14 +15996,22 @@ async def split_month_until_ok(
              except:
                  pass
 
+        build_kwargs = {
+            "include_ics": include_ics,
+            "include_details": include_details,
+            "continuation_url": next_url,
+            "page_number": i,
+            "first_date": p_first_date,
+            "last_date": p_last_date,
+        }
+        if exhibitions_page_url:
+            build_kwargs["exhibitions_page_url"] = exhibitions_page_url
         title, content, _ = await build_month_page_content(
-            db, month, chunk_events, chunk_exhibitions,
-            include_ics=include_ics,
-            include_details=include_details,
-            continuation_url=next_url,
-            page_number=i,
-            first_date=p_first_date,
-            last_date=p_last_date
+            db,
+            month,
+            chunk_events,
+            chunk_exhibitions,
+            **build_kwargs,
         )
         
         html_str = unescape_html_comments(nodes_to_html(content))
@@ -16805,9 +16481,23 @@ async def patch_month_page_for_date(
             )
             async with _page_locks[f"month:{month_key}"]:
                 events_m, exhibitions = await get_month_data(db, month_key)
+                exhibitions_page_url = await sync_month_exhibitions_page(
+                    db,
+                    telegraph,
+                    month_key,
+                    exhibitions,
+                )
+                page_exhibitions = [] if exhibitions_page_url else exhibitions
                 nav_block = await build_month_nav_block(db, month_key)
                 await split_month_until_ok(
-                    db, telegraph, page, month_key, events_m, exhibitions, nav_block
+                    db,
+                    telegraph,
+                    page,
+                    month_key,
+                    events_m,
+                    page_exhibitions,
+                    nav_block,
+                    exhibitions_page_url=exhibitions_page_url,
                 )
             logging.info(
                 "month_patch retry month=%s day=%s", month_key, d.isoformat()
@@ -18270,12 +17960,14 @@ def format_event_md(
         if include_ics and ics:
             more_line += f" \U0001f4c5 [добавить в календарь]({ics})"
         lines.append(more_line)
-    loc = _compose_event_location(
-        e.location_name,
-        e.location_address,
-        e.city,
-        city_hashtag=False,
-    )
+    loc = e.location_name
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
+    if e.city:
+        loc += f", {e.city}"
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -18398,12 +18090,14 @@ def format_event_vk(
 
     # details link already appended to description above
 
-    loc = _compose_event_location(
-        e.location_name,
-        e.location_address,
-        e.city,
-        city_hashtag=True,
-    )
+    loc = e.location_name
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
+    if e.city:
+        loc += f", #{e.city}"
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -18416,8 +18110,7 @@ def format_event_vk(
     else:
         day_fmt = day
     lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
-    if loc:
-        lines.append(loc)
+    lines.append(loc)
 
     return "\n".join(lines)
 
@@ -18562,13 +18255,14 @@ def format_event_daily(
         if price:
             lines.append(f"Билеты {price}")
 
-    loc = _compose_event_location(
-        e.location_name,
-        e.location_address,
-        e.city,
-        city_hashtag=True,
-    )
-    loc_html = html.escape(loc) if loc else ""
+    loc = html.escape(e.location_name)
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {html.escape(addr)}"
+    if e.city:
+        loc += f", #{html.escape(e.city)}"
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -18580,12 +18274,7 @@ def format_event_daily(
         day_fmt = f'<a href="{html.escape(weekend_url)}">{day}</a>'
     else:
         day_fmt = day
-    location_line_parts = [day_fmt]
-    if e.time:
-        location_line_parts.append(e.time)
-    if loc_html:
-        location_line_parts.append(loc_html)
-    lines.append(f"<i>{' '.join(location_line_parts)}</i>")
+    lines.append(f"<i>{day_fmt} {e.time} {loc}</i>")
 
     return "\n".join(lines)
 
@@ -18664,12 +18353,14 @@ def format_exhibition_md(e: Event) -> str:
         cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""
         lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
-    loc = _compose_event_location(
-        e.location_name,
-        e.location_address,
-        e.city,
-        city_hashtag=False,
-    )
+    loc = e.location_name
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
+    if e.city:
+        loc += f", #{e.city}"
     if e.end_date:
         end_part = e.end_date.split("..", 1)[0]
         d_end = parse_iso_date(end_part)
@@ -18678,10 +18369,7 @@ def format_exhibition_md(e: Event) -> str:
         else:
             logging.error("Invalid end date: %s", e.end_date)
             end = e.end_date
-        if loc:
-            lines.append(f"_по {end}, {loc}_")
-        else:
-            lines.append(f"_по {end}_")
+        lines.append(f"_по {end}, {loc}_")
     return "\n".join(lines)
 
 
