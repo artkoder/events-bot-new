@@ -49,3 +49,36 @@ def test_address_match_handles_long_and_short_venue_aliases() -> None:
         city_a="Гусев",
         city_b="Гусев",
     )
+
+
+def test_reference_location_address_overrides_wrong_city_for_molodezhny() -> None:
+    name, address, city = su._canonicalize_location_fields(
+        location_name="МОЛОДЕЖНЫЙ",
+        location_address="ул. Карташева, 6",
+        city="МОЛОДЕЖНЫЙ",
+    )
+    assert name == "Клуб Спутник, Карташева 6, Калининград"
+    assert address == "Карташева 6"
+    assert city == "Калининград"
+
+
+def test_reference_location_alias_normalizes_bar_sovetov_variants() -> None:
+    name, address, city = su._canonicalize_location_fields(
+        location_name="Bar Sovetov",
+        location_address=None,
+        city="Калининград",
+    )
+    assert name == "Бар Советов, Мира 118, Калининград"
+    assert address == "Мира 118"
+    assert city == "Калининград"
+
+
+def test_reference_location_alias_normalizes_tretyakov_short_name() -> None:
+    name, address, city = su._canonicalize_location_fields(
+        location_name="Третьяковская галерея",
+        location_address=None,
+        city="Калининград",
+    )
+    assert name == "Филиал Третьяковской галереи, Парадная наб. 3, Калининград"
+    assert address == "Парадная наб. 3"
+    assert city == "Калининград"

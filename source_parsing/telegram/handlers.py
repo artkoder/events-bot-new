@@ -17,6 +17,7 @@ from sqlalchemy.exc import OperationalError
 
 from db import Database
 from event_utils import strip_city_from_address
+from location_reference import normalise_event_location_from_reference
 from models import (
     Channel,
     EventMediaAsset,
@@ -3217,6 +3218,35 @@ def _build_candidate(
         city = extracted_city or "Калининград"
     if location_address:
         location_address = strip_city_from_address(location_address, city)
+
+    location_payload = {
+        "location_name": str(location_name).strip() if location_name else None,
+        "location_address": str(location_address).strip() if location_address else None,
+        "city": str(city).strip() if city else None,
+    }
+    matched_venue = normalise_event_location_from_reference(location_payload)
+    normalized_location_name = (location_payload.get("location_name") or "").strip() or None
+    normalized_location_address = (location_payload.get("location_address") or "").strip() or None
+    normalized_city = (location_payload.get("city") or "").strip() or None
+    if matched_venue and (
+        normalized_location_name != (str(location_name).strip() if location_name else None)
+        or normalized_location_address != (str(location_address).strip() if location_address else None)
+        or normalized_city != (str(city).strip() if city else None)
+    ):
+        logger.info(
+            "telegram: normalized known venue source=%s message_id=%s before=%r/%r/%r after=%r/%r/%r",
+            username,
+            message_id,
+            location_name,
+            location_address,
+            city,
+            normalized_location_name,
+            normalized_location_address,
+            normalized_city,
+        )
+    location_name = normalized_location_name
+    location_address = normalized_location_address
+    city = normalized_city
 
     # Extract a booking contact from the message when ticket_link is missing.
     if not ticket_link:

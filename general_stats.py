@@ -552,6 +552,40 @@ async def collect_general_stats(
             """,
             (start_raw, end_raw),
         )
+        guide_sources_scanned = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(DISTINCT source_id) FROM guide_monitor_post
+            WHERE datetime(last_scanned_at) >= datetime(?) AND datetime(last_scanned_at) < datetime(?)
+            """,
+            (start_raw, end_raw),
+        )
+        guide_posts_prefiltered = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(*) FROM guide_monitor_post
+            WHERE datetime(last_scanned_at) >= datetime(?) AND datetime(last_scanned_at) < datetime(?)
+              AND COALESCE(prefilter_passed, 0) = 1
+            """,
+            (start_raw, end_raw),
+        )
+        guide_occurrences_new = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(*) FROM guide_occurrence
+            WHERE datetime(first_seen_at) >= datetime(?) AND datetime(first_seen_at) < datetime(?)
+            """,
+            (start_raw, end_raw),
+        )
+        guide_digest_published = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(*) FROM guide_digest_issue
+            WHERE status='published'
+              AND datetime(published_at) >= datetime(?) AND datetime(published_at) < datetime(?)
+            """,
+            (start_raw, end_raw),
+        )
 
         events_created = await _fetch_int(
             conn,
@@ -664,6 +698,12 @@ async def collect_general_stats(
         start_utc=window.start_utc,
         end_utc=window.end_utc,
     )
+    guide_monitor_runs = await _fetch_ops_runs(
+        db,
+        kind="guide_monitoring",
+        start_utc=window.start_utc,
+        end_utc=window.end_utc,
+    )
     parse_breakdown = _aggregate_parse_breakdown(parse_runs)
 
     gemma_requests_count = await _collect_gemma_requests_count(
@@ -691,6 +731,13 @@ async def collect_general_stats(
         "messages_with_events": tg_messages_with_events,
         "sources_with_events": tg_sources_with_events,
         "tg_monitoring_runs": tg_monitor_runs,
+    }
+    metrics["guide_excursions"] = {
+        "sources_scanned": guide_sources_scanned,
+        "posts_prefiltered": guide_posts_prefiltered,
+        "occurrences_new": guide_occurrences_new,
+        "digest_published": guide_digest_published,
+        "guide_monitoring_runs": guide_monitor_runs,
     }
     metrics["parse"] = {
         "runs": parse_runs,
@@ -785,6 +832,7 @@ def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
     events = snapshot.metrics.get("events", {})
     geo = snapshot.metrics.get("geo", {})
     festivals = snapshot.metrics.get("festivals", {})
+    guide = snapshot.metrics.get("guide_excursions", {})
     tech = snapshot.metrics.get("tech", {})
 
     lines = [
@@ -825,6 +873,25 @@ def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
             tg.get("tg_monitoring_runs") or [],
             tz=tz,
             metric_keys=("sources_scanned", "messages_processed", "messages_with_events"),
+        )
+    )
+
+    lines.extend(
+        [
+            "",
+            "Guide excursions:",
+            f"- sources_scanned: {_parse_int(guide.get('sources_scanned'))}",
+            f"- posts_prefiltered: {_parse_int(guide.get('posts_prefiltered'))}",
+            f"- occurrences_new: {_parse_int(guide.get('occurrences_new'))}",
+            f"- digest_published: {_parse_int(guide.get('digest_published'))}",
+            "- guide_monitoring runs:",
+        ]
+    )
+    lines.extend(
+        _format_run_lines(
+            guide.get("guide_monitoring_runs") or [],
+            tz=tz,
+            metric_keys=("sources_scanned", "posts_scanned", "occurrences_created", "occurrences_updated"),
         )
     )
 

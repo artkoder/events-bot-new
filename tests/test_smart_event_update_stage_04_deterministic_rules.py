@@ -376,6 +376,65 @@ async def test_cross_source_exact_match_merges_emoji_prefixed_titles_without_llm
 
 
 @pytest.mark.asyncio
+async def test_cross_source_exact_match_merges_tretyakov_short_location_alias_without_llm(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await _patch_llm_off(monkeypatch)
+
+    parser_url = "https://kaliningrad.tretyakovgallery.ru/tickets/#buy/event/44751/2026-03-14/17:00:00"
+    async with db.get_session() as session:
+        session.add(
+            _base_event(
+                id=1,
+                title="ПАЛЛАДИО. ВЛАСТЬ АРХИТЕКТУРЫ",
+                date="2026-03-14",
+                time="17:00",
+                location_name="Филиал Третьяковской галереи (Кинозал)",
+                location_address="Парадная наб. 3",
+                city="Калининград",
+                ticket_link=parser_url,
+                source_text="«Палладио. Власть архитектуры», 12+ (Италия, 2019).",
+                source_post_url=parser_url,
+            )
+        )
+        session.add(
+            EventSource(
+                event_id=1,
+                source_type="parser:tretyakov",
+                source_url=parser_url,
+                source_text="«Палладио. Власть архитектуры», 12+ (Италия, 2019).",
+                trust_level="high",
+            )
+        )
+        await session.commit()
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url="https://vk.com/wall-212760444_4577",
+        source_text=(
+            "Дайджест событий в музее 10-15 марта:\n\n"
+            "📍Кинозал:\n"
+            "14 марта в 17:00 - кинопоказ «Палладио. Власть архитектуры», 12+ (Италия, 2019)\n"
+            "Билеты: https://vk.cc/cVfPQB"
+        ),
+        raw_excerpt="Кинопоказ в Третьяковке.",
+        title="«Палладий. Власть архитектуры» — Кинопоказ",
+        date="2026-03-14",
+        time="17:00",
+        location_name="Третьяковская галерея",
+        city="Калининград",
+        ticket_link="https://vk.cc/cVfPQB",
+        trust_level="medium",
+    )
+
+    res = await smart_event_update(db, candidate, check_source_url=False, schedule_tasks=False)
+    assert res.status == "merged"
+    assert res.event_id == 1
+
+
+@pytest.mark.asyncio
 async def test_specific_ticket_same_slot_merges_only_via_narrow_rule(
     tmp_path, monkeypatch
 ):
@@ -436,7 +495,7 @@ async def test_doors_start_ticket_bridge_merges_bar_sovetov_pair_without_llm(
                 title="Громкая связь: комедийное шоу",
                 date="2026-03-06",
                 time="20:00",
-                location_name="Бар Sovetov, Мира 118, Калининград",
+                location_name="Бар Советов, Мира 118, Калининград",
                 ticket_link=shared_ticket,
                 source_text=shared_text,
                 source_post_url="https://vk.com/wall-214027639_10783",

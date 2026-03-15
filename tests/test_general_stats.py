@@ -35,6 +35,13 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
         await conn.execute(
             "INSERT INTO telegram_source(id, username, enabled) VALUES(1002, 'src2_test', 1)"
         )
+        await conn.execute(
+            "INSERT INTO guide_profile(id, slug, profile_kind, display_name) VALUES(2001, 'guide-test', 'person', 'Guide Test')"
+        )
+        await conn.execute(
+            "INSERT INTO guide_source(id, username, platform, enabled, primary_profile_id, source_kind, trust_level) "
+            "VALUES(2001, 'guide_test', 'telegram', 1, 2001, 'guide_personal', 'high')"
+        )
 
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status, created_at) "
@@ -87,6 +94,22 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
         await conn.execute(
             "INSERT INTO telegram_scanned_message(source_id, message_id, processed_at, status, events_extracted, events_imported) "
             "VALUES(1002, 20, ?, 'done', 0, 2)",
+            (in_window_2,),
+        )
+        await conn.execute(
+            "INSERT INTO guide_monitor_post(source_id, message_id, post_date, source_url, text, prefilter_passed, last_scanned_at) "
+            "VALUES(2001, 501, ?, 'https://t.me/guide_test/501', 'Экскурсия 14 марта', 1, ?)",
+            (in_window_1, in_window_1),
+        )
+        await conn.execute(
+            "INSERT INTO guide_occurrence(id, primary_source_id, primary_message_id, source_fingerprint, canonical_title, title_normalized, "
+            "digest_eligible, date, summary_one_liner, first_seen_at, updated_at, last_seen_post_at) "
+            "VALUES(3001, 2001, 501, 'fp-guide-1', 'Экскурсия по району', 'по району', 1, '2026-02-20', 'Описание', ?, ?, ?)",
+            (in_window_1, in_window_1, in_window_1),
+        )
+        await conn.execute(
+            "INSERT INTO guide_digest_issue(id, family, status, published_at, target_chat) "
+            "VALUES(4001, 'new_occurrences', 'published', ?, '@keniggpt')",
             (in_window_2,),
         )
 
@@ -217,6 +240,18 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
                 json.dumps({"processed": 1, "success": 1, "failed": 0}, ensure_ascii=False),
             ),
         )
+        await conn.execute(
+            "INSERT INTO ops_run(kind, trigger, started_at, finished_at, status, metrics_json, details_json) "
+            "VALUES('guide_monitoring', 'manual', ?, ?, 'success', ?, '{}')",
+            (
+                in_window_2,
+                in_window_2,
+                json.dumps(
+                    {"sources_scanned": 1, "posts_scanned": 2, "occurrences_created": 1, "occurrences_updated": 0},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
         await conn.commit()
 
     snapshot = await collect_general_stats(
@@ -237,6 +272,11 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert metrics["telegram"]["sources_scanned"] == 2
     assert metrics["telegram"]["messages_with_events"] == 2
     assert metrics["telegram"]["sources_with_events"] == 2
+    assert metrics["guide_excursions"]["sources_scanned"] == 1
+    assert metrics["guide_excursions"]["posts_prefiltered"] == 1
+    assert metrics["guide_excursions"]["occurrences_new"] == 1
+    assert metrics["guide_excursions"]["digest_published"] == 1
+    assert len(metrics["guide_excursions"]["guide_monitoring_runs"]) == 1
 
     assert metrics["events"]["events_created"] == 2
     assert metrics["events"]["events_updated"] == 2
@@ -254,6 +294,10 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert parse_breakdown["dramteatr"]["processed"] == 4
     assert parse_breakdown["dramteatr"]["new_events"] == 2
     assert parse_breakdown["qtickets"]["processed"] == 1
+
+    text = format_general_stats_message(snapshot)
+    assert "Guide excursions:" in text
+    assert "- posts_prefiltered: 1" in text
 
 
 @pytest.mark.asyncio

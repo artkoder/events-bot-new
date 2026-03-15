@@ -18,6 +18,7 @@
 - Ежедневные анонсы (daily posts) должны показывать именно `Event.search_digest` как one‑liner, а не полный `Event.description`.
 - В ежедневных анонсах заголовок события должен вести на Telegraph страницу события (а не на Telegram/VK пост-источник).
 - Для каждого источника создаются записи `event_source` и “факты” в `event_source_fact`, чтобы было видно вклад каждого источника в мердж.
+- Telegram Monitoring канонизирует `location_name/location_address/city` через `docs/reference/locations.md` + `docs/reference/location-aliases.md` ещё до создания `EventCandidate`, чтобы `/daily` и merge-path не расходились по написанию площадок.
 
 ### LLM-first guardrails для VK/TG parse
 

@@ -1103,6 +1103,82 @@ def startup(
         logging.info("SCHED skipping 3di_scheduler (ENABLE_3DI_SCHEDULED!=1)")
         _notify_admin_skip("3di_scheduler", "ENABLE_3DI_SCHEDULED!=1")
 
+    enable_guide_excursions = _env_enabled("ENABLE_GUIDE_EXCURSIONS_SCHEDULED", default=False)
+    if enable_guide_excursions:
+        from guide_excursions.service import run_guide_monitor
+
+        async def guide_excursions_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            mode: str,
+            run_id: str | None = None,
+        ) -> None:
+            target_chat_id = await resolve_superadmin_chat_id(db_obj)
+            await run_guide_monitor(
+                db_obj,
+                bot_obj,
+                chat_id=target_chat_id,
+                operator_id=None,
+                trigger="scheduled",
+                mode=mode,
+                send_progress=bool(target_chat_id),
+            )
+
+        guide_tz_name = os.getenv("GUIDE_EXCURSIONS_TZ", "Europe/Kaliningrad").strip()
+        light_times = (os.getenv("GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL", "09:05,13:20") or "").split(",")
+        for idx, value in enumerate(light_times):
+            raw_time = value.strip()
+            if not raw_time:
+                continue
+            hour, minute = _cron_from_local(
+                raw_time,
+                guide_tz_name,
+                default_hour="9",
+                default_minute="5",
+                label="GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL",
+            )
+            _register_job(
+                f"guide_excursions_light_{idx}",
+                _job_wrapper("guide_excursions_light", guide_excursions_scheduler, notify_skip=_notify_admin_skip),
+                "cron",
+                id=f"guide_excursions_light_{idx}",
+                hour=hour,
+                minute=minute,
+                args=[db, bot],
+                kwargs={"mode": "light"},
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+
+        full_time_raw = os.getenv("GUIDE_EXCURSIONS_FULL_TIME_LOCAL", "20:10").strip()
+        full_hour, full_minute = _cron_from_local(
+            full_time_raw,
+            guide_tz_name,
+            default_hour="20",
+            default_minute="10",
+            label="GUIDE_EXCURSIONS_FULL_TIME_LOCAL",
+        )
+        _register_job(
+            "guide_excursions_full",
+            _job_wrapper("guide_excursions_full", guide_excursions_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="guide_excursions_full",
+            hour=full_hour,
+            minute=full_minute,
+            args=[db, bot],
+            kwargs={"mode": "full"},
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping guide_excursions (ENABLE_GUIDE_EXCURSIONS_SCHEDULED!=1)")
+        _notify_admin_skip("guide_excursions", "ENABLE_GUIDE_EXCURSIONS_SCHEDULED!=1")
+
     enable_general_stats = _env_enabled("ENABLE_GENERAL_STATS", default=False)
     if enable_general_stats:
         from general_stats import general_stats_scheduler

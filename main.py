@@ -25,6 +25,17 @@ from enum import Enum
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from location_reference import (
+    KnownVenue as _KnownVenue,
+    match_known_venue as _match_known_venue_ref,
+    match_known_venue_by_address as _match_known_venue_by_address_ref,
+    normalise_event_location_from_reference as _normalise_event_location_from_reference_ref,
+    normalize_address_key as _normalize_address_key_ref,
+    normalize_venue_key as _normalize_venue_key_ref,
+    read_known_venues as _read_known_venues_ref,
+    read_known_venues_lines as _read_known_venues_lines_ref,
+)
+
 
 class DeduplicateFilter(logging.Filter):
     """Limit repeating DEBUG messages to avoid log spam."""
@@ -167,6 +178,7 @@ import vk_review
 import poster_ocr
 from handlers.ik_poster_cmd import ik_poster_router
 from handlers.special_cmd import special_router
+from guide_excursions.commands import guide_excursions_router
 from source_parsing.telegram.commands import tg_monitor_router
 from poster_media import (
     PosterMedia,
@@ -2764,6 +2776,26 @@ HELP_COMMANDS = [
     {
         "usage": "/general_stats",
         "desc": "Daily general system report for the previous 24 hours",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_excursions",
+        "desc": "Guide excursions monitoring: scan, preview, publish",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_sources",
+        "desc": "Show configured guide-excursion sources and coverage",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_recent",
+        "desc": "Preview current new-occurrences guide digest",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_digest",
+        "desc": "Publish current guide digest to the test channel",
         "roles": {"superadmin"},
     },
     {
@@ -8057,289 +8089,30 @@ def _read_base_prompt() -> str:
 
 @lru_cache(maxsize=1)
 def _read_known_venues_lines() -> tuple[str, ...]:
-    loc_path = os.path.join("docs", "reference", "locations.md")
-    if not os.path.exists(loc_path):
-        return ()
-    try:
-        with open(loc_path, "r", encoding="utf-8") as f:
-            locations = [
-                line.strip()
-                for line in f
-                if line.strip() and not line.lstrip().startswith("#")
-            ]
-    except Exception:
-        return ()
-    return tuple(locations)
-
-
-_LOCATION_NOISE_PREFIXES_RE = re.compile(
-    r"^(?:"
-    r"кинотеатр|"
-    r"арт[- ]?пространство|"
-    r"пространство|"
-    r"арт[- ]?площадка|"
-    r"культурн(?:ый|ое) центр|"
-    r"центр|"
-    r"площадка|"
-    r"клуб"
-    r")\s+",
-    re.IGNORECASE,
-)
+    return _read_known_venues_lines_ref()
 
 
 def _normalize_venue_key(value: str | None) -> str:
-    if not value:
-        return ""
-    text = str(value).strip()
-    if not text:
-        return ""
-    text = (
-        text.replace("\u00ab", " ")
-        .replace("\u00bb", " ")
-        .replace("\u201c", " ")
-        .replace("\u201d", " ")
-        .replace("\u201e", " ")
-        .replace("\u2019", " ")
-        .replace('"', " ")
-        .replace("'", " ")
-        .replace("`", " ")
-    )
-    text = _LOCATION_NOISE_PREFIXES_RE.sub("", text).strip()
-    text = text.casefold().replace("ё", "е")
-    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-_ADDRESS_ABBR_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Russian address abbreviations commonly seen in VK/TG posts.
-    (re.compile(r"(?i)\b(?:проспект|пр(?:\s*|-)?(?:кт|т)|пр\.)\b"), "пр"),
-    (re.compile(r"(?i)\b(?:улица|ул\.)\b"), "ул"),
-    (re.compile(r"(?i)\b(?:площадь|пл\.)\b"), "пл"),
-    (re.compile(r"(?i)\b(?:набережная|наб\.)\b"), "наб"),
-    (re.compile(r"(?i)\b(?:бульвар|бул\.?)\b"), "бульвар"),
-    (re.compile(r"(?i)\b(?:переулок|пер\.)\b"), "пер"),
-)
+    return _normalize_venue_key_ref(value)
 
 
 def _normalize_address_key(value: str | None, *, city: str | None = None) -> str:
-    raw = (value or "").strip()
-    if not raw:
-        return ""
-    text = raw.casefold().replace("ё", "е")
-    text = re.sub(r"[«»\"'`]", " ", text)
-    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip()
-    for patt, repl in _ADDRESS_ABBR_REPLACEMENTS:
-        text = patt.sub(repl, text)
-    text = re.sub(r"\s+", " ", text).strip()
-    city_key = _normalize_venue_key(city)
-    if city_key:
-        text = re.sub(rf"(?i)\b{re.escape(city_key)}\b", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-    # Drop generic "г"/"город" markers (often present in pasted addresses).
-    text = re.sub(r"(?i)\b(?:г|город)\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-@dataclass(frozen=True)
-class _KnownVenue:
-    canonical_line: str
-    name: str
-    address: str
-    city: str
-    name_key: str
-    line_key: str
+    return _normalize_address_key_ref(value, city=city)
 
 
 @lru_cache(maxsize=1)
 def _read_known_venues() -> tuple[_KnownVenue, ...]:
-    venues: list[_KnownVenue] = []
-    for line in _read_known_venues_lines():
-        parts = [p.strip() for p in line.split(",") if p.strip()]
-        if not parts:
-            continue
-        name = parts[0]
-        city = parts[-1] if len(parts) >= 2 else ""
-        address = ", ".join(parts[1:-1]).strip() if len(parts) >= 3 else ""
-        city_clean = city.lstrip("#").strip()
-        venues.append(
-            _KnownVenue(
-                canonical_line=line,
-                name=name,
-                address=address,
-                city=city_clean,
-                name_key=_normalize_venue_key(name),
-                line_key=_normalize_venue_key(line),
-            )
-        )
-    return tuple(venues)
+    return _read_known_venues_ref()
 
 
 def _match_known_venue_by_address(
     address: str | None, *, city: str | None = None
 ) -> _KnownVenue | None:
-    addr_key = _normalize_address_key(address, city=city)
-    if not addr_key:
-        return None
-    venues = _read_known_venues()
-    if not venues:
-        return None
-
-    city_key = _normalize_venue_key(city)
-    if city_key:
-        by_city = [v for v in venues if _normalize_venue_key(v.city) == city_key]
-        if by_city:
-            venues = tuple(by_city)
-
-    exact: list[_KnownVenue] = []
-    for v in venues:
-        if not v.address:
-            continue
-        v_key = _normalize_address_key(v.address, city=v.city or city)
-        if v_key and v_key == addr_key:
-            exact.append(v)
-    if len(exact) == 1:
-        return exact[0]
-
-    fuzzy: list[_KnownVenue] = []
-    for v in venues:
-        if not v.address:
-            continue
-        v_key = _normalize_address_key(v.address, city=v.city or city)
-        if not v_key:
-            continue
-        if addr_key in v_key or v_key in addr_key:
-            fuzzy.append(v)
-    if len(fuzzy) == 1:
-        return fuzzy[0]
-    return None
+    return _match_known_venue_by_address_ref(address, city=city)
 
 
 def _match_known_venue(value: str | None, *, city: str | None = None) -> _KnownVenue | None:
-    key = _normalize_venue_key(value)
-    if not key:
-        return None
-    venues = _read_known_venues()
-    if not venues:
-        return None
-
-    city_key = _normalize_venue_key(city)
-    if city_key:
-        by_city = [v for v in venues if _normalize_venue_key(v.city) == city_key]
-        if by_city:
-            venues = tuple(by_city)
-
-    for venue in venues:
-        if key == venue.line_key or key == venue.name_key:
-            return venue
-
-    matches = [
-        venue
-        for venue in venues
-        if venue.name_key and (key == venue.name_key or key in venue.name_key or venue.name_key in key)
-    ]
-    if len(matches) == 1:
-        return matches[0]
-
-    try:
-        from difflib import SequenceMatcher
-    except Exception:
-        return None
-
-    scored: list[tuple[float, _KnownVenue]] = []
-    for venue in venues:
-        if not venue.name_key:
-            continue
-        ratio = SequenceMatcher(None, key, venue.name_key).ratio()
-        scored.append((ratio, venue))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    if not scored:
-        return None
-    best_score, best_venue = scored[0]
-    second = scored[1][0] if len(scored) > 1 else 0.0
-    if best_score >= 0.92 and (best_score - second) >= 0.05:
-        return best_venue
-
-    # Token-based fallback for common alias patterns where difflib similarity is too low,
-    # but one discriminative token uniquely identifies a venue (e.g. "филармония").
-    stop = {
-        "г",
-        "город",
-        "им",
-        "имени",
-        "ул",
-        "улица",
-        "проспект",
-        "пр",
-        "пл",
-        "дом",
-        "д",
-        "к",
-        "корп",
-        "офис",
-        "зал",
-        "сцена",
-        "театр",
-        "музей",
-        "бар",
-        "клуб",
-        "центр",
-        "пространство",
-        "школа",
-        "библиотека",
-        "галерея",
-        "арена",
-        "дворец",
-        "музыкальная",
-        "областная",
-        "городская",
-        "детская",
-    }
-
-    def _tokens(s: str) -> set[str]:
-        parts = re.findall(r"[a-zа-яё0-9]{4,}", s, flags=re.IGNORECASE)
-        out = {p.casefold().replace("ё", "е") for p in parts if p}
-        return {t for t in out if t not in stop and len(t) >= 4}
-
-    key_tokens = _tokens(key)
-    if not key_tokens:
-        return None
-
-    from collections import Counter
-
-    freq: Counter[str] = Counter()
-    venue_tokens: list[tuple[_KnownVenue, set[str]]] = []
-    for v in venues:
-        vt = _tokens(v.name_key)
-        venue_tokens.append((v, vt))
-        for t in vt:
-            freq[t] += 1
-
-    best: tuple[int, _KnownVenue, set[str]] | None = None
-    second_score = 0
-    for v, vt in venue_tokens:
-        score = len(key_tokens & vt)
-        if best is None or score > best[0]:
-            if best is not None:
-                second_score = max(second_score, best[0])
-            best = (score, v, vt)
-        elif score > second_score:
-            second_score = score
-
-    if not best or best[0] <= 0:
-        return None
-
-    overlap = key_tokens & best[2]
-    if best[0] >= 2 and (best[0] - second_score) >= 1:
-        return best[1]
-    if best[0] == 1 and (best[0] - second_score) >= 1:
-        # Accept a unique-overlap token (appears in exactly one venue).
-        only = next(iter(overlap)) if overlap else ""
-        if only and freq.get(only, 0) == 1:
-            return best[1]
-    return None
+    return _match_known_venue_ref(value, city=city)
 
 
 def _normalize_known_venue_mentions(
@@ -8381,46 +8154,7 @@ def _normalize_known_venue_mentions(
 
 
 def _normalise_event_location_from_reference(event_obj: dict[str, Any]) -> None:
-    if not isinstance(event_obj, dict):
-        return
-    raw_city = event_obj.get("city")
-    raw_location_name = event_obj.get("location_name")
-    raw_location_address = event_obj.get("location_address")
-
-    venue_by_name = _match_known_venue(raw_location_name, city=raw_city)
-    venue_by_addr = _match_known_venue_by_address(raw_location_address, city=raw_city)
-
-    venue = venue_by_name
-    addr_raw = str(raw_location_address or "").strip()
-    addr_conflicts_with_name_match = False
-    if venue_by_name is not None and addr_raw:
-        raw_addr_key = _normalize_address_key(addr_raw, city=raw_city)
-        venue_addr_key = _normalize_address_key(
-            venue_by_name.address,
-            city=venue_by_name.city or raw_city,
-        )
-        if raw_addr_key and venue_addr_key and raw_addr_key != venue_addr_key:
-            addr_conflicts_with_name_match = True
-
-    if venue_by_addr is not None and venue_by_addr != venue_by_name:
-        # Address is usually a stronger signal than a guessed venue name. Prefer it
-        # only when we can map it to a single known venue.
-        venue = venue_by_addr
-    elif addr_conflicts_with_name_match:
-        # Unknown venues often get fuzzy-matched to a known place by a generic token
-        # like "школа". If the post also contains an explicit conflicting address,
-        # keep the raw location fields instead of creating a hybrid known+raw line.
-        return
-
-    if venue is None:
-        return
-
-    event_obj["location_name"] = venue.canonical_line
-    if venue.address:
-        if (not addr_raw) or (_normalize_address_key(addr_raw, city=raw_city) == _normalize_address_key(venue.address, city=venue.city or raw_city)):
-            event_obj["location_address"] = venue.address
-    if venue.city and not (str(raw_city or "").strip()):
-        event_obj["city"] = venue.city
+    _normalise_event_location_from_reference_ref(event_obj)
 
 
 @lru_cache(maxsize=8)

@@ -18,6 +18,7 @@ from typing import Any, Iterable, Sequence
 from sqlalchemy import and_, delete, or_, select
 
 from db import Database
+from location_reference import normalise_event_location_from_reference
 from models import Event, EventPoster, EventSource, EventSourceFact, PosterOcrCache
 from sections import MONTHS_RU
 
@@ -4429,6 +4430,16 @@ def _canonicalize_location_fields(
             address = _CANONICAL_DOM_KITOBOYA_ADDRESS
         elif _looks_like_scientific_library_alias(name_norm):
             address = _CANONICAL_SCI_LIBRARY_ADDRESS
+
+    payload = {
+        "location_name": name,
+        "location_address": address,
+        "city": city_value,
+    }
+    normalise_event_location_from_reference(payload)
+    name = (payload.get("location_name") or "").strip() or None
+    address = (payload.get("location_address") or "").strip() or None
+    city_value = (payload.get("city") or "").strip() or None
 
     return name, address, city_value
 

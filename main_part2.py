@@ -17302,6 +17302,7 @@ def create_app() -> web.Application:
     from handlers.telegraph_cache_cmd import telegraph_cache_router
     dp.include_router(telegraph_cache_router)
     dp.include_router(tg_monitor_router)
+    dp.include_router(guide_excursions_router)
     import video_announce.handlers as video_handlers
     import preview_3d.handlers as preview_3d_handlers
 

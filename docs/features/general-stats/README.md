@@ -93,6 +93,16 @@
    - `messages_with_events = COUNT(*) WHERE events_extracted>0 OR events_imported>0`
    - `sources_with_events = COUNT(DISTINCT source_id) WHERE events_extracted>0 OR events_imported>0`
 
+### 3.2.1. Guide excursions monitoring
+
+Дополнительно `/general_stats` теперь показывает отдельный блок `Guide excursions`:
+
+- `sources_scanned` — `COUNT(DISTINCT source_id)` из `guide_monitor_post.last_scanned_at` в окне отчёта;
+- `posts_prefiltered` — сколько guide-постов прошло prefilter и были признаны потенциально экскурсионными;
+- `occurrences_new` — сколько новых `guide_occurrence` впервые появилось в окне отчёта;
+- `digest_published` — сколько выпусков `guide_digest_issue(status='published')` было отправлено;
+- `guide_monitoring runs` — список прогонов `ops_run(kind='guide_monitoring')`.
+
 ### 3.3. /parse (source parsing)
 
 8) **Сколько и во сколько было успешных запусков `/parse`** (Needs run log)  

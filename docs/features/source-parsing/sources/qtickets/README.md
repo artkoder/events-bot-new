@@ -1,12 +1,18 @@
 # Qtickets (Kaliningrad): парсер событий
 
 > **Linear:** EVE-56  
-> **Статус:** 📝 Planned / Spec  
+> **Статус:** implemented  
 > **Цель:** добавить Qtickets как регулярный источник в `source_parsing` (как theatres/philharmonia), с нормальной дедупликацией и обновлениями.
 
 ## Обзор
 
 Qtickets для Калининграда: `https://kaliningrad.qtickets.events/`.
+
+## Regression Note: March 15, 2026
+
+- Live reproduction on **March 15, 2026** confirmed that the current Playwright parser still finds **40** event cards on `kaliningrad.qtickets.events`, and all parsed items keep a valid `parsed_date`.
+- The fragile point was downstream draft extraction: some Qtickets cards have sparse descriptions, so `/parse` now passes explicit structured facts (`date`, `time`, `venue`, `ticket status`, `price`, `url`) to the LLM together with the raw description.
+- Qtickets currently runs via its own Kaggle kernel `ParseQtickets` / `zigomaro/parse-qtickets` and is not bundled into `ParseTheatres`.
 
 Парсер должен извлекать события (и, если есть, расписание по датам/времени) и прогонять их через стандартный пайплайн `source_parsing`:
 
@@ -22,7 +28,7 @@ Qtickets для Калининграда: `https://kaliningrad.qtickets.events/`
 
 Дополнительно (опционально): поддержать точечный запуск по ссылке из VK review, если Qtickets URL встречается в постах.
 
-### Компоненты (будущие файлы)
+### Компоненты
 
 - Kaggle kernel: `kaggle/ParseQtickets/` (Playwright/requests; зависит от того, SPA ли сайт и есть ли API).
 - Python модуль: `source_parsing/qtickets.py` (запуск Kaggle + разбор JSON).
@@ -32,6 +38,19 @@ Qtickets для Калининграда: `https://kaliningrad.qtickets.events/`
 ## Контракт данных: что отдаёт парсер
 
 `source_parsing` сейчас работает с моделью `TheatreEvent` (`source_parsing/parser.py`). Для Qtickets придерживаемся её (или совместимого JSON).
+
+Текущий рабочий JSON-контракт `qtickets_events.json`:
+
+- `date_raw`
+- `parsed_date`
+- `parsed_time`
+- `location`
+- `photos[]`
+- `ticket_price_min`
+- `ticket_price_max`
+- `ticket_status`
+
+Backend parser держит backward compatibility со старым форматом (`date/time/image_url/price_min/price_max`), но новым notebook-выгрузкам нужно придерживаться именно этого контракта.
 
 ## Особенности источника (Qtickets)
 

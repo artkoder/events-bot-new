@@ -22,6 +22,7 @@ sections:
   llm:
     prompts: docs/llm/prompts.md
     admin_actions: docs/llm/admin-actions.md
+    guide_excursions_dedup: docs/llm/guide-excursions-dedup.md
     request_guide: docs/llm/request-guide.md
     topics: docs/llm/topics.md
   reference:
@@ -43,8 +44,13 @@ sections:
       event_static_pages: docs/backlog/features/static-event-pages/README.md
       guide_excursions_architecture: docs/backlog/features/guide-excursions-monitoring/architecture.md
       guide_excursions_casebook: docs/backlog/features/guide-excursions-monitoring/casebook.md
+      guide_excursions_digest_spec: docs/backlog/features/guide-excursions-monitoring/digest-spec.md
+      guide_excursions_e2e: docs/backlog/features/guide-excursions-monitoring/e2e.md
+      guide_excursions_eval_pack: docs/backlog/features/guide-excursions-monitoring/eval-pack.md
+      guide_excursions_llm_first: docs/backlog/features/guide-excursions-monitoring/llm-first.md
       guide_excursions_mvp: docs/backlog/features/guide-excursions-monitoring/mvp.md
       guide_excursions_monitoring: docs/backlog/features/guide-excursions-monitoring/README.md
+      guide_excursions_opus_audit_brief: docs/backlog/features/guide-excursions-monitoring/opus-audit-brief.md
       telegram_monitoring: docs/backlog/features/telegram-monitoring/README.md
       telegram_monitoring_videos: docs/backlog/features/telegram-monitoring-videos/README.md
       smart_event_update: docs/backlog/features/smart-event-update/README.md
@@ -206,6 +212,20 @@ features:
       - preview_3d/handlers.py
       - kaggle/Preview3D/preview_3d.ipynb
       - scheduling.py
+      - main_part2.py
+  guide_excursions_monitoring:
+    status: implemented
+    docs: docs/features/guide-excursions-monitoring/README.md
+    entrypoints:
+      - guide_excursions/commands.py
+      - guide_excursions/service.py
+      - guide_excursions/parser.py
+      - guide_excursions/scanner.py
+      - guide_excursions/seed.py
+      - db.py
+      - general_stats.py
+      - scheduling.py
+      - main.py
       - main_part2.py
 
 artifacts:

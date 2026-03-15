@@ -8,6 +8,10 @@
 - high-level design: `docs/backlog/features/guide-excursions-monitoring/README.md`
 - source taxonomy + case analysis: `docs/backlog/features/guide-excursions-monitoring/casebook.md`
 - facts-first architecture: `docs/backlog/features/guide-excursions-monitoring/architecture.md`
+- LLM-first pack: `docs/backlog/features/guide-excursions-monitoring/llm-first.md`
+- frozen eval set: `docs/backlog/features/guide-excursions-monitoring/eval-pack.md`
+- digest/media delivery spec: `docs/backlog/features/guide-excursions-monitoring/digest-spec.md`
+- planned live E2E scenarios: `docs/backlog/features/guide-excursions-monitoring/e2e.md`
 - future static pages / own domain: `docs/backlog/features/static-event-pages/README.md`
 
 ## 1. Что должно дать ценность сразу
@@ -26,7 +30,7 @@ MVP считается успешным, если в тот же день пос
 - seed источников через migration / seed script, без UI добавления;
 - OCR картинок;
 - regex/heuristic prefilter до LLM;
-- подтверждение и нормализация через Gemma по отдельному ключу `GOOGLE_API_KEY2`;
+- screening и `Tier 1` extraction через Gemma по отдельному ключу `GOOGLE_API_KEY2`, с server-side enrichment через existing LLM Gateway;
 - facts-first накопление для `guide / template / occurrence` в отдельных guide-таблицах;
 - короткая текстовая выдача для digest, а не long-form pages;
 - два публичных digest family:
@@ -47,6 +51,18 @@ MVP считается успешным, если в тот же день пос
 - UI для ручного добавления/редактирования guide sources;
 - convergence в обычные `Event` текущего бота.
 
+### Versioned component pack for MVP
+
+- `Trail Scout v1` — Telegram intake, OCR, prefilter, `Tier 1` extraction
+- `Route Weaver v1` — facts-first merge, status binding, enrichment for `guide/template/occurrence`
+- `Lollipop Trails v1` — batched short digest text generation from facts
+- `Trail Digest v1` — ranking, preview, publish
+- `Media Bridge v1` — temporary media reuse via `forward -> file_id` bridge
+- `Guide Atlas v1` — admin/read-model surfaces and stats
+- `Guide E2E Pack v1` — manual/live E2E flow and Gherkin contract
+
+Каноника по naming/versioning: `docs/backlog/features/guide-excursions-monitoring/digest-spec.md`
+
 ## 3. Seed pack источников для MVP
 
 Источники seed’ятся миграцией или idempotent seed-командой в отдельную таблицу `guide_source`.
@@ -62,6 +78,7 @@ MVP считается успешным, если в тот же день пос
 | `alev701` | `guide_personal` | `medium` | редкие анонсы, шумная историческая лента |
 | `twometerguide` | `guide_project` | `medium` | multi-region, сильный media/lifestyle шум |
 | `valeravezet` | `guide_project` | `medium` | promo-heavy, бренд-автор |
+| `excursions_profitour` | `excursion_operator` | `medium` | agency/operator, много school-group и `on_request` программ |
 | `ruin_keepers` | `organization_with_tours` | `medium` | heritage-organization, tours as one product line |
 | `vkaliningrade` | `aggregator` | `medium` | fallback-aggregator, meeting-point updates |
 
@@ -69,11 +86,13 @@ MVP считается успешным, если в тот же день пос
 
 - `allow_out_of_region=false` по умолчанию
 - `allow_out_of_region=true` для `twometerguide`
+- `operator=true` для `excursions_profitour`
 - `aggregator=true` для `vkaliningrade`
 - `organization=true` для `ruin_keepers`
 - `caption_heavy=true` для `katimartihobby`
 - `promo_noise=true` для `valeravezet`
 - `collaboration_heavy=true` для `tanja_from_koenigsberg`, `amber_fringilla`
+- `on_request_heavy=true` для `excursions_profitour`
 
 ## 4. Стратегия хранения для MVP
 
@@ -133,6 +152,7 @@ MVP не должен быть “только про digest row”.
 - `forwards`
 - `reactions_total`
 - `content_hash`
+- `media_refs_json`
 - `post_kind`
 - `prefilter_passed`
 - `llm_status`
@@ -151,10 +171,12 @@ MVP не должен быть “только про digest row”.
   - `person`
   - `project`
   - `organization`
+  - `operator`
 - `display_name`
 - `marketing_name`
 - `source_links_json`
 - `base_region`
+- `audience_strengths_json`
 - `summary_short`
 - `facts_rollup_json`
 - `first_seen_at`
@@ -164,8 +186,11 @@ MVP не должен быть “только про digest row”.
 
 - `id`
 - `canonical_title`
+- `title_normalized`
 - `aliases_json`
 - `base_city`
+- `availability_mode`
+- `audience_fit_json`
 - `participant_profiles_json`
 - `summary_short`
 - `facts_rollup_json`
@@ -177,14 +202,18 @@ MVP не должен быть “только про digest row”.
 - `id`
 - `template_id`
 - `canonical_title`
+- `title_normalized`
 - `participant_profiles_json`
 - `guide_names_json`
 - `organizer_names_json`
+- `digest_eligible`
+- `rescheduled_from_id`
 - `date`
 - `time`
 - `duration_text`
 - `city`
 - `meeting_point`
+- `audience_fit_json`
 - `price_text`
 - `booking_text`
 - `booking_url`
@@ -210,6 +239,12 @@ MVP не должен быть “только про digest row”.
 - `published_new_digest_at`
 - `published_last_call_digest_at`
 
+Примечания:
+
+- `booking_url` в MVP остаётся raw source of truth;
+- tracking columns и redirect slug осознанно не materialize’ятся в MVP: future click analytics строится поверх `booking_url + occurrence_id` в отдельной итерации;
+- уже прошедшие occurrences в MVP не держим: row либо не создаётся, либо удаляется cleanup path после перехода в прошлое.
+
 #### `guide_fact_claim`
 
 - `id`
@@ -226,6 +261,7 @@ MVP не должен быть “только про digest row”.
   - `status_delta`
   - `template_hint`
   - `guide_profile_hint`
+  - `audience_fit_hint`
 - `confidence`
 - `source_id`
 - `message_id`
@@ -246,6 +282,7 @@ MVP не должен быть “только про digest row”.
 - `source_url`
 - `views`
 - `reactions_total`
+- `media_refs_json`
 - `snapshot_at`
 
 #### `guide_digest_issue`
@@ -256,6 +293,7 @@ MVP не должен быть “только про digest row”.
 - `channel_username`
 - `published_at`
 - `items_count`
+- `media_manifest_json`
 - `payload_hash`
 - `status`
 
@@ -263,7 +301,9 @@ MVP не должен быть “только про digest row”.
 
 ### Новый guide-specific notebook
 
-Отдельный Kaggle notebook, не копия текущего `TelegramMonitor`.
+Мониторинг источников должен выполняться в **отдельном Kaggle notebook**.
+
+Но это должен быть не greenfield и не “совсем другой pipeline”, а **focused fork/reuse** текущего `TelegramMonitor`.
 
 Рабочее название:
 
@@ -275,25 +315,143 @@ MVP не должен быть “только про digest row”.
 - guide sources требуют другой prefilter и другой JSON contract;
 - удобнее отдельно подключить `GOOGLE_API_KEY2`.
 
+### Kaggle-first execution boundary
+
+Граница MVP должна быть жёсткой:
+
+- Kaggle notebook делает raw Telegram scanning;
+- серверный бот не делает Telethon fetch исходных каналов;
+- серверный бот только импортирует notebook output, мерджит факты и публикует digest.
+
+Это позволяет:
+
+- переиспользовать уже отработанный Kaggle operational path;
+- не плодить вторую Telethon session в runtime бота;
+- держать тяжёлые OCR/LLM/fetch операции там же, где уже живёт текущий Telegram monitoring.
+
+### Что именно должно переиспользоваться из текущего Telegram Monitoring
+
+Канонический baseline:
+
+- notebook baseline: `kaggle/TelegramMonitor/telegram_monitor.ipynb`
+- Kaggle push/poll/download lifecycle: `source_parsing/telegram/service.py`
+- import/reporting patterns: `source_parsing/telegram/handlers.py`
+- encrypted split-secrets flow: `source_parsing/telegram/split_secrets.py`
+
+#### Reuse as-is
+
+- Kaggle launcher and output download;
+- encrypted runtime secret delivery;
+- Telethon session bootstrap;
+- grouped album collapse;
+- source metadata fetch;
+- OCR/media fingerprinting;
+- recent-results artifact discipline.
+
+#### Reuse with guide-specific fork
+
+- candidate JSON contract;
+- message prefilter heuristics;
+- LLM prompt/output contract;
+- source-level metrics payload;
+- linked-post and album heuristics where they help guide matching.
+
+#### New guide-specific logic
+
+- source taxonomy and source flags;
+- `announce_single / announce_multi / status_update / reportage / template_signal / on_demand_offer`;
+- extraction of `guide / template / occurrence` facts in `Tier 1`;
+- `audience_fit`, `availability_mode`, `digest_eligible`;
+- occurrence/template clustering and `aggregator_fallback` semantics.
+
 ### Runtime stages
 
 1. `Telethon fetch`
    - последние `N` сообщений на источник;
    - grouped albums collapse;
    - views / forwards / reactions / links / handles;
-   - media references.
+   - media references for future digest reuse.
 2. `OCR`
    - только для candidate posts с изображениями.
 3. `Deterministic prefilter`
    - regex + heuristic scoring;
    - coarse post-kind guess.
-4. `Gemma confirmation`
+4. `Gemma screening + Tier 1 extraction`
    - только по prefiltered items;
-   - output: `ignore | announce_occurrence | status_update | template_signal`.
+   - output: `ignore | announce | status_update | template_only` plus compact JSON payload.
 5. `Server import`
-   - profile/template/occurrence match + merge;
+   - transport validation + partial-run handling;
+   - status bind + profile/template/occurrence match + merge;
+   - server-side semantic enrichment;
    - digest candidate extraction;
+   - media refs persistence for `Media Bridge v1`;
    - stats + admin report.
+
+### Responsibilities split
+
+#### Kaggle notebook responsibilities
+
+- fetch recent source messages;
+- collapse grouped albums and collect media refs;
+- collect source meta and post metrics;
+- run OCR;
+- run deterministic prefilter;
+- run Gemma screening + `Tier 1` extraction with `GOOGLE_API_KEY2`;
+- export compact result artifact for server import.
+
+#### Server responsibilities
+
+- ingest notebook output;
+- run `Route Weaver v1` status bind, merge, enrichment and materialization;
+- update `Guide Atlas v1` read models and `/general_stats`;
+- prepare `Trail Digest v1` preview/publish payloads with batched `Lollipop Trails v1` copy;
+- resolve media through `Media Bridge v1` using bot-side `forward -> file_id`.
+
+### Transport contract for notebook output
+
+`GuideExcursionsMonitor` не выдумывает новый канал доставки.
+
+Каноника MVP:
+
+- reuse текущего Kaggle push/poll/download lifecycle из Telegram Monitoring;
+- артефакт называется `guide_excursions_results.json`;
+- top-level payload обязан содержать:
+  - `run_id`
+  - `scan_mode`
+  - `started_at`
+  - `finished_at`
+  - `partial`
+  - `sources`;
+- per-source payload обязан содержать:
+  - `source_status`
+  - `posts_scanned`
+  - `candidates`;
+- server import обязан импортировать healthy sources даже при `partial=true`.
+
+### Past occurrence policy
+
+Пока что уже прошедшие экскурсии не храним как `guide_occurrence`.
+
+Правило MVP:
+
+- candidate с `date_local < today_local` не materialize’ится в `guide_occurrence`;
+- report/template posts могут усиливать `guide_template` и `guide_profile`, но не создают past occurrence row;
+- active occurrence удаляется cleanup path после перехода в прошлое, чтобы инвентарь оставался operational, а не историческим.
+
+### Временная схема медиа в MVP
+
+До постоянной infra на Yandex Cloud digest должен использовать `Media Bridge v1`, а не отдельный storage upload.
+
+Что делаем:
+
+- сохраняем media refs из исходных Telegram-постов;
+- bot temporary-forward’ит выбранный source media в helper/admin chat и извлекает `file_id`;
+- сохраняем `bot_file_id` для server-side publish;
+- публикуем media group в `@keniggpt`;
+- Kaggle staging держим только как fallback;
+- если media-path ломается, digest уходит как text-only.
+
+Каноника: `docs/backlog/features/guide-excursions-monitoring/digest-spec.md`
 
 ### Текстовая стратегия MVP
 
@@ -304,14 +462,22 @@ MVP не делает long-form guide pages и template pages, но и не ог
 - `occurrence.canonical_title`
 - `occurrence.summary_one_liner`
 - optional `occurrence.digest_blurb`
+- optional `occurrence.audience_line`
 
 Что уже копится в MVP как факты:
 
 - occurrence logistics and status;
 - template hints и recurring anchors;
+- `audience_fit` и `availability_mode`;
 - guide profile claims, если они явно grounded в постах/OCR.
 
-Иначе говоря, digest family оперируют базовыми информационными единицами, но underneath storage уже готов к следующей итерации.
+Текстовая политика MVP:
+
+- card shell строится deterministic;
+- смысловые короткие строки пишет `Lollipop Trails v1` batch-режимом из fact pack;
+- fully deterministic digest-copy не является каноникой, но deterministic fallback допустим только как аварийный режим.
+
+Иначе говоря, digest family оперируют базовыми информационными единицами, но underlying storage уже готов к следующей итерации.
 
 ## 6. Scan modes
 
@@ -324,6 +490,7 @@ MVP должен быть **двухрежимным**.
 - находить новые occurrences;
 - обновлять полноту карточек;
 - находить template hints;
+- находить `on_demand_offer` без автоматического создания digest item;
 - собирать guide/profile signals;
 - собирать cover-image и краткие тексты.
 
@@ -410,6 +577,7 @@ MVP должен быть **двухрежимным**.
 Содержит:
 
 - только occurrences, которые ещё не были опубликованы в `new_occurrences`;
+- только `digest_eligible=yes`;
 - максимум `8` карточек за выпуск;
 - сортировка:
   1. близость даты
@@ -423,6 +591,7 @@ MVP должен быть **двухрежимным**.
 - дата и время
 - маршрут
 - одно предложение summary
+- short `для кого`, если сигнал короткий и уверенный
 - место встречи
 - стоимость
 - запись / ссылка
@@ -447,6 +616,7 @@ MVP должен быть **двухрежимным**.
 Содержит:
 
 - только ещё не публиковавшиеся status deltas;
+- только `digest_eligible=yes`;
 - максимум `6` карточек;
 - приоритет ближайшим датам и scarcity signals.
 
@@ -454,6 +624,7 @@ MVP должен быть **двухрежимным**.
 
 ### Что не публикуем в MVP автоматически
 
+- template-only `on_request` / `private-group-only` предложения;
 - `weekend_soon`
 - `premieres_and_new_routes`
 - `popular_inside_channel`
@@ -486,6 +657,7 @@ MVP публикует digest’ы **только** в тестовый кана
 - `Preview new_occurrences`
 - `Preview last_call`
 - `Publish latest to @keniggpt`
+- `Send test report`
 - `Active occurrences`
 - `Sources`
 - `Stats`
@@ -540,13 +712,19 @@ Manual preview of:
 
 Серверу нужен компактный JSON без лишнего raw мусора.
 
+Рекомендуемое имя артефакта:
+
+- `guide_excursions_results.json`
+
 ### Top-level
 
 ```json
 {
+  "run_id": "guide-scan-2026-03-14T09-05-00Z",
   "scan_mode": "light",
   "started_at": "2026-03-14T09:05:00+00:00",
   "finished_at": "2026-03-14T09:12:10+00:00",
+  "partial": false,
   "sources": [...]
 }
 ```
@@ -557,6 +735,7 @@ Manual preview of:
 {
   "username": "tanja_from_koenigsberg",
   "source_kind": "guide_personal",
+  "source_status": "ok",
   "posts_scanned": 5,
   "candidates": [...]
 }
@@ -575,20 +754,22 @@ Manual preview of:
   "text": "...",
   "ocr_text": "...",
   "images": ["https://..."],
-  "llm_decision": "announce_occurrence",
-  "occurrences": [
+  "llm_decision": "announce",
+  "announce_tier1": [
     {
-      "title": "Город К. Женщины, которые вдохновляют",
-      "date": "2026-03-07",
-      "time": "11:00",
+      "title_raw": "Город К. Женщины, которые вдохновляют",
+      "date_local": "2026-03-07",
+      "time_local": "11:00",
       "guide_names": ["Татьяна Удовенко", "Юлия Гришанова"],
       "meeting_point": "у Матери России",
       "price_text": "2000 руб",
-      "booking_url": "https://t.me/Yulia_Grishanova",
-      "status": "planned",
-      "summary_one_liner": "..."
+      "booking_target": "https://t.me/Yulia_Grishanova",
+      "status_hint": "planned",
+      "raw_text_snippet": "7 марта — Тематическая пешеходная прогулка..."
     }
-  ]
+  ],
+  "status_claims": [],
+  "template_candidates": []
 }
 ```
 

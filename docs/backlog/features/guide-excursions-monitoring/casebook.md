@@ -9,6 +9,8 @@
 - `artifacts/codex/guide_channels_deep_2026-03-14.json`
 - `artifacts/codex/guide_channels_deep_summary_2026-03-14.json`
 - `artifacts/codex/excursion_posts_2026-03-14.json`
+- `artifacts/codex/guide_channel_excursions_profitour_2026-03-14.json`
+- `artifacts/codex/guide_channel_excursions_profitour_summary_2026-03-14.json`
 
 ## 1. Цель кейсбука
 
@@ -32,11 +34,13 @@
 - `ruin_keepers`
 - `twometerguide`
 - `valeravezet`
+- `excursions_profitour`
 
 Это уже покрывает разные archetypes источников:
 
 - личные каналы гидов;
 - брендовые каналы гидов-проектов;
+- экскурсионные операторы / агентства;
 - организационные каналы, где экскурсии лишь часть работы;
 - агрегаторный проект.
 
@@ -79,6 +83,21 @@
 - часто более “медийная” подача;
 - выше риск false positives по travel/lifestyle текстам.
 
+#### `excursion_operator`
+
+Экскурсионный оператор / агентство, для которого экскурсии и поездки являются основным продуктом, но publisher не равен конкретному гиду.
+
+Каналы:
+
+- `excursions_profitour`
+
+Признаки:
+
+- центр тяжести не на личности гида, а на packaged programs и бронировании;
+- много `школьные группы`, `организованные группы`, `корпоративные` и других audience-led форматов;
+- значимая часть предложений живёт как `по запросу`, `по вашему желанию`, `под группу`, `цена зависит от количества`;
+- источник часто является source of truth по цене, бронированию и availability, но не по guide narrative.
+
 #### `organization_with_tours`
 
 Организация, движение, НКО, проект или институция, для которых экскурсии важны, но не являются единственным продуктом.
@@ -114,14 +133,16 @@
 
 1. `guide_personal`
 2. `guide_project`
-3. `organization_with_tours`
-4. `aggregator`
+3. `excursion_operator`
+4. `organization_with_tours`
+5. `aggregator`
 
 Но для некоторых кейсов апдейтов приоритет должен быть уже field-level:
 
 - `meeting_point_update`: допускается из `aggregator`, если исходный guide-post молчит;
 - `sold_out / few_seats`: допустимо из любого источника, но с пометкой source provenance;
 - `route_summary`: предпочтительно из `guide_personal` или `guide_project`.
+- `booking / price / group_size / on_request availability`: часто первичны именно у `excursion_operator`.
 
 ## 4. Профили каналов и что это значит для пайплайна
 
@@ -216,6 +237,20 @@
   - экскурсии часто завязаны на тему наследия и на конкретного приглашённого гида;
   - organization-posts должны обогащать occurrence, но не переписывать guide profile.
 
+### `excursions_profitour`
+
+- Archetype: `excursion_operator`
+- Content shape: экскурсионный оператор/агентство с сильным school-group и group-booking уклоном, смешением scheduled программ и `по запросу` предложений.
+- Deep-scan signal:
+  - `sample_size=120`
+  - `views_median≈237`
+  - `reactions_median≈0`
+- Operational implication:
+  - это не агрегатор: канал является source of truth по заявкам, цене, условиям группы и адаптации программы;
+  - значимая часть предложений не должна превращаться в `public digest occurrence`, потому что это `on-demand` или `private-group-only` предложения;
+  - канал очень богат на `audience fit` факты: возраст, школьные классы, профориентация, группы 20-30 человек, “подойдёт для школьников”, “адаптируется под возраст”;
+  - для template layer это один из самых ценных источников, даже когда occurrence layer даёт мало публичных выпусков.
+
 ### `twometerguide`
 
 - Archetype: `guide_project`
@@ -250,6 +285,8 @@
   - несколько выходов в одном посте;
 - `announce_single`
   - один явный выход;
+- `on_demand_offer`
+  - типовая экскурсия / программа `по запросу`, `под группу`, `по вашему желанию`, без нормального публичного occurrence;
 - `status_update`
   - few seats, sold out, перенос, точка встречи, reminder;
 - `reportage`
@@ -266,7 +303,7 @@
 Без этой taxonomy пайплайн будет делать две системные ошибки:
 
 1. либо заваливать LLM лишними постами;
-2. либо терять важные template/status signals, если смотреть только на “сухие анонсы”.
+2. либо терять важные template/status signals и `on-demand` предложения, если смотреть только на “сухие анонсы”.
 
 ## 6. Ключевые кейсы для дедупа и связи источников
 
@@ -321,6 +358,21 @@
 
 - не публиковать в digest как новый выход;
 - сохранять как `template_evidence`.
+
+### Case E: `по запросу` / `только для организованных групп`
+
+Примеры из `excursions_profitour`:
+
+- школьные программы с `стоимость зависит от количества человек`;
+- формулировки `выбирайте удобный день`, `по вашему желанию`, `программа может быть адаптирована под возраст и интересы участников`;
+- `свободная дата` внутри operator-calendar без полноценного публичного набора.
+
+Решение:
+
+- не создавать публичный digest item только потому, что найден красивый offer post;
+- сохранять это в `GuideExcursionTemplate` как `availability_mode=on_request_private` или `mixed`;
+- при наличии конкретной публичной даты и открытого набора допускается occurrence, но с явной проверкой `digest_eligible`;
+- такие посты особенно важны для будущих guide/agency pages и каталога типовых экскурсий.
 
 ## 7. Какие admin-инструменты нужны без публичных страниц
 
@@ -500,6 +552,9 @@ UI выбора типа дайджеста:
 1. Каналы надо различать не только по trust, но и по **source archetype**.
 2. Для guide monitoring нужен не binary parse, а **post taxonomy**.
 3. Без `status_update` и `template_signal` фича будет наполовину слепой.
-4. На старте одна SQLite база подходит; выносить лучше только raw intake/cache, если рост реально случится.
-5. Помимо дайджеста “новые экскурсии” сразу имеет смысл проектировать `last_call`.
-6. Без admin surfaces и блока в `/general_stats` запускать эту фичу не стоит даже без публичных страниц.
+4. `excursion_operator` — это отдельный archetype, а не частный случай агрегатора или `organization_with_tours`.
+5. `по запросу` / `private-group-only` предложения нужно копить как template-level knowledge, но не тащить автоматически в публичные digest’ы.
+6. `Для кого эта экскурсия` — один из главных классов фактов: возраст, тип группы, уровень подготовки, tempo, “местные/туристы”, семейность, профориентация, степень интерактива.
+7. На старте одна SQLite база подходит; выносить лучше только raw intake/cache, если рост реально случится.
+8. Помимо дайджеста “новые экскурсии” сразу имеет смысл проектировать `last_call`.
+9. Без admin surfaces и блока в `/general_stats` запускать эту фичу не стоит даже без публичных страниц.
