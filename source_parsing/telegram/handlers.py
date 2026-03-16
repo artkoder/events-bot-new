@@ -26,6 +26,7 @@ from models import (
     TelegramSource,
     TelegramSourceForceMessage,
 )
+from source_parsing.date_utils import normalize_implicit_iso_date_to_anchor
 from smart_event_update import EventCandidate, PosterCandidate, smart_event_update
 from telegram_sources import normalize_tg_username
 from source_parsing.post_metrics import (
@@ -1939,6 +1940,9 @@ def _year_from_message_date(value: Any) -> int | None:
         return None
 
 
+_IMPLICIT_YEAR_RECENT_PAST_DAYS = 92
+
+
 def _date_from_message_date(value: Any) -> date | None:
     if not value:
         return None
@@ -1989,23 +1993,11 @@ def _source_mentions_year_for_date(text: str | None, *, day: int, month: int, ye
 
 
 def _rollover_iso_date_to_anchor(value: Any, *, anchor: date) -> str | None:
-    raw = str(value or "").split("..", 1)[0].strip()
-    if not raw:
-        return None
-    try:
-        parsed = date.fromisoformat(raw)
-    except Exception:
-        return None
-    try:
-        candidate = date(anchor.year, parsed.month, parsed.day)
-    except Exception:
-        return None
-    if candidate < anchor:
-        try:
-            candidate = date(anchor.year + 1, parsed.month, parsed.day)
-        except Exception:
-            return None
-    return candidate.isoformat()
+    return normalize_implicit_iso_date_to_anchor(
+        value,
+        anchor_date=anchor,
+        recent_past_days=_IMPLICIT_YEAR_RECENT_PAST_DAYS,
+    )
 
 
 def _extract_poster_date_time_pairs(text: str | None) -> list[tuple[int, int, str]]:

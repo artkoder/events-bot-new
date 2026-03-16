@@ -101,6 +101,7 @@ def step_wait_long_operation(context, text):
 - Polling каждые 0.5 секунды вместо блокирующего ожидания
 - Проверка последних 10 сообщений (не только последнее)
 - Case-insensitive поиск текста
+- Для тяжёлых guide runs отдельный timeout тоже должен быть generous: `Мониторинг экскурсий завершён` теперь использует `E2E_GUIDE_MONITOR_TIMEOUT_SEC` и `E2E_GUIDE_MONITOR_POLL_SEC`, а не общий 5-минутный fallback.
 
 ---
 
@@ -240,6 +241,14 @@ def step_log(ctx): ...
 - [ ] Установить `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (или `TG_API_ID`/`TG_API_HASH`) и одну из: `TELEGRAM_AUTH_BUNDLE_E2E` или `TELEGRAM_SESSION`
 - [ ] (Опционально) выставить `E2E_BOT_USERNAME`, чтобы E2E не делал HTTP вызов в Bot API (`getMe`) для определения username (полезно, если `api.telegram.org` недоступен, но MTProto доступен).
 - [ ] Перед каждым повторным прогоном сценария на конкретных постах выполнить предочистку: `И база очищена от событий источника "<source>"` + `И очищены отметки мониторинга для "<username>"`, иначе в проверку попадут следы прошлых прогонов.
+
+### Границы Telegram-сессий (обязательно)
+
+- `TELEGRAM_AUTH_BUNDLE_E2E` / `TELEGRAM_SESSION` используются только для локального live E2E и human-like Telethon клиента.
+- `TELEGRAM_AUTH_BUNDLE_S22` используется только для Kaggle / remote monitoring runs.
+- Нельзя без явного разрешения подменять `S22` на `E2E` в `GUIDE_MONITORING_AUTH_BUNDLE_ENV` или аналогичных Kaggle-путях.
+- Если `S22` сломана, это отдельный инцидент: нужно остановиться, зафиксировать проблему и попросить новую Kaggle-сессию, а не “занимать” локальную E2E-сессию.
+- Одновременное использование одного и того же auth bundle локально и в Kaggle может привести к `AuthKeyDuplicatedError`.
 
 #### TELEGRAM_AUTH_BUNDLE_E2E (формат и расшифровка)
 

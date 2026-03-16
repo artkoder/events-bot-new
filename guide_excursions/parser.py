@@ -48,9 +48,12 @@ class GuideParsedOccurrence:
     title_normalized: str
     date_iso: str | None
     time_text: str | None
+    duration_text: str | None
     city: str | None
     meeting_point: str | None
+    route_summary: str | None
     audience_fit: list[str]
+    group_format: str | None
     price_text: str | None
     booking_text: str | None
     booking_url: str | None
@@ -294,12 +297,14 @@ def extract_title(text: str, *, source_title: str | None = None) -> str | None:
             continue
         candidate = re.sub(
             r"^[^\wА-Яа-яЁё]*(?:\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?|"
-            r"\d{1,2}\s+[А-Яа-яЁё]+\s+в\s+\d{1,2}:\d{2})\s*",
+            r"\d{1,2}\s+[А-Яа-яЁё]+\s+в\s+\d{1,2}:\d{2}|"
+            r"\d{1,2}\s+[А-Яа-яЁё]+(?:,\s*[А-Яа-яЁё]+)?[.:])\s*",
             "",
             line,
             flags=re.I,
         )
         candidate = re.split(r"(?:⏳|💰|📍|✍️|☎️|·\s*\d{1,2}\s+[А-Яа-яЁё]+)", candidate, maxsplit=1)[0].strip()
+        candidate = candidate.strip(" .,!?:;")
         if any(pattern.search(candidate) for pattern in NON_SUMMARY_PATTERNS):
             continue
         low = line.lower()
@@ -312,7 +317,7 @@ def extract_title(text: str, *, source_title: str | None = None) -> str | None:
                 return (value[:1].upper() + value[1:])[:140]
 
     patterns = [
-        re.compile(r"((?:тур|экскурсия|прогулка|путешествие)\s+[A-Za-zА-Яа-яЁё0-9][^\n.!?]{6,140})", re.I),
+        re.compile(r"((?:тур|экскурсия|экопрогулка|прогулка|путешествие)\s+[A-Za-zА-Яа-яЁё0-9][^\n.!?]{6,140})", re.I),
         re.compile(r"^\s*\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\s+\S+\s+([^\n]{4,140})", re.I),
     ]
     for pattern in patterns:
@@ -321,16 +326,18 @@ def extract_title(text: str, *, source_title: str | None = None) -> str | None:
             continue
         value = collapse_ws(match.group(1))
         value = re.split(r"(?:⏳|💰|📍|✍️|☎️|·\s*\d{1,2}\s+[А-Яа-яЁё]+)", value, maxsplit=1)[0].strip()
+        value = value.strip(" .,!?:;")
         if re.match(r"^(?:путешествие|экскурсия|прогулка)\s+на\s+", value, flags=re.I):
             return (value[:1].upper() + value[1:])[:140]
         value = re.sub(r"^(?:в|на)\s+", "", value, flags=re.I)
         value = re.sub(r"\s+(?:уже|у\s+вас\s+еще\s+есть|авторская\s+экскурсия).*$", "", value, flags=re.I)
         if len(value) >= 4:
-            return value
+            return (value[:1].upper() + value[1:])[:140]
 
     for sentence in _sentences(text):
         cleaned = re.sub(r"^[🌿🏰✨🔥📍👣🧭🚌❤️❤♥️\-\s]+", "", sentence).strip()
         cleaned = re.sub(r"^\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\s*", "", cleaned)
+        cleaned = re.sub(r"^\d{1,2}\s+[А-Яа-яЁё]+(?:,\s*[А-Яа-яЁё]+)?[.:]\s*", "", cleaned, flags=re.I)
         if len(cleaned) < 6:
             continue
         if NON_SUMMARY_PATTERNS[0].search(cleaned):
@@ -352,6 +359,7 @@ def extract_title(text: str, *, source_title: str | None = None) -> str | None:
             continue
         if cleaned.endswith(":"):
             continue
+        cleaned = cleaned.strip(" .,!?:;")
         if len(cleaned.split()) > 12:
             trimmed = re.split(r"[,.!?]| — | - ", cleaned, maxsplit=1)[0].strip()
             if len(trimmed.split()) > 10:
@@ -653,9 +661,13 @@ def parse_post_occurrences(
             title_normalized=title_norm,
             date_iso=date_iso,
             time_text=time_text,
+            # Rich semantic facts must stay Gemma-owned on the canonical path.
+            duration_text=None,
             city="Калининград" if "зеленоградск" not in block.lower() else "Зеленоградск",
             meeting_point=extract_meeting_point(block),
+            route_summary=None,
             audience_fit=audience_fit,
+            group_format=None,
             price_text=extract_price_text(block),
             booking_text=booking_text,
             booking_url=booking_url,
@@ -696,7 +708,13 @@ def parse_post_occurrences(
 
 
 def audience_line(audience_fit: Iterable[str]) -> str | None:
-    values = [collapse_ws(x) for x in audience_fit if collapse_ws(x)]
+    values = [
+        collapse_ws(x)
+        for x in audience_fit
+        if collapse_ws(x)
+        and collapse_ws(x).lower() not in {"не определено", "не указано", "нет"}
+        and len(collapse_ws(x)) > 1
+    ]
     if not values:
         return None
     return ", ".join(values[:3])

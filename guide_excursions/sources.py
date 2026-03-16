@@ -66,6 +66,18 @@ def canonical_guide_sources() -> tuple[GuideSourceSpec, ...]:
             flags={"collaboration_heavy": True},
         ),
         GuideSourceSpec(
+            username="art_from_the_Baltic",
+            profile_slug="art-from-the-baltic",
+            profile_kind="project",
+            display_name="Art from the Baltic",
+            marketing_name="Art from the Baltic",
+            source_kind="guide_project",
+            trust_level="medium",
+            priority_weight=1.0,
+            flags={"mixed_topic": True},
+            notes="Added from operator request on 2026-03-16; casebook expansion pending.",
+        ),
+        GuideSourceSpec(
             username="alev701",
             profile_slug="alev701",
             profile_kind="person",
@@ -83,7 +95,7 @@ def canonical_guide_sources() -> tuple[GuideSourceSpec, ...]:
             marketing_name="Двухметровый гид",
             source_kind="guide_project",
             trust_level="medium",
-            flags={"allow_out_of_region": True},
+            flags={"mixed_region": True},
         ),
         GuideSourceSpec(
             username="valeravezet",
@@ -150,4 +162,3 @@ def canonical_guide_sources() -> tuple[GuideSourceSpec, ...]:
         )
     out.sort(key=lambda item: item.username)
     return tuple(out)
-

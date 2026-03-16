@@ -31,6 +31,19 @@ def test_maybe_rollover_llm_iso_date_rolls_far_past_to_next_year() -> None:
     )
 
 
+def test_maybe_rollover_llm_iso_date_rewinds_future_year_drift_to_anchor_year() -> None:
+    # Weekly digest / recap near the source date: do not invent the next year.
+    anchor = date(2026, 3, 12)
+    assert (
+        vk_intake._maybe_rollover_llm_iso_date(
+            "2027-03-11",
+            anchor_date=anchor,
+            has_explicit_year_in_text=False,
+        )
+        == "2026-03-11"
+    )
+
+
 def test_recap_context_rejects_vague_future_teaser_title() -> None:
     text = (
         "Мы знаем, что вы любите Миядзаки!\n"
@@ -55,4 +68,3 @@ def test_non_recap_text_does_not_trigger_recap_guard() -> None:
         )
         is None
     )
-

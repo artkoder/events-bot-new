@@ -276,6 +276,15 @@ def _maybe_disable_catbox_for_e2e() -> None:
         logger.info("E2E: Catbox unreachable, forcing CATBOX_FORCE_ENABLED=0")
 
 
+def _apply_guide_e2e_defaults() -> None:
+    """Keep manual guide monitoring E2E fast and inspectable by default."""
+    os.environ.setdefault("GUIDE_SCAN_LIMIT_FULL", "25")
+    os.environ.setdefault("GUIDE_DAYS_BACK_FULL", "5")
+    os.environ.setdefault("GUIDE_SCAN_LIMIT_LIGHT", "10")
+    os.environ.setdefault("GUIDE_DAYS_BACK_LIGHT", "3")
+    os.environ.setdefault("GUIDE_EXCURSIONS_LOCAL_FALLBACK_ENABLED", "0")
+
+
 def _ensure_e2e_user_in_db(user_id: int, username: str | None) -> None:
     """Make sure E2E runner user is allowed to use the bot with a prod snapshot DB.
 
@@ -472,6 +481,7 @@ def before_all(context):
     os.environ.setdefault("DB_JOURNAL_MODE", "DELETE")
     _ensure_db_path_env()
     _ensure_isolated_e2e_db_copy()
+    _apply_guide_e2e_defaults()
     _maybe_disable_catbox_for_e2e()
 
     context.offline = _is_offline_mode()

@@ -1,0 +1,14 @@
+{
+  "id": "zigomaro/guide-excursions-monitor",
+  "title": "Guide Excursions Monitor",
+  "code_file": "guide_excursions_monitor.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "slug": "guide-excursions-monitor"
+}

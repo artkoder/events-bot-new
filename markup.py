@@ -37,6 +37,31 @@ _PHONE_RE = re.compile(
 def _unescape_md_url(url: str) -> str:
     return url.replace("\\)", ")").replace("\\\\", "\\")
 
+
+def unescape_public_text_escapes(text: str | None) -> str | None:
+    """Undo common escaped control sequences that should not reach public text."""
+    if text is None:
+        return None
+    cleaned = str(text)
+    if not cleaned:
+        return cleaned
+    if any(token in cleaned for token in ("\\\\r\\\\n", "\\\\n", "\\\\r", "\\\\t")):
+        cleaned = cleaned.replace("\\\\r\\\\n", "\n")
+        cleaned = cleaned.replace("\\\\n", "\n")
+        cleaned = cleaned.replace("\\\\r", "\n")
+        cleaned = cleaned.replace("\\\\t", " ")
+    if any(token in cleaned for token in ("\\r\\n", "\\n", "\\r", "\\t")):
+        cleaned = cleaned.replace("\\r\\n", "\n")
+        cleaned = cleaned.replace("\\n", "\n")
+        cleaned = cleaned.replace("\\r", "\n")
+        cleaned = cleaned.replace("\\t", " ")
+    if "\\\"" in cleaned or "\\\\\"" in cleaned:
+        cleaned = cleaned.replace("\\\\\"", "\"").replace("\\\"", "\"")
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
 def simple_md_to_html(text: str) -> str:
     """Конвертирует небольшой подмножество markdown → HTML для Telegraph."""
     text = html.escape(text)

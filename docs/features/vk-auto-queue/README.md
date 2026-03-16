@@ -246,4 +246,5 @@ ENV:
 - `vk_auto_queue.py` — автоимпорт очереди (manual + scheduled).
 - `vk_review.py` — очередь/локи + `mark_imported_events` (мульти-события).
 - `vk_intake.py` — LLM извлечение EventDraft + интеграция с Smart Update.
+- Важно для prod/infrastructure: VK auto-import идёт через обычный bot-side `GoogleAIClient` и должен резервировать только generic bot key (`GOOGLE_API_KEY`), если оператор явно не настраивал иной scoped consumer; guide-only `GOOGLE_API_KEY2` не является штатным ключом для этого pipeline.
 - `smart_event_update.py` — матчинг/мердж/лог фактов.

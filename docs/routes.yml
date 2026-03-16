@@ -27,6 +27,7 @@ sections:
     topics: docs/llm/topics.md
   reference:
     locations: docs/reference/locations.md
+    guide_place_aliases: docs/reference/guide-place-aliases.md
     location_flags: docs/reference/location-flags.md
     holidays: docs/reference/holidays.md
     recurring_events: docs/reference/recurring-events.md
@@ -62,9 +63,11 @@ sections:
       - docs/backlog/linear/EVE-55-gemma-integration.md
   reports:
     index: docs/reports/README.md
+    guide_excursions_fact_first_audit_2026_03_15: docs/reports/guide-excursions-fact-first-audit-2026-03-15.md
   tools:
     index: docs/tools/README.md
     codex_cli: docs/tools/codex-cli.md
+    claude_code: docs/tools/claude-code.md
 
 features:
   digests:
@@ -214,14 +217,18 @@ features:
       - scheduling.py
       - main_part2.py
   guide_excursions_monitoring:
-    status: implemented
+    status: in_progress
     docs: docs/features/guide-excursions-monitoring/README.md
     entrypoints:
       - guide_excursions/commands.py
       - guide_excursions/service.py
+      - guide_excursions/kaggle_service.py
+      - guide_excursions/dedup.py
+      - guide_excursions/editorial.py
       - guide_excursions/parser.py
       - guide_excursions/scanner.py
       - guide_excursions/seed.py
+      - kaggle/GuideExcursionsMonitor/guide_excursions_monitor.py
       - db.py
       - general_stats.py
       - scheduling.py

@@ -1,0 +1,16 @@
+{
+  "model": "opus",
+  "availableModels": [
+    "opus"
+  ],
+  "effortLevel": "high",
+  "alwaysThinkingEnabled": true,
+  "permissions": {
+    "deny": [
+      "Agent(Explore)",
+      "Agent(general-purpose)",
+      "Agent(Plan)",
+      "Agent(statusline-setup)"
+    ]
+  }
+}

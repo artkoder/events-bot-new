@@ -2789,13 +2789,53 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": "/guide_events [page]",
+        "desc": "List future guide occurrences with inline delete/facts/log actions",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_templates [page]",
+        "desc": "List guide excursion templates and allow deleting stale templates",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_template <template_id>",
+        "desc": "Show accumulated facts and linked occurrences for one guide template",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/guide_recent",
         "desc": "Preview current new-occurrences guide digest",
         "roles": {"superadmin"},
     },
     {
+        "usage": "/guide_recent_changes [hours]",
+        "desc": "Show guide occurrences created vs updated in the recent window (default 24h)",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_runs [hours]",
+        "desc": "Show recent guide monitoring runs and ops_run ids",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_report [ops_run_id]",
+        "desc": "Show detailed guide monitoring report by ops_run id",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/guide_digest",
         "desc": "Publish current guide digest to the test channel",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_facts <occurrence_id>",
+        "desc": "Show the materialized fact pack and claims for one guide occurrence",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/guide_log <occurrence_id>",
+        "desc": "Show source-post and claim provenance log for one guide occurrence",
         "roles": {"superadmin"},
     },
     {
@@ -5539,7 +5579,12 @@ def is_long_event_type(event_type: str | None) -> bool:
     return event_type.strip().casefold() in _LONG_EVENT_TYPES
 
 
-def canonicalize_date(value: str | None) -> str | None:
+def canonicalize_date(
+    value: str | None,
+    *,
+    anchor_date: date | None = None,
+    recent_past_days: int = 92,
+) -> str | None:
     """Return ISO date string if value parses as date or ``None``."""
     if not value:
         return None
@@ -5549,7 +5594,12 @@ def canonicalize_date(value: str | None) -> str | None:
     try:
         return date.fromisoformat(value).isoformat()
     except ValueError:
-        parsed = parse_events_date(value, timezone.utc)
+        parsed = parse_events_date(
+            value,
+            timezone.utc,
+            anchor_date=anchor_date,
+            recent_past_days=recent_past_days,
+        )
         return parsed.isoformat() if parsed else None
 
 
@@ -7421,7 +7471,13 @@ def parse_bool_text(value: str) -> bool | None:
     return None
 
 
-def parse_events_date(text: str, tz: timezone) -> date | None:
+def parse_events_date(
+    text: str,
+    tz: timezone,
+    *,
+    anchor_date: date | None = None,
+    recent_past_days: int = 0,
+) -> date | None:
     """Parse a date argument for /events allowing '2 августа [2025]'."""
     text = text.strip().lower()
     for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
@@ -7441,15 +7497,18 @@ def parse_events_date(text: str, tz: timezone) -> date | None:
         return None
     if year_part:
         year = int(year_part)
-    else:
-        today = datetime.now(tz).date()
-        year = today.year
-        if month < today.month or (month == today.month and day < today.day):
-            year += 1
-    try:
-        return date(year, month, day)
-    except ValueError:
-        return None
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    from source_parsing.date_utils import resolve_implicit_year_date
+
+    return resolve_implicit_year_date(
+        day,
+        month,
+        anchor_date=anchor_date or datetime.now(tz).date(),
+        recent_past_days=recent_past_days,
+    )
 
 
 async def build_ics_content(db: Database, event: Event) -> str:

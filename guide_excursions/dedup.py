@@ -10,6 +10,7 @@ from functools import lru_cache
 from itertools import combinations
 from typing import Any, Mapping, Sequence
 
+from .llm_support import GuideSecretsProviderAdapter, guide_account_name, resolve_candidate_key_ids
 from .parser import collapse_ws
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,12 @@ GUIDE_EXCURSIONS_GOOGLE_KEY_ENV = (
 GUIDE_EXCURSIONS_GOOGLE_FALLBACK_KEY_ENV = (
     os.getenv("GUIDE_EXCURSIONS_GOOGLE_FALLBACK_KEY_ENV") or "GOOGLE_API_KEY"
 ).strip() or "GOOGLE_API_KEY"
+GUIDE_EXCURSIONS_GOOGLE_ACCOUNT_ENV = (
+    os.getenv("GUIDE_EXCURSIONS_GOOGLE_ACCOUNT_ENV") or "GOOGLE_API_LOCALNAME2"
+).strip() or "GOOGLE_API_LOCALNAME2"
+GUIDE_EXCURSIONS_GOOGLE_ACCOUNT_FALLBACK_ENV = (
+    os.getenv("GUIDE_EXCURSIONS_GOOGLE_ACCOUNT_FALLBACK_ENV") or "GOOGLE_API_LOCALNAME"
+).strip() or "GOOGLE_API_LOCALNAME"
 
 _PAIR_DECISION_CACHE: dict[str, dict[str, Any]] = {}
 _STOPWORDS = {
@@ -58,20 +65,6 @@ class DedupResult:
     covered_occurrence_ids: list[int]
     suppressed_occurrence_ids: list[int]
     pair_decisions: list[dict[str, Any]]
-
-
-class _GuideSecretsProviderAdapter:
-    def __init__(self, base: Any):
-        self.base = base
-
-    def get_secret(self, name: str) -> str | None:
-        if name == "GOOGLE_API_KEY":
-            return (
-                self.base.get_secret(GUIDE_EXCURSIONS_GOOGLE_KEY_ENV)
-                or self.base.get_secret(GUIDE_EXCURSIONS_GOOGLE_FALLBACK_KEY_ENV)
-            )
-        return self.base.get_secret(name)
-
 
 def _normalize_text(value: object | None) -> str:
     return collapse_ws("" if value is None else str(value)).lower().replace("ё", "е")
@@ -374,13 +367,20 @@ def _pair_cache_key(left: Mapping[str, Any], right: Mapping[str, Any]) -> str:
     return f"{ids[0]}:{ids[1]}"
 
 
+def _guide_account_name() -> str | None:
+    return guide_account_name(
+        primary_account_env=GUIDE_EXCURSIONS_GOOGLE_ACCOUNT_ENV,
+        fallback_account_env=GUIDE_EXCURSIONS_GOOGLE_ACCOUNT_FALLBACK_ENV,
+    )
+
+
 @lru_cache(maxsize=1)
 def _get_dedup_client():
     try:
         from google_ai import GoogleAIClient, SecretsProvider
     except Exception as exc:  # pragma: no cover - optional dependency
         logger.warning("guide_dedup: google_ai client unavailable: %s", exc)
-        return None
+        return None, None
     supabase = None
     incident_notifier = None
     try:
@@ -390,12 +390,25 @@ def _get_dedup_client():
         incident_notifier = notify_llm_incident
     except Exception:
         pass
-    return GoogleAIClient(
+    client = GoogleAIClient(
         supabase_client=supabase,
-        secrets_provider=_GuideSecretsProviderAdapter(SecretsProvider()),
+        secrets_provider=GuideSecretsProviderAdapter(
+            SecretsProvider(),
+            primary_key_env=GUIDE_EXCURSIONS_GOOGLE_KEY_ENV,
+            fallback_key_env=GUIDE_EXCURSIONS_GOOGLE_FALLBACK_KEY_ENV,
+        ),
         consumer="guide_excursions_dedup",
+        account_name=_guide_account_name(),
+        default_env_var_name=GUIDE_EXCURSIONS_GOOGLE_KEY_ENV,
         incident_notifier=incident_notifier,
     )
+    candidate_key_ids = resolve_candidate_key_ids(
+        supabase=supabase,
+        primary_key_env=GUIDE_EXCURSIONS_GOOGLE_KEY_ENV,
+        fallback_key_env=GUIDE_EXCURSIONS_GOOGLE_FALLBACK_KEY_ENV,
+        consumer="guide_excursions_dedup",
+    )
+    return client, candidate_key_ids
 
 
 def _strip_code_fences(text: str) -> str:
@@ -430,7 +443,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 async def _ask_pair_judge_llm(left: Mapping[str, Any], right: Mapping[str, Any], features: Mapping[str, Any]) -> dict[str, Any] | None:
-    client = _get_dedup_client()
+    client, candidate_key_ids = _get_dedup_client()
     if client is None:
         return None
     schema = {
@@ -504,6 +517,7 @@ async def _ask_pair_judge_llm(left: Mapping[str, Any], right: Mapping[str, Any],
             prompt=prompt,
             generation_config={"temperature": 0},
             max_output_tokens=420,
+            candidate_key_ids=list(candidate_key_ids) if candidate_key_ids else None,
         )
     except Exception as exc:
         logger.warning("guide_dedup: llm pair judge failed left=%s right=%s err=%s", left.get("id"), right.get("id"), exc)

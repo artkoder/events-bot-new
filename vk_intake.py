@@ -23,6 +23,7 @@ from poster_media import (
     process_media,
 )
 import poster_ocr
+from source_parsing.date_utils import normalize_implicit_iso_date_to_anchor
 
 from sections import MONTHS_RU
 from runtime import require_main_attr
@@ -2707,30 +2708,12 @@ def _maybe_rollover_llm_iso_date(
         return raw_date
     if has_explicit_year_in_text:
         return raw_date
-    try:
-        d = date.fromisoformat(rd)
-    except Exception:
-        return raw_date
-    if d >= anchor_date:
-        return raw_date
-    if (anchor_date - d) <= RECENT_PAST_THRESHOLD:
-        return raw_date
-
-    candidate = d
-    for _ in range(5):
-        if candidate >= anchor_date:
-            break
-        new_year = candidate.year + 1
-        new_d = _safe_construct_date(new_year, candidate.month, candidate.day)
-        if not new_d:
-            try:
-                new_d = date(new_year, 3, 1)
-            except ValueError:
-                break
-        candidate = new_d
-    if candidate >= anchor_date:
-        return candidate.isoformat()
-    return raw_date
+    normalized = normalize_implicit_iso_date_to_anchor(
+        rd,
+        anchor_date=anchor_date,
+        recent_past_days=int(RECENT_PAST_THRESHOLD.days),
+    )
+    return normalized or raw_date
 
 
 def _parse_iso_date_maybe(value: str | None) -> date | None:

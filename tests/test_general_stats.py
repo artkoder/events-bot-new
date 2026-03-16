@@ -42,6 +42,11 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
             "INSERT INTO guide_source(id, username, platform, enabled, primary_profile_id, source_kind, trust_level) "
             "VALUES(2001, 'guide_test', 'telegram', 1, 2001, 'guide_personal', 'high')"
         )
+        await conn.execute(
+            "INSERT INTO guide_template(id, profile_id, canonical_title, title_normalized, last_seen_at) "
+            "VALUES(2101, 2001, 'Типовая прогулка', 'типовая прогулка', ?)",
+            (in_window_2,),
+        )
 
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, has_date, status, created_at) "
@@ -103,9 +108,15 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
         )
         await conn.execute(
             "INSERT INTO guide_occurrence(id, primary_source_id, primary_message_id, source_fingerprint, canonical_title, title_normalized, "
-            "digest_eligible, date, summary_one_liner, first_seen_at, updated_at, last_seen_post_at) "
-            "VALUES(3001, 2001, 501, 'fp-guide-1', 'Экскурсия по району', 'по району', 1, '2026-02-20', 'Описание', ?, ?, ?)",
+            "digest_eligible, template_id, date, summary_one_liner, first_seen_at, updated_at, last_seen_post_at) "
+            "VALUES(3001, 2001, 501, 'fp-guide-1', 'Экскурсия по району', 'по району', 1, 2101, '2026-02-20', 'Описание', ?, ?, ?)",
             (in_window_1, in_window_1, in_window_1),
+        )
+        await conn.execute(
+            "INSERT INTO guide_occurrence(id, primary_source_id, primary_message_id, source_fingerprint, canonical_title, title_normalized, "
+            "digest_eligible, template_id, date, summary_one_liner, first_seen_at, updated_at, last_seen_post_at) "
+            "VALUES(3002, 2001, 501, 'fp-guide-2', 'Обновлённая экскурсия', 'обновлённая экскурсия', 1, 2101, '2026-02-21', 'Описание 2', ?, ?, ?)",
+            (out_before, in_window_2, in_window_2),
         )
         await conn.execute(
             "INSERT INTO guide_digest_issue(id, family, status, published_at, target_chat) "
@@ -275,6 +286,9 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     assert metrics["guide_excursions"]["sources_scanned"] == 1
     assert metrics["guide_excursions"]["posts_prefiltered"] == 1
     assert metrics["guide_excursions"]["occurrences_new"] == 1
+    assert metrics["guide_excursions"]["occurrences_updated"] == 1
+    assert metrics["guide_excursions"]["occurrences_future_now"] == 2
+    assert metrics["guide_excursions"]["templates_total"] == 1
     assert metrics["guide_excursions"]["digest_published"] == 1
     assert len(metrics["guide_excursions"]["guide_monitoring_runs"]) == 1
 
@@ -298,6 +312,8 @@ async def test_collect_general_stats_aggregates_metrics(tmp_path):
     text = format_general_stats_message(snapshot)
     assert "Guide excursions:" in text
     assert "- posts_prefiltered: 1" in text
+    assert "- occurrences_updated: 1" in text
+    assert "- templates_total: 1" in text
 
 
 @pytest.mark.asyncio

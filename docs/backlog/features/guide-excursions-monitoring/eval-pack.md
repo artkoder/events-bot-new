@@ -425,6 +425,22 @@ Eval pack нужен на трёх стадиях:
 - Must not:
   - invent exact time for routes where it is not given;
   - collapse detail-pending routes into fully specified occurrences.
+  - lose later schedule blocks (`16 апреля`, `26 апреля`) just because the first blocks already produced valid occurrences.
+
+### `GE-S18` Mixed-region generic travel calendar must not become excursion occurrence
+
+- Source: `https://t.me/twometerguide/2761`
+- Expected screen:
+  - `decision=ignore` or `decision=template_only`
+  - `post_kind=mixed_or_non_target`
+- Expected extraction:
+  - `occurrence_count=0`
+- Rationale:
+  - post is a bloom/travel calendar across `Калмыкия / Поволжье / Крым`, not a concrete regional excursion announcement;
+  - high-engagement guide-project source does not override region fit or public-announcement requirements.
+- Must not:
+  - publish this post into guide digest;
+  - materialize out-of-region generic travel content as `GuideOccurrence`.
 
 ### 4.2. Digest rendering reference set
 

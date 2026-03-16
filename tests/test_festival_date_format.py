@@ -6,6 +6,8 @@ from datetime import date, datetime
 from source_parsing.date_utils import (
     format_date_for_display,
     format_date_range_for_display,
+    normalize_implicit_iso_date_to_anchor,
+    resolve_implicit_year_date,
 )
 
 
@@ -99,3 +101,34 @@ class TestFormatDateRangeForDisplay:
         """Range crossing years includes years."""
         result = format_date_range_for_display("2024-12-28", "2025-01-05", 2025)
         assert result == "28 декабря 2024 - 5 января"
+
+
+class TestImplicitYearResolution:
+    def test_resolve_implicit_year_date_keeps_recent_past_window(self):
+        anchor = date(2026, 3, 12)
+        result = resolve_implicit_year_date(
+            11,
+            3,
+            anchor_date=anchor,
+            recent_past_days=92,
+        )
+        assert result == date(2026, 3, 11)
+
+    def test_resolve_implicit_year_date_rolls_far_past_to_next_year(self):
+        anchor = date(2026, 12, 15)
+        result = resolve_implicit_year_date(
+            1,
+            1,
+            anchor_date=anchor,
+            recent_past_days=92,
+        )
+        assert result == date(2027, 1, 1)
+
+    def test_normalize_implicit_iso_date_to_anchor_rewinds_future_year_drift(self):
+        anchor = date(2026, 3, 10)
+        result = normalize_implicit_iso_date_to_anchor(
+            "2027-03-09",
+            anchor_date=anchor,
+            recent_past_days=92,
+        )
+        assert result == "2026-03-09"

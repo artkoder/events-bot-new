@@ -1,4 +1,4 @@
-"""Date formatting utilities for festival and event pages.
+"""Date formatting and implicit-year resolution utilities.
 
 Provides unified date formatting following project standards:
 - "DD месяц" when year matches current year
@@ -13,6 +13,66 @@ MONTHS_GENITIVE = [
     "января", "февраля", "марта", "апреля", "мая", "июня",
     "июля", "августа", "сентября", "октября", "ноября", "декабря"
 ]
+
+
+def _safe_date(year: int, month: int, day: int) -> Optional[date]:
+    try:
+        return date(year, month, day)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_implicit_year_date(
+    day: int,
+    month: int,
+    *,
+    anchor_date: date,
+    recent_past_days: int = 0,
+) -> Optional[date]:
+    """Resolve a day+month mention relative to the source/post anchor date."""
+    try:
+        recent_past_days = max(int(recent_past_days or 0), 0)
+    except (TypeError, ValueError):
+        recent_past_days = 0
+
+    candidate = _safe_date(int(anchor_date.year), int(month), int(day))
+    if candidate is None:
+        return None
+    if candidate >= anchor_date:
+        return candidate
+    if (anchor_date - candidate).days <= recent_past_days:
+        return candidate
+    return _safe_date(int(anchor_date.year) + 1, int(month), int(day)) or candidate
+
+
+def normalize_implicit_iso_date_to_anchor(
+    iso_date: str | date | datetime | None,
+    *,
+    anchor_date: date,
+    recent_past_days: int = 0,
+) -> Optional[str]:
+    """Re-anchor an ISO date that came from a source without an explicit year."""
+    if iso_date is None:
+        return None
+    if isinstance(iso_date, datetime):
+        parsed = iso_date.date()
+    elif isinstance(iso_date, date):
+        parsed = iso_date
+    else:
+        raw = str(iso_date).split("..", 1)[0].strip()
+        if not raw:
+            return None
+        try:
+            parsed = date.fromisoformat(raw)
+        except (TypeError, ValueError):
+            return None
+    resolved = resolve_implicit_year_date(
+        parsed.day,
+        parsed.month,
+        anchor_date=anchor_date,
+        recent_past_days=recent_past_days,
+    )
+    return resolved.isoformat() if resolved else None
 
 
 def format_date_for_display(

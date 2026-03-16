@@ -874,6 +874,7 @@ class Database:
                     seats_text TEXT,
                     summary_one_liner TEXT,
                     digest_blurb TEXT,
+                    fact_pack_json JSON,
                     views INTEGER,
                     likes INTEGER,
                     published_new_digest_issue_id INTEGER,
@@ -896,6 +897,7 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_guide_occurrence_last_call ON guide_occurrence(is_last_call, published_last_call_digest_issue_id)"
             )
+            await _add_column(conn, "guide_occurrence", "fact_pack_json JSON")
 
             dbg("guide_occurrence_source")
             await conn.execute(
@@ -926,6 +928,10 @@ class Database:
                     fact_value TEXT,
                     confidence REAL,
                     source_post_id INTEGER,
+                    claim_role TEXT,
+                    provenance_json JSON,
+                    observed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(source_post_id) REFERENCES guide_monitor_post(id) ON DELETE SET NULL
                 )
@@ -934,6 +940,10 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_guide_fact_claim_entity ON guide_fact_claim(entity_kind, entity_id)"
             )
+            await _add_column(conn, "guide_fact_claim", "claim_role TEXT")
+            await _add_column(conn, "guide_fact_claim", "provenance_json JSON")
+            await _add_column(conn, "guide_fact_claim", "observed_at TIMESTAMP")
+            await _add_column(conn, "guide_fact_claim", "last_confirmed_at TIMESTAMP")
 
             dbg("guide_digest_issue")
             await conn.execute(

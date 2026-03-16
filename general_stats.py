@@ -577,6 +577,33 @@ async def collect_general_stats(
             """,
             (start_raw, end_raw),
         )
+        guide_occurrences_updated = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM guide_occurrence
+            WHERE datetime(updated_at) >= datetime(?) AND datetime(updated_at) < datetime(?)
+              AND datetime(first_seen_at) < datetime(?)
+            """,
+            (start_raw, end_raw, start_raw),
+        )
+        guide_occurrences_future_now = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM guide_occurrence
+            WHERE date IS NOT NULL
+              AND date >= ?
+            """,
+            (window.end_local.date().isoformat(),),
+        )
+        guide_templates_total = await _fetch_int(
+            conn,
+            """
+            SELECT COUNT(*) FROM guide_template
+            """,
+            (),
+        )
         guide_digest_published = await _fetch_int(
             conn,
             """
@@ -736,6 +763,9 @@ async def collect_general_stats(
         "sources_scanned": guide_sources_scanned,
         "posts_prefiltered": guide_posts_prefiltered,
         "occurrences_new": guide_occurrences_new,
+        "occurrences_updated": guide_occurrences_updated,
+        "occurrences_future_now": guide_occurrences_future_now,
+        "templates_total": guide_templates_total,
         "digest_published": guide_digest_published,
         "guide_monitoring_runs": guide_monitor_runs,
     }
@@ -883,6 +913,9 @@ def format_general_stats_message(snapshot: GeneralStatsSnapshot) -> str:
             f"- sources_scanned: {_parse_int(guide.get('sources_scanned'))}",
             f"- posts_prefiltered: {_parse_int(guide.get('posts_prefiltered'))}",
             f"- occurrences_new: {_parse_int(guide.get('occurrences_new'))}",
+            f"- occurrences_updated: {_parse_int(guide.get('occurrences_updated'))}",
+            f"- occurrences_future_now: {_parse_int(guide.get('occurrences_future_now'))}",
+            f"- templates_total: {_parse_int(guide.get('templates_total'))}",
             f"- digest_published: {_parse_int(guide.get('digest_published'))}",
             "- guide_monitoring runs:",
         ]

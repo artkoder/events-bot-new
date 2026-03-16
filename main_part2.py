@@ -12,7 +12,7 @@ from aiogram import Bot, types
 
 from aiohttp import web
 from telegraph import Telegraph
-from markup import md_to_html, telegraph_br, linkify_for_telegraph
+from markup import md_to_html, telegraph_br, linkify_for_telegraph, unescape_public_text_escapes
 
 from models import Event, EventSource, EventSourceFact, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, MonthExhibitionsPage, VkMissRecord, VkMissReviewSession, User, TelegramSource
 from source_parsing.telegram.commands import tg_monitor_router
@@ -16740,6 +16740,7 @@ async def build_source_page_content(
 
     if html_text:
         html_text = strip_title(html_text)
+        html_text = unescape_public_text_escapes(html_text) or html_text
         html_text = html_text.replace("\r\n", "\n")
         html_text = sanitize_telegram_html(html_text)
         # Replace internal <hr> tags with visual spacers to prevent apply_month_nav
@@ -16751,6 +16752,7 @@ async def build_source_page_content(
         paragraphs = _editor_html_blocks(html_text)
     else:
         clean_text = strip_title(text)
+        clean_text = unescape_public_text_escapes(clean_text) or clean_text
         tg_emoji_cleaned = len(emoji_pat.findall(clean_text))
         tg_spoiler_unwrapped = len(spoiler_pat.findall(clean_text))
         # Custom Telegram emoji (<tg-emoji>) is not portable to Telegraph; strip it fully.
@@ -16758,12 +16760,6 @@ async def build_source_page_content(
         clean_text = spoiler_pat.sub(r"\1", clean_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
             clean_text = clean_text.replace(k, v)
-
-        # Some LLM outputs (or JSON-ish source snippets) may contain backslash-escaped
-        # quotes like `\"Сигнал\"`, which look broken on Telegraph. This is a
-        # display-only cleanup (does not change meaning).
-        if "\\\"" in clean_text:
-            clean_text = clean_text.replace("\\\\\"", "\"").replace("\\\"", "\"")
 
         # Event Telegraph pages use Smart Update outputs. As a final safety-net, strip
         # low-signal noise that sometimes leaks from Telegram multi-event posts.

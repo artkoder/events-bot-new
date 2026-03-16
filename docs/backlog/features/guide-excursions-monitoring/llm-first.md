@@ -149,10 +149,11 @@ Ranking в MVP остаётся deterministic + metrics-driven.
 Каноника:
 
 - и в Kaggle, и на сервере использовать existing LLM Gateway;
-- Kaggle side для guide-monitoring использует `GoogleAIClient` и `GOOGLE_API_KEY2`;
+- Kaggle side для guide-monitoring использует `GoogleAIClient`, `GOOGLE_API_KEY2` и отдельный guide account label `GOOGLE_API_LOCALNAME2`;
 - server-side `Route Weaver` / `Lollipop Trails` используют более сильную модель, уже разрешённую политикой текущего Smart Update стека;
 - limiter остаётся Supabase-backed, как в `docs/features/llm-gateway/README.md`;
 - для guide-monitoring notebook primary secret = `GOOGLE_API_KEY2`;
+- для guide-monitoring notebook account/audit label = `GOOGLE_API_LOCALNAME2`;
 - labels запросов должны быть отдельными:
   - `guide_scout_screen`
   - `guide_scout_tier1_extract`
@@ -602,11 +603,12 @@ Return JSON only.
 
 ### Purpose
 
-Из materialized fact packs генерирует только короткие digest texts batch-режимом, а не по одному LLM call на карточку.
+Из materialized fact packs генерирует только короткий authorial copy batch-режимом, а не по одному LLM call на карточку.
 
-- `summary_one_liner`;
+- `title`;
 - `digest_blurb`;
-- `audience_line`.
+
+`audience_line` для live MVP остаётся deterministic-полем из already materialized facts и не должен зависеть от отдельного writer-call.
 
 ### Run condition
 
@@ -624,9 +626,8 @@ Return JSON only.
 [
   {
     "occurrence_id": 123,
-    "summary_one_liner": "string",
-    "digest_blurb": "string",
-    "audience_line": "string|null"
+    "title": "string",
+    "digest_blurb": "string"
   }
 ]
 ```
@@ -638,10 +639,12 @@ You write short public digest copy for several excursion occurrences from struct
 
 Rules:
 - grounded facts only;
-- one-liner must be one finished sentence;
+- write only title + digest_blurb;
+- title should stay close to the grounded route/exit name, not a creative rename;
 - do not duplicate date, time, price, meeting point, or booking link in the prose line if they already live in the card fields;
 - no hype, no cliches, no invented uniqueness claims;
-- audience line is optional and only when clearly grounded.
+- make the blurb readable and inviting, but without embellishment;
+- choose blurb length from fact richness (`1..3` sentences), not from raw-source verbosity;
 - do not rewrite the whole card layout; the deterministic shell already exists.
 
 Return JSON only.
@@ -649,10 +652,10 @@ Return JSON only.
 
 ### Deterministic validation
 
-- `summary_one_liner` must be one sentence;
-- no URLs in `summary_one_liner` or `digest_blurb`;
+- `title` must stay URL-free and username-free;
+- no URLs or usernames in `title` or `digest_blurb`;
 - no logistics duplication if the fact pack already has structured fields;
-- empty `audience_line` is better than speculative text.
+- empty/fallback deterministic shell is better than speculative line-level copy.
 
 ## 8. Deferred Prompt Families
 

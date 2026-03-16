@@ -19,6 +19,7 @@ from sqlalchemy import and_, delete, or_, select
 
 from db import Database
 from location_reference import normalise_event_location_from_reference
+from markup import unescape_public_text_escapes
 from models import Event, EventPoster, EventSource, EventSourceFact, PosterOcrCache
 from sections import MONTHS_RU
 
@@ -619,6 +620,7 @@ def _normalize_plaintext_paragraphs(text: str | None) -> str | None:
     raw = (text or "").strip()
     if not raw:
         return None
+    raw = unescape_public_text_escapes(raw) or raw
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     # Drop fenced code blocks (they are almost always accidental/noise for event pages).
     raw = re.sub(r"(?s)```.*?```", "", raw)
@@ -881,6 +883,7 @@ def _sanitize_description_output(
     raw = (text or "").strip()
     if not raw:
         return None
+    raw = unescape_public_text_escapes(raw) or raw
 
     internal_heading_re = re.compile(
         r"(?i)^\s*(?:#{1,6}\s*)?(?:"

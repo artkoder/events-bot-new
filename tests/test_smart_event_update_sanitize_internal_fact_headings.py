@@ -101,3 +101,14 @@ def test_sanitize_description_strips_bold_facts_prefix_inline() -> None:
     assert "Facts:" not in out
     assert "Мероприятие платное." in out
     assert "Хвост." in out
+
+
+def test_sanitize_description_unescapes_backslash_newlines() -> None:
+    from smart_event_update import _sanitize_description_output
+
+    text = "> «Цитата».\\n> — Автор\\n\\n### Раздел\\nТекст."
+    out = _sanitize_description_output(text, source_text="") or ""
+
+    assert "\\n" not in out
+    assert "> «Цитата».\n> — Автор" in out
+    assert "### Раздел\nТекст." in out

@@ -29,6 +29,7 @@
 - `gid_zelenogradsk`
 - `katimartihobby`
 - `amber_fringilla`
+- `art_from_the_Baltic`
 - `alev701`
 - `vkaliningrade`
 - `ruin_keepers`
@@ -75,6 +76,7 @@
 
 - `twometerguide`
 - `valeravezet`
+- `art_from_the_Baltic`
 
 Признаки:
 
@@ -82,6 +84,21 @@
 - смешение экскурсий с сопутствующим контентом;
 - часто более “медийная” подача;
 - выше риск false positives по travel/lifestyle текстам.
+
+#### `guide_project_pending_review`
+
+Отдельно фиксируем свежие добавления, которые уже должны участвовать в мониторинге, но ещё не прошли полный deep-scan разбор.
+
+Каналы:
+
+- `art_from_the_Baltic`
+
+Текущее рабочее допущение для seed/runtime:
+
+- включать в guide monitoring как `guide_project`;
+- держать `trust_level=medium`;
+- считать mixed-content source до первого полноценного case review;
+- после накопления live материалов уточнить, это больше авторский экскурсионный проект, art-walk бренд или смешанный культурный канал.
 
 #### `excursion_operator`
 
@@ -158,6 +175,7 @@
   - сильный источник для occurrence discovery;
   - route summaries и template signals часто лежат в prose, а не только в сухих расписаниях;
   - один маршрут может повторяться месяцами и в разных кооперациях.
+  - коллаборации с co-guides часто прячутся внутри длинного narrative post body; occurrence-level `guide_names` могут знать двух людей, но public digest ещё должен резолвить упомянутые `@username` в точные публичные ФИО, чтобы не деградировать `Анастасия Туз` в неполное `Анна Туз`.
 
 ### `gid_zelenogradsk`
 
@@ -197,6 +215,16 @@
   - много mixed posts: экоквесты, nature-notes, сопутствующие активности;
   - route-building и long-form narrative особенно полезны для template layer;
   - повторяющиеся маршруты часто кросспостятся с другими гидами.
+  - multi-announce posts вроде `@amber_fringilla/5806` требуют media diversification: если несколько published occurrences приходят из одного исходного поста, digest должен распределять разные `media_refs` по карточкам, а не повторять одну и ту же фотографию несколько раз подряд.
+
+### `art_from_the_Baltic`
+
+- Archetype: provisional `guide_project`
+- Status: added to canonical monitoring seed on 2026-03-16 by operator request; detailed deep-scan notes still pending.
+- Current operational assumption:
+  - канал нужно мониторить как потенциальный источник авторских art-walk / экскурсионных анонсов;
+  - до первого полноценного разбора не считать его высокодоверенным source of truth;
+  - внимательно проверять mixed cultural noise и не путать экскурсии с обычными art/event-posts.
 
 ### `alev701`
 
@@ -263,6 +291,7 @@
   - нельзя полагаться на default-region канала;
   - нужен жёсткий geographic filter на уровне occurrence;
   - высокий engagement не должен автоматически означать “сильный экскурсионный анонс” — часть постов вообще про еду, travel logistics или медийные новости.
+  - отдельный negative class: generic travel calendars (`когда цветут тюльпаны / куда поехать / travel wishlist`) должны отсеиваться целиком и не попадать даже в sparse/template occurrence layer.
 
 ### `valeravezet`
 
@@ -373,6 +402,53 @@
 - сохранять это в `GuideExcursionTemplate` как `availability_mode=on_request_private` или `mixed`;
 - при наличии конкретной публичной даты и открытого набора допускается occurrence, но с явной проверкой `digest_eligible`;
 - такие посты особенно важны для будущих guide/agency pages и каталога типовых экскурсий.
+
+### Case F: co-guide указан через `@username`, а не через полное ФИО
+
+Контрольный пример:
+
+- `@tanja_from_koenigsberg/3935`
+
+Сигнал:
+
+- occurrence extraction already materializes `guide_names=["Татьяна Удовенко","Анна Туз"]`;
+- в prose есть явный `@ann_tuz`, а публичный Telegram profile даёт более точное ФИО `Анастасия Туз`.
+
+Требование:
+
+- public digest не должен схлопываться до одного primary guide line, если occurrence явно несёт нескольких гидов;
+- pipeline должен использовать public username-resolution как support-layer поверх occurrence facts, чтобы уточнять полное ФИО co-guide без выдумки.
+
+### Case G: один source post -> несколько future occurrences -> один и тот же media кадр
+
+Контрольный пример:
+
+- `@amber_fringilla/5806`
+
+Сигнал:
+
+- один multi-announce post материализует сразу несколько отдельных occurrences;
+- naive media selection берёт `refs[0]` для каждой карточки и визуально размножает одно и то же фото.
+
+Требование:
+
+- digest media bundle должен распределять разные `media_refs` одного source post по разным карточкам;
+- если уникальных референсов не хватает, лучше недодать иллюстрацию части карточек, чем повторить одинаковый кадр 4 раза.
+
+### Case H: `прогулка` vs `экскурсия`
+
+Контрольный пример:
+
+- `@amber_fringilla/5806` с `Экопрогулка...`
+
+Сигнал:
+
+- source title и narrative задают walking/nature framing (`прогулка`), а downstream digest может начать называть тот же выход `экскурсией`.
+
+Требование:
+
+- public copy должен выбирать dominant term по source title/facts и удерживать его по всей карточке;
+- если signal неустойчивый, safer wording — нейтральный `маршрут` / `выход`, а не случайная подмена одного термина другим.
 
 ## 7. Какие admin-инструменты нужны без публичных страниц
 

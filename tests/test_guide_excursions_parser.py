@@ -55,6 +55,60 @@ def test_parse_multi_schedule_lines():
     assert occurrences[0].digest_eligibility_reason == "closed_without_booking"
 
 
+def test_parse_amber_fringilla_multi_excursion_post_materializes_multiple_occurrences():
+    text = (
+        "Экскурсии и путешествия на март-апрель.\n"
+        "22 марта, воскресенье, в 9:00 экопрогулка в Южный парк. Узнаем о птицах и вестниках весны.\n"
+        "Продолжительность: 1,5-2 часа.\n"
+        "Встречаемся у главного входа в Южный Парк.\n"
+        "Стоимость 500/300 руб взрослые/дети, пенсионеры.\n"
+        "Запись @Yulia_Grishanova.\n"
+        "\n"
+        "5 апреля, воскресенье, в 10:00 знакомство с историей растительного мира на острове Канта.\n"
+        "Продолжительность около 2 часов.\n"
+        "Стоимость 800 руб.\n"
+        "Запись @Yulia_Grishanova.\n"
+        "\n"
+        "10 апреля, пятница. Самбия: от 0 до 60 м.\n"
+        "Подробности позже.\n"
+        "Запись @Yulia_Grishanova.\n"
+        "\n"
+        "16 апреля, четверг. Весенняя буковая роща.\n"
+        "Пройдусь с вами от Ново-Московского до Ладушкина.\n"
+        "Стоимость 1000 руб + билеты.\n"
+        "Запись @Yulia_Grishanova.\n"
+        "\n"
+        "26 апреля, воскресенье. Весенняя Роминта.\n"
+        "Подробности будут позже.\n"
+        "Запись @Yulia_Grishanova.\n"
+    )
+    occurrences = parse_post_occurrences(
+        text=text,
+        post_date=datetime(2026, 3, 15, 9, 0, tzinfo=timezone.utc),
+        source_kind="guide_personal",
+        source_title="Путешествия по пРуссии",
+        channel_url="https://t.me/amber_fringilla/5806",
+        fallback_guide_name="Юлия Гришанова",
+    )
+    assert len(occurrences) == 5
+    assert [item.date_iso for item in occurrences] == [
+        "2026-03-22",
+        "2026-04-05",
+        "2026-04-10",
+        "2026-04-16",
+        "2026-04-26",
+    ]
+    assert occurrences[0].canonical_title == "Экопрогулка в Южный парк"
+    assert occurrences[0].duration_text is None
+    assert occurrences[0].meeting_point == "у главного входа в Южный Парк"
+    assert occurrences[0].booking_text == "@Yulia_Grishanova"
+    assert occurrences[3].canonical_title == "Весенняя буковая роща"
+    assert occurrences[3].route_summary is None
+    assert occurrences[3].group_format is None
+    assert occurrences[4].canonical_title == "Весенняя Роминта"
+    assert occurrences[4].time_text is None
+
+
 def test_reflection_post_is_not_digest_eligible():
     text = (
         "У меня на трипстере стоит единственная экскурсия «Куршская коса с профессиональным орнитологом».\n"

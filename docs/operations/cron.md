@@ -51,7 +51,8 @@ For admin-facing scheduled reports, the bot now resolves the target chat from th
   - events without `preview_3d_url` and with `photo_count >= 2`;
   - events whose 3D preview was invalidated because the illustration set changed (Smart Update clears `preview_3d_url` when `photo_urls` change).
 - **Telegram monitoring** – scheduled daily import from Telegram sources (channels/groups) via Kaggle when enabled.
-- **kaggle recovery** – resumes in-flight Kaggle jobs after restarts.
+- **Guide excursions monitoring** – scheduled guide-only Kaggle scans when `ENABLE_GUIDE_EXCURSIONS_SCHEDULED=1`.
+- **kaggle recovery** – resumes in-flight Kaggle jobs after restarts, including `tg_monitoring` and `guide_monitoring`.
 
 ## Health Checks
 

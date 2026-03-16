@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 IncidentNotifier = Callable[[str, dict[str, Any]], Any]
 
+_DEFAULT_ENV_CANDIDATE_CACHE: dict[tuple[str, tuple[str, ...]], tuple[str, ...] | None] = {}
+
 
 @dataclass
 class ReserveResult:
@@ -113,6 +115,7 @@ class GoogleAIClient:
     # direct REST call with explicit schema headers.
     RESERVE_DIRECT_RETRY_ENV = "GOOGLE_AI_RESERVE_DIRECT_RETRY"
     RESERVE_DIRECT_SCHEMA_ENV = "GOOGLE_AI_RESERVE_DIRECT_SCHEMA"
+    RESERVE_SCOPE_TO_DEFAULT_ENV_ENV = "GOOGLE_AI_RESERVE_SCOPE_TO_DEFAULT_ENV"
 
     # Process-local limiter (used when Supabase reserve RPC is missing/flaky).
     _local_limiter_lock = asyncio.Lock()
@@ -182,6 +185,7 @@ class GoogleAIClient:
         secrets_provider: Optional[Any] = None,
         consumer: str = "bot",
         account_name: Optional[str] = None,
+        default_env_var_name: Optional[str] = None,
         dry_run: bool = False,
         incident_notifier: Optional[IncidentNotifier] = None,
     ):
@@ -198,6 +202,7 @@ class GoogleAIClient:
         self.secrets_provider = secrets_provider
         self.consumer = consumer
         self.account_name = account_name or os.getenv("GOOGLE_API_LOCALNAME")
+        self.default_env_var_name = (default_env_var_name or "GOOGLE_API_KEY").strip() or "GOOGLE_API_KEY"
         self.dry_run = dry_run
         self.allow_reserve_fallback = (
             os.getenv(self.RESERVE_FALLBACK_ENV, "1").strip().lower()
@@ -228,6 +233,10 @@ class GoogleAIClient:
         self.retry_delays_ms = self._read_retry_delays()
         self.fallback_models = self._read_fallback_models()
         self._incident_last_sent: dict[str, float] = {}
+        self.scope_reserve_to_default_env = (
+            os.getenv(self.RESERVE_SCOPE_TO_DEFAULT_ENV_ENV, "1").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
 
         # Cache missing Supabase RPCs to avoid noisy per-request fallbacks when
         # the Supabase project hasn't been migrated yet (PGRST202).
@@ -266,6 +275,68 @@ class GoogleAIClient:
             except Exception:
                 continue
         return out or list(self.RETRY_DELAYS_MS)
+
+    @staticmethod
+    def _default_env_aliases(name: str | None) -> list[str]:
+        raw = (name or "").strip()
+        if not raw:
+            return []
+        names = [raw]
+        if raw == "GOOGLE_API_KEY2":
+            names.append("GOOGLE_API_KEY_2")
+        elif raw == "GOOGLE_API_KEY_2":
+            names.append("GOOGLE_API_KEY2")
+        return names
+
+    def _resolve_default_env_candidate_key_ids(
+        self,
+        *,
+        consumer: str,
+    ) -> list[str] | None:
+        if self.supabase is None or not self.scope_reserve_to_default_env:
+            return None
+        env_names = tuple(self._default_env_aliases(self.default_env_var_name))
+        if not env_names:
+            return None
+        cache_key = (consumer, env_names)
+        if cache_key in _DEFAULT_ENV_CANDIDATE_CACHE:
+            cached = _DEFAULT_ENV_CANDIDATE_CACHE[cache_key]
+            return list(cached) if cached else None
+        try:
+            result = (
+                self.supabase.table("google_ai_api_keys")
+                .select("id, env_var_name, priority")
+                .eq("is_active", True)
+                .in_("env_var_name", list(env_names))
+                .order("priority")
+                .order("id")
+                .execute()
+            )
+            rows = list(result.data or [])
+        except Exception as exc:
+            logger.warning(
+                "google_ai.default_env_candidates_failed consumer=%s env=%s err=%s",
+                consumer,
+                ",".join(env_names),
+                exc,
+            )
+            _DEFAULT_ENV_CANDIDATE_CACHE[cache_key] = None
+            return None
+        ids = tuple(
+            str(row.get("id"))
+            for row in rows
+            if row.get("id") and str(row.get("env_var_name") or "") in env_names
+        )
+        if not ids:
+            logger.warning(
+                "google_ai.default_env_candidates_missing consumer=%s env=%s",
+                consumer,
+                ",".join(env_names),
+            )
+            _DEFAULT_ENV_CANDIDATE_CACHE[cache_key] = None
+            return None
+        _DEFAULT_ENV_CANDIDATE_CACHE[cache_key] = ids
+        return list(ids)
 
     async def _call_supabase_rpc_with_retries(
         self,
@@ -702,7 +773,7 @@ class GoogleAIClient:
             logger.warning("No Supabase client, skipping rate limit reservation")
             return ReserveResult(
                 ok=True,
-                env_var_name="GOOGLE_API_KEY",
+                env_var_name=self.default_env_var_name,
             )
         was_cached_missing = self._reserve_rpc_missing
         if was_cached_missing:
@@ -722,7 +793,7 @@ class GoogleAIClient:
                     )
                 return ReserveResult(
                     ok=True,
-                    env_var_name="GOOGLE_API_KEY",
+                    env_var_name=self.default_env_var_name,
                     key_alias="reserve-fallback-no-rpc-cached",
                     blocked_reason="reserve_rpc_missing",
                 )
@@ -745,11 +816,17 @@ class GoogleAIClient:
                 )
             return ReserveResult(
                 ok=True,
-                env_var_name="GOOGLE_API_KEY",
+                env_var_name=self.default_env_var_name,
                 key_alias="reserve-fallback-no-rpc-cached",
                 blocked_reason="reserve_rpc_missing",
             )
         
+        scoped_candidate_key_ids = candidate_key_ids
+        if scoped_candidate_key_ids is None:
+            scoped_candidate_key_ids = self._resolve_default_env_candidate_key_ids(
+                consumer=ctx.consumer,
+            )
+
         payload = {
             "p_request_uid": ctx.request_uid,
             "p_attempt_no": attempt_no,
@@ -757,7 +834,7 @@ class GoogleAIClient:
             "p_account_name": ctx.account_name,
             "p_model": ctx.model,
             "p_reserved_tpm": ctx.reserved_tpm,
-            "p_candidate_key_ids": candidate_key_ids,
+            "p_candidate_key_ids": scoped_candidate_key_ids,
         }
 
         try:
@@ -845,7 +922,8 @@ class GoogleAIClient:
                     logger.error(
                         "Supabase RPC google_ai_reserve is missing in this Supabase project "
                         "(PGRST202). Rate limiting via Supabase is disabled; using direct env key "
-                        "GOOGLE_API_KEY instead. Set %s=0 to fail hard. error=%s",
+                        "%s instead. Set %s=0 to fail hard. error=%s",
+                        self.default_env_var_name,
                         self.RESERVE_FALLBACK_ENV,
                         msg,
                     )
@@ -874,7 +952,7 @@ class GoogleAIClient:
                     )
                 return ReserveResult(
                     ok=True,
-                    env_var_name="GOOGLE_API_KEY",
+                    env_var_name=self.default_env_var_name,
                     key_alias="reserve-fallback",
                     blocked_reason="reserve_rpc_missing",
                 )
@@ -1047,7 +1125,7 @@ class GoogleAIClient:
                 retry_after_ms = max(1000, int((midnight.timestamp() - now) * 1000))
                 return ReserveResult(
                     ok=False,
-                    env_var_name="GOOGLE_API_KEY",
+                    env_var_name=self.default_env_var_name,
                     key_alias=key_alias,
                     minute_bucket=datetime.fromtimestamp(minute_bucket, timezone.utc).isoformat(),
                     day_bucket=day_bucket,
@@ -1060,7 +1138,7 @@ class GoogleAIClient:
                 retry_after_ms = max(250, int((minute_bucket + 60 - now) * 1000))
                 return ReserveResult(
                     ok=False,
-                    env_var_name="GOOGLE_API_KEY",
+                    env_var_name=self.default_env_var_name,
                     key_alias=key_alias,
                     minute_bucket=datetime.fromtimestamp(minute_bucket, timezone.utc).isoformat(),
                     day_bucket=day_bucket,
@@ -1073,7 +1151,7 @@ class GoogleAIClient:
                 retry_after_ms = max(250, int((minute_bucket + 60 - now) * 1000))
                 return ReserveResult(
                     ok=False,
-                    env_var_name="GOOGLE_API_KEY",
+                    env_var_name=self.default_env_var_name,
                     key_alias=key_alias,
                     minute_bucket=datetime.fromtimestamp(minute_bucket, timezone.utc).isoformat(),
                     day_bucket=day_bucket,
@@ -1094,7 +1172,7 @@ class GoogleAIClient:
 
             reserve = ReserveResult(
                 ok=True,
-                env_var_name="GOOGLE_API_KEY",
+                env_var_name=self.default_env_var_name,
                 key_alias=key_alias,
                 minute_bucket=datetime.fromtimestamp(minute_bucket, timezone.utc).isoformat(),
                 day_bucket=day_bucket,
@@ -1369,7 +1447,7 @@ class GoogleAIClient:
     
     def _get_api_key(self, env_var_name: Optional[str]) -> Optional[str]:
         """Get API key from environment or secrets provider."""
-        name = env_var_name or "GOOGLE_API_KEY"
+        name = env_var_name or self.default_env_var_name or "GOOGLE_API_KEY"
         
         if self.secrets_provider:
             return self.secrets_provider.get_secret(name)

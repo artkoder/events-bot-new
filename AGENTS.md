@@ -20,6 +20,15 @@
   - `behave`/`pytest` E2E подхватывают `.env` автоматически (best-effort) и **не** перетирают уже заданные переменные окружения.
   - если запускаешь бота руками из терминала, `.env` не подгружается автоматически: используй `set -a; source .env; set +a` перед `python main.py`.
 
+## Session Boundaries (critical)
+
+- Telegram auth bundles are **role-scoped** and must not be repurposed without explicit user permission.
+- `TELEGRAM_AUTH_BUNDLE_S22` is reserved for **Kaggle / remote monitoring** runs.
+- `TELEGRAM_AUTH_BUNDLE_E2E` (or `TELEGRAM_SESSION`) is reserved for **local live E2E / Telethon human client** runs.
+- Never switch Kaggle guide monitoring from `TELEGRAM_AUTH_BUNDLE_S22` to `TELEGRAM_AUTH_BUNDLE_E2E` on your own, even as a temporary workaround.
+- Never run the same auth bundle concurrently in multiple places when one of them is Kaggle/remote, because Telegram can invalidate the auth key with `AuthKeyDuplicatedError`.
+- If the intended bundle is broken or missing, stop and report it clearly instead of borrowing another bundle.
+
 ## Правила раскладки
 
 - **Фича** → `docs/features/<feature>/README.md` + дочерние файлы в этой же папке.
@@ -45,6 +54,17 @@
 Детерминированные функции допустимы как поддержка (санитайзеры, нормализация, извлечение дат/времени, безопасные guardrail‑проверки), но они **не должны менять смысл** текста.
 
 Каноническая политика: `docs/llm/request-guide.md` (секция про LLM‑first).
+
+## Claude / Opus policy
+
+- Для Claude Code в этом репозитории используется только `Opus`.
+- Effort для Claude Code должен быть только `high`.
+- Для сложных консультаций, архитектурного разбора, deep-dive debugging и нетривиального redesign допускается временно повышать effort до `max`.
+- Проектный shared-config хранится в `.claude/settings.json`; проектные инструкции Claude — в `CLAUDE.md`.
+- Для консультаций, архитектурной критики, prompt review и нетривиальных доработок используй проектный subagent alias `Opus` из `.claude/agents/Opus.md`.
+- Если задача LLM-first упирается в качество extraction/writer output, используй `Opus` прежде всего как эксперта по prompt design: проси prompt-family audit, конкретные prompt diffs, schema tightening и stage split по `lollipop`-принципу небольших self-contained запросов, а не общий абстрактный architecture advice.
+- В shared-config запрещены встроенные Claude subagents, чтобы делегация не уходила в `Haiku`/`Sonnet`; для делегации оставляй только `Opus`.
+- Не переключай Claude на `Sonnet`/`Haiku`, если пользователь явно не попросил изменить эту политику.
 
 ## Артефакты и временные файлы
 

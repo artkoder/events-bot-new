@@ -1,82 +1,190 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 from typing import Any, Mapping, Sequence
 
-from .parser import PHONE_RE, URL_RE, USERNAME_RE, collapse_ws, has_public_invite_signal, looks_context_only, looks_operational_only
+from .parser import (
+    PHONE_RE,
+    URL_RE,
+    USERNAME_RE,
+    audience_line as build_audience_line,
+    collapse_ws,
+    has_public_invite_signal,
+    looks_context_only,
+    looks_operational_only,
+)
 
 logger = logging.getLogger(__name__)
 
 GUIDE_EDITORIAL_ENABLED = (
     (os.getenv("GUIDE_EDITORIAL_ENABLED") or "1").strip().lower() in {"1", "true", "yes", "on"}
 )
-GUIDE_EDITORIAL_LLM_ENABLED = (
-    (os.getenv("GUIDE_EDITORIAL_LLM_ENABLED") or "1").strip().lower() in {"1", "true", "yes", "on"}
-)
-GUIDE_EDITORIAL_MODEL = (os.getenv("GUIDE_EDITORIAL_MODEL") or "gemma-3-27b").strip() or "gemma-3-27b"
-GUIDE_EDITORIAL_GOOGLE_KEY_ENV = (
-    os.getenv("GUIDE_EDITORIAL_GOOGLE_KEY_ENV") or "GOOGLE_API_KEY2"
-).strip() or "GOOGLE_API_KEY2"
-GUIDE_EDITORIAL_GOOGLE_FALLBACK_KEY_ENV = (
-    os.getenv("GUIDE_EDITORIAL_GOOGLE_FALLBACK_KEY_ENV") or "GOOGLE_API_KEY"
-).strip() or "GOOGLE_API_KEY"
-
-
-class _GuideSecretsProviderAdapter:
-    def __init__(self, base: Any):
-        self.base = base
-
-    def get_secret(self, name: str) -> str | None:
-        if name == "GOOGLE_API_KEY":
-            return (
-                self.base.get_secret(GUIDE_EDITORIAL_GOOGLE_KEY_ENV)
-                or self.base.get_secret(GUIDE_EDITORIAL_GOOGLE_FALLBACK_KEY_ENV)
-            )
-        return self.base.get_secret(name)
-
-
-def _strip_code_fences(text: str) -> str:
-    cleaned = (text or "").strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", cleaned)
-        cleaned = cleaned.replace("```", "")
-    return cleaned.strip()
-
-
-def _extract_json(text: str) -> dict[str, Any] | None:
-    cleaned = _strip_code_fences(text)
-    if not cleaned:
-        return None
-    try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        data = json.loads(cleaned[start : end + 1])
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        return None
-    return None
 
 
 def _normalize_phone(raw: str) -> tuple[str, str] | None:
     value = collapse_ws(raw)
     if not value:
         return None
-    digits = re.sub(r"[^\d+]", "", value)
+    digits = re.sub(r"[^\d]", "", value)
     if not digits:
         return None
-    return value, f"tel:{digits}"
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    display = value
+    if len(digits) == 11 and digits.startswith("7"):
+        display = f"+7 {digits[1:4]} {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    elif len(digits) == 10:
+        display = f"+7 {digits[0:3]} {digits[3:6]}-{digits[6:8]}-{digits[8:10]}"
+        digits = "7" + digits
+    elif digits.startswith("7"):
+        display = f"+{digits}"
+    return display, f"tel:+{digits}" if not str(digits).startswith("+") else f"tel:{digits}"
+
+
+def _phone_digits(raw: str | None) -> str:
+    return re.sub(r"[^\d]", "", collapse_ws(raw))
+
+
+def _is_mobile_phone(raw: str | None) -> bool:
+    digits = _phone_digits(raw)
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    return len(digits) == 11 and digits.startswith("79")
+
+
+def _normalize_line_text(value: Any, *, prefixes: Sequence[str] = ()) -> str | None:
+    text = collapse_ws(value)
+    if not text:
+        return None
+    for prefix in prefixes:
+        normalized_prefix = collapse_ws(prefix)
+        if not normalized_prefix:
+            continue
+        low = text.lower()
+        prefix_low = normalized_prefix.lower()
+        if low.startswith(prefix_low):
+            text = text[len(normalized_prefix) :].lstrip(" :.-")
+            text = collapse_ws(text)
+            break
+    return text or None
+
+
+def _string_list(value: Any, *, limit: int = 8) -> list[str]:
+    out: list[str] = []
+    if isinstance(value, str):
+        raw = collapse_ws(value)
+        items = re.split(r"\s*[;,]\s*", raw) if raw else []
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        return out
+    for item in items:
+        text = collapse_ws(item)
+        if not text or text in out:
+            continue
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _normalize_booking_label(label: str | None, url: str | None) -> str | None:
+    text = collapse_ws(label)
+    href = collapse_ws(url)
+    if href:
+        tg_match = re.search(r"(?:https?://)?t\.me/([A-Za-z0-9_]{4,64})", href, re.I)
+        if tg_match:
+            return f"@{tg_match.group(1)}"
+        if href.startswith("tel:"):
+            normalized = _normalize_phone(text or "")
+            if normalized:
+                return normalized[0]
+            digits = href.removeprefix("tel:").strip()
+            if digits:
+                return digits
+    if not text:
+        return None
+    if href and text.lower() in {"запись", "подробности", "подробнее", "звоните", "пишите"}:
+        if href.startswith("tel:"):
+            normalized = _normalize_phone(text)
+            return normalized[0] if normalized else None
+        return "Сайт / запись"
+    return text
+
+
+def _is_generic_booking_text(value: str | None) -> bool:
+    text = collapse_ws(value).lower()
+    if not text:
+        return True
+    return text in {
+        "запись",
+        "подробности",
+        "подробнее",
+        "звоните",
+        "пишите",
+        "ссылка",
+        "ссылка для записи",
+    }
+
+
+def _group_format_seed(row: Mapping[str, Any]) -> str | None:
+    direct = collapse_ws(str(row.get("group_format") or ""))
+    if direct:
+        return direct
+    audience_values = _string_list(row.get("audience_fit"), limit=8)
+    low_values = [value.lower() for value in audience_values]
+    if any("школь" in value for value in low_values):
+        return "для школьной группы"
+    if any("для группы" in value or "групп" in value for value in low_values):
+        return "для группы"
+    return None
+
+
+def _fact_pack_value(row: Mapping[str, Any], key: str) -> Any:
+    fact_pack = row.get("fact_pack")
+    if isinstance(fact_pack, Mapping):
+        return fact_pack.get(key)
+    return None
+
+
+def _profile_fact_value(row: Mapping[str, Any], key: str) -> Any:
+    profile_facts = row.get("guide_profile_facts")
+    if isinstance(profile_facts, Mapping):
+        return profile_facts.get(key)
+    return None
+
+
+def _looks_raw_price_copy(value: Any) -> bool:
+    text = collapse_ws(value)
+    if not text:
+        return False
+    if re.search(r"\d+\s*/\s*\d+", text):
+        return True
+    return any(token in text for token in (",пенсион", ", дети", "/с ", "₽/с"))
+
+
+def _guide_line_seed(row: Mapping[str, Any]) -> str | None:
+    profile_line = collapse_ws(str(_profile_fact_value(row, "guide_line") or ""))
+    if profile_line:
+        return profile_line
+    guide_names = _string_list(row.get("guide_names"), limit=3)
+    guide_names = [name for name in guide_names if len(name.split()) >= 2]
+    if guide_names:
+        return ", ".join(guide_names)
+    return None
+
+
+def _organizer_line_seed(row: Mapping[str, Any]) -> str | None:
+    organizer_names = _string_list(row.get("organizer_names"), limit=3)
+    if organizer_names:
+        return ", ".join(organizer_names)
+    source_title = collapse_ws(str(row.get("source_title") or ""))
+    source_kind = collapse_ws(str(row.get("source_kind") or ""))
+    if source_title and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
+        return source_title
+    return None
 
 
 def build_booking_candidates(row: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -84,7 +192,7 @@ def build_booking_candidates(row: Mapping[str, Any]) -> list[dict[str, str]]:
     seen: set[tuple[str, str]] = set()
 
     def add(label: str | None, url: str | None, kind: str) -> None:
-        text = collapse_ws(label)
+        text = _normalize_booking_label(label, url)
         href = collapse_ws(url)
         if not text or not href:
             return
@@ -96,7 +204,8 @@ def build_booking_candidates(row: Mapping[str, Any]) -> list[dict[str, str]]:
 
     explicit_text = collapse_ws(str(row.get("booking_text") or ""))
     explicit_url = collapse_ws(str(row.get("booking_url") or ""))
-    add(explicit_text or "Запись", explicit_url, "explicit")
+    if explicit_url:
+        add(explicit_text or "Запись", explicit_url, "explicit")
 
     about_text = collapse_ws(str(row.get("source_about_text") or ""))
     about_links = row.get("source_about_links") or []
@@ -111,16 +220,34 @@ def build_booking_candidates(row: Mapping[str, Any]) -> list[dict[str, str]]:
         if match:
             uname = match.group(1)
             add(f"@{uname}", f"https://t.me/{uname}", "source_about")
-    for uname in USERNAME_RE.findall(about_text):
-        add(f"@{uname}", f"https://t.me/{uname}", "source_about")
     for phone in PHONE_RE.findall(about_text):
         normalized = _normalize_phone(phone)
         if normalized:
             add(normalized[0], normalized[1], "source_about")
+    for uname in USERNAME_RE.findall(about_text):
+        add(f"@{uname}", f"https://t.me/{uname}", "source_about")
     for href in URL_RE.findall(about_text):
         if "t.me/" in href.lower():
             continue
         add("Сайт / запись", href, "source_about")
+    kind_rank = {"explicit": 0, "source_about": 1}
+
+    def _candidate_rank(item: Mapping[str, str]) -> tuple[int, int, int, str]:
+        href = collapse_ws(item.get("url"))
+        text = collapse_ws(item.get("text"))
+        kind = collapse_ws(item.get("kind"))
+        tel = 0 if href.startswith("tel:") and _is_mobile_phone(text) else 1
+        any_tel = 0 if href.startswith("tel:") else 1
+        tg = 0 if "t.me/" in href.lower() else 1
+        return (
+            kind_rank.get(kind, 9),
+            tel,
+            any_tel,
+            0 if not tg else 1,
+            text.lower(),
+        )
+
+    out.sort(key=_candidate_rank)
     return out
 
 
@@ -157,10 +284,63 @@ def repair_title_fallback(title: str | None, *, source_excerpt: str | None = Non
     return value
 
 
+def _fallback_booking_line(row: Mapping[str, Any]) -> str | None:
+    candidates = build_booking_candidates(row)
+    if candidates:
+        return candidates[0]["text"]
+    booking_text = _normalize_booking_label(row.get("booking_text"), row.get("booking_url"))
+    if booking_text:
+        return booking_text
+    booking_url = collapse_ws(str(row.get("booking_url") or ""))
+    if booking_url:
+        if "t.me/" in booking_url.lower():
+            match = re.search(r"t\.me/([A-Za-z0-9_]{4,64})", booking_url, flags=re.I)
+            if match:
+                return f"@{match.group(1)}"
+        if booking_url.startswith("tel:"):
+            return None
+        return "Сайт / запись"
+    return None
+
+
+def _build_fallback_line_fields(row: Mapping[str, Any], *, date_label: str | None = None) -> dict[str, str]:
+    audience_values = [
+        value
+        for value in _string_list(row.get("audience_fit"), limit=6)
+        if "для группы" not in value.lower() and "групп" not in value.lower()
+    ]
+    audience = build_audience_line(audience_values)
+    raw_price_line = _normalize_line_text(row.get("price_text"), prefixes=("цена", "стоимость"))
+    result = {
+        "guide_line": _guide_line_seed(row),
+        "organizer_line": _organizer_line_seed(row),
+        "schedule_line": collapse_ws(date_label) or collapse_ws(str(row.get("time") or "")) or None,
+        "audience_line": audience or None,
+        "group_format_line": _group_format_seed(row),
+        "route_line": _normalize_line_text(
+            row.get("route_summary") or _fact_pack_value(row, "route_summary"),
+            prefixes=("маршрут", "в программе", "что увидим", "посетим"),
+        ),
+        "duration_line": _normalize_line_text(
+            row.get("duration_text") or _fact_pack_value(row, "duration_text"),
+            prefixes=("продолжительность", "длительность"),
+        ),
+        "meeting_point_line": _normalize_line_text(row.get("meeting_point"), prefixes=("встреча", "место")),
+        "price_line": None if _looks_raw_price_copy(raw_price_line) else raw_price_line,
+        "seats_line": _normalize_line_text(row.get("seats_text"), prefixes=("места", "статус")),
+        "booking_line": _normalize_line_text(_fallback_booking_line(row), prefixes=("запись",)),
+    }
+    return {key: value for key, value in result.items() if value}
+
+
 def apply_editorial_fallback(row: Mapping[str, Any], *, date_label: str | None = None) -> tuple[dict[str, Any] | None, str]:
     item = dict(row)
     booking_candidates = build_booking_candidates(item)
-    if not collapse_ws(str(item.get("booking_url") or "")) and booking_candidates:
+    if booking_candidates and (
+        not collapse_ws(str(item.get("booking_url") or ""))
+        or _is_generic_booking_text(item.get("booking_text"))
+        or len(collapse_ws(str(item.get("booking_text") or ""))) > 48
+    ):
         item["booking_text"] = booking_candidates[0]["text"]
         item["booking_url"] = booking_candidates[0]["url"]
     excerpt = collapse_ws(str(item.get("dedup_source_text") or ""))
@@ -176,98 +356,8 @@ def apply_editorial_fallback(row: Mapping[str, Any], *, date_label: str | None =
         date_label=date_label,
         time_text=collapse_ws(str(item.get("time") or "")) or None,
     )
+    item.update(_build_fallback_line_fields(item, date_label=date_label))
     return item, "fallback"
-
-
-def _get_editorial_client():
-    try:
-        from google_ai import GoogleAIClient, SecretsProvider
-    except Exception as exc:  # pragma: no cover - optional dependency
-        logger.warning("guide_editorial: google_ai client unavailable: %s", exc)
-        return None
-    supabase = None
-    incident_notifier = None
-    try:
-        from main import get_supabase_client, notify_llm_incident  # type: ignore
-
-        supabase = get_supabase_client()
-        incident_notifier = notify_llm_incident
-    except Exception:
-        pass
-    return GoogleAIClient(
-        supabase_client=supabase,
-        secrets_provider=_GuideSecretsProviderAdapter(SecretsProvider()),
-        consumer="guide_excursions_editorial",
-        incident_notifier=incident_notifier,
-    )
-
-
-async def _ask_editorial_llm(payload_rows: Sequence[dict[str, Any]]) -> dict[int, dict[str, Any]] | None:
-    client = _get_editorial_client()
-    if client is None:
-        return None
-    schema = {
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "occurrence_id": {"type": "integer"},
-                        "decision": {"type": "string", "enum": ["publish", "suppress"]},
-                        "title": {"type": ["string", "null"]},
-                        "blurb": {"type": ["string", "null"]},
-                        "booking_choice_idx": {"type": ["integer", "null"]},
-                        "reason_short": {"type": "string"},
-                    },
-                    "required": ["occurrence_id", "decision", "title", "blurb", "booking_choice_idx", "reason_short"],
-                    "additionalProperties": False,
-                },
-            }
-        },
-        "required": ["items"],
-        "additionalProperties": False,
-    }
-    prompt = (
-        "Ты редактор дайджеста экскурсий. Для каждой карточки реши, можно ли публиковать её в публичном дайджесте.\n"
-        "Правила:\n"
-        "1. suppress, если это размышление, отчёт, общий контекстный пост или operational update для уже собранной группы.\n"
-        "2. suppress, если нет надёжного публичного способа связаться/записаться и текст выглядит рискованным для читателя.\n"
-        "3. title должен описывать именно этот конкретный выход, а не будущую премьеру или другую секцию поста.\n"
-        "4. blurb = одно короткое предложение по существу, без слов сегодня/завтра/вчера.\n"
-        "5. booking_choice_idx выбирай только из переданных кандидатов; если подходящего нет, верни null.\n"
-        "Верни только JSON без markdown.\n"
-        f"JSON schema: {json.dumps(schema, ensure_ascii=False)}\n\n"
-        f"Input:\n{json.dumps({'items': list(payload_rows)}, ensure_ascii=False)}"
-    )
-    try:
-        raw, _usage = await client.generate_content_async(
-            model=GUIDE_EDITORIAL_MODEL,
-            prompt=prompt,
-            generation_config={"temperature": 0},
-            max_output_tokens=2200,
-        )
-    except Exception as exc:
-        logger.warning("guide_editorial: llm batch failed: %s", exc)
-        return None
-    data = _extract_json(raw or "")
-    if not isinstance(data, dict):
-        return None
-    items = data.get("items")
-    if not isinstance(items, list):
-        return None
-    out: dict[int, dict[str, Any]] = {}
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        try:
-            occurrence_id = int(item.get("occurrence_id") or 0)
-        except Exception:
-            continue
-        if occurrence_id > 0:
-            out[occurrence_id] = dict(item)
-    return out or None
 
 
 async def refine_digest_rows(
@@ -276,74 +366,21 @@ async def refine_digest_rows(
     family: str,
     date_formatter: Any,
 ) -> tuple[list[dict[str, Any]], list[int], dict[int, str]]:
+    del family
     if not GUIDE_EDITORIAL_ENABLED:
         kept = [dict(row) for row in rows]
         return kept, [], {}
 
-    prepared: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        date_label = date_formatter(str(item.get("date") or ""), str(item.get("time") or ""))
-        item["_date_label"] = date_label
-        item["_booking_candidates"] = build_booking_candidates(item)
-        prepared.append(item)
-
-    llm_payload: list[dict[str, Any]] = []
-    if GUIDE_EDITORIAL_LLM_ENABLED and prepared:
-        for item in prepared:
-            llm_payload.append(
-                {
-                    "occurrence_id": int(item.get("id") or 0),
-                    "family": family,
-                    "title": collapse_ws(str(item.get("canonical_title") or "")),
-                    "date": collapse_ws(str(item.get("date") or "")),
-                    "time": collapse_ws(str(item.get("time") or "")),
-                    "status": collapse_ws(str(item.get("status") or "")),
-                    "seats_text": collapse_ws(str(item.get("seats_text") or "")),
-                    "summary_one_liner": collapse_ws(str(item.get("summary_one_liner") or "")),
-                    "digest_blurb": collapse_ws(str(item.get("digest_blurb") or "")),
-                    "post_excerpt": collapse_ws(str(item.get("dedup_source_text") or ""))[:1800],
-                    "source_kind": collapse_ws(str(item.get("source_kind") or "")),
-                    "source_title": collapse_ws(str(item.get("source_title") or "")),
-                    "source_about_text": collapse_ws(str(item.get("source_about_text") or ""))[:1000],
-                    "booking_candidates": item["_booking_candidates"],
-                }
-            )
-    llm_decisions = await _ask_editorial_llm(llm_payload) if llm_payload else None
-
     kept: list[dict[str, Any]] = []
     suppressed_ids: list[int] = []
     reasons: dict[int, str] = {}
-    for item in prepared:
-        occurrence_id = int(item.get("id") or 0)
-        date_label = item.get("_date_label")
-        fallback_item, fallback_reason = apply_editorial_fallback(item, date_label=date_label)
+    for row in rows:
+        occurrence_id = int(row.get("id") or 0)
+        date_label = date_formatter(str(row.get("date") or ""), str(row.get("time") or ""))
+        fallback_item, fallback_reason = apply_editorial_fallback(row, date_label=date_label)
         if fallback_item is None:
             suppressed_ids.append(occurrence_id)
             reasons[occurrence_id] = fallback_reason
             continue
-        decision = llm_decisions.get(occurrence_id) if isinstance(llm_decisions, dict) else None
-        if isinstance(decision, dict):
-            if str(decision.get("decision") or "").strip().lower() == "suppress":
-                suppressed_ids.append(occurrence_id)
-                reasons[occurrence_id] = collapse_ws(str(decision.get("reason_short") or "")) or "llm_suppress"
-                continue
-            title = collapse_ws(str(decision.get("title") or ""))
-            blurb = collapse_ws(str(decision.get("blurb") or ""))
-            if title:
-                fallback_item["canonical_title"] = repair_title_fallback(title, source_excerpt=fallback_item.get("dedup_source_text")) or title
-            if blurb:
-                fallback_item["digest_blurb"] = neutralize_relative_blurb(
-                    blurb,
-                    date_label=date_label,
-                    time_text=collapse_ws(str(fallback_item.get("time") or "")) or None,
-                )
-            choice_idx = decision.get("booking_choice_idx")
-            if isinstance(choice_idx, int):
-                candidates = fallback_item.get("_booking_candidates") or []
-                if 0 <= choice_idx < len(candidates):
-                    choice = candidates[choice_idx]
-                    fallback_item["booking_text"] = choice.get("text")
-                    fallback_item["booking_url"] = choice.get("url")
         kept.append(fallback_item)
     return kept, suppressed_ids, reasons

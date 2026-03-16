@@ -64,6 +64,8 @@ _RU_MONTH_GENITIVE = {
     12: "декабря",
 }
 
+_CONTEXT_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z0-9_]+)\}")
+
 
 # =============================================================================
 # Helper Functions
@@ -98,6 +100,56 @@ def find_button(message, text):
 
 def _normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip().lower()
+
+
+def _set_context_value(context, name: str, value) -> None:
+    if not hasattr(context, "dynamic_values") or not isinstance(context.dynamic_values, dict):
+        context.dynamic_values = {}
+    context.dynamic_values[str(name)] = value
+    setattr(context, str(name), value)
+
+
+def _resolve_context_placeholder(context, name: str):
+    if hasattr(context, name):
+        value = getattr(context, name)
+        if value not in (None, ""):
+            return value
+    dynamic_values = getattr(context, "dynamic_values", None)
+    if isinstance(dynamic_values, dict):
+        value = dynamic_values.get(name)
+        if value not in (None, ""):
+            return value
+    raise AssertionError(f"Не найден placeholder {{{name}}} в контексте E2E")
+
+
+def _resolve_context_placeholders(context, template: str) -> str:
+    raw = str(template or "")
+    if "{" not in raw:
+        return raw
+
+    def _replace(match: re.Match[str]) -> str:
+        return str(_resolve_context_placeholder(context, match.group(1)))
+
+    return _CONTEXT_PLACEHOLDER_RE.sub(_replace, raw)
+
+
+def _parse_guide_preview_occurrences(text: str) -> list[dict[str, str | int]]:
+    items: list[dict[str, str | int]] = []
+    for line in (text or "").splitlines():
+        match = re.match(r"^\s*-\s*#(?P<id>\d+)\s+(?P<date>\d{4}-\d{2}-\d{2})\s+(?P<title>.+?)\s*$", line)
+        if not match:
+            continue
+        title = re.sub(r"\s+", " ", (match.group("title") or "").strip())
+        if not title:
+            continue
+        items.append(
+            {
+                "id": int(match.group("id")),
+                "date": match.group("date"),
+                "title": title,
+            }
+        )
+    return items
 
 
 def _find_event_id_in_text(text: str, title: str) -> int | None:
@@ -2933,7 +2985,7 @@ def step_assert_tg_sources_in_ui_list(context):
 def step_send_command(context, command):
     """Send command to bot using human-like behavior."""
     async def _send():
-        cmd = (command or "").strip()
+        cmd = _resolve_context_placeholders(context, command).strip()
         timeout = float(os.getenv("E2E_COMMAND_TIMEOUT_SEC", "60"))
         if cmd.lower() == "/start":
             timeout = float(os.getenv("E2E_START_TIMEOUT_SEC", str(timeout)))
@@ -2942,11 +2994,11 @@ def step_send_command(context, command):
             try:
                 response = await context.client.human_send_and_wait(
                     context.bot_entity,
-                    command,
+                    cmd,
                     timeout=timeout,
                 )
                 context.last_response = response
-                logger.info(f"→ Отправлено: {command}")
+                logger.info(f"→ Отправлено: {cmd}")
                 if response and response.text:
                     preview = response.text[:100].replace('\n', ' ')
                     logger.info(f"← Ответ: {preview}...")
@@ -2954,7 +3006,7 @@ def step_send_command(context, command):
             except TimeoutError as exc:
                 last_exc = exc
                 if attempt == 0:
-                    logger.warning("Команда '%s' не получила ответ вовремя, ретрай...", command)
+                    logger.warning("Команда '%s' не получила ответ вовремя, ретрай...", cmd)
                     await context.client._gaussian_delay(0.4, 1.0)
                     continue
                 raise
@@ -2969,13 +3021,14 @@ def step_send_command(context, command):
 def step_send_message(context, text):
     """Send arbitrary text message."""
     async def _send():
+        resolved = _resolve_context_placeholders(context, text)
         response = await context.client.human_send_and_wait(
             context.bot_entity,
-            text,
+            resolved,
             timeout=120  # Increased timeout for long operations
         )
         context.last_response = response
-        logger.info(f"→ Отправлено сообщение: {text}")
+        logger.info(f"→ Отправлено сообщение: {resolved}")
         if response and response.text:
             preview = response.text[:100].replace('\n', ' ')
             logger.info(f"← Ответ: {preview}...")
@@ -4232,19 +4285,20 @@ def step_wait_for_message_text(context, text):
     """Wait for a new message containing specific text."""
     async def _wait():
         import asyncio
+        expected_text = _resolve_context_placeholders(context, text)
         # Try for 5 seconds
         for _ in range(10):
             messages = await context.client.client.get_messages(
                 context.bot_entity, limit=5
             )
             for msg in messages:
-                if msg.text and text.lower() in msg.text.lower():
+                if msg.text and expected_text.lower() in msg.text.lower():
                     context.last_response = msg
-                    logger.info(f"✓ Найдено ожидаемое сообщение: '{text}'")
+                    logger.info(f"✓ Найдено ожидаемое сообщение: '{expected_text}'")
                     return
             await asyncio.sleep(0.5)
-        
-        raise AssertionError(f"Сообщение с текстом '{text}' не получено за 5 секунд. Последние: {[m.text for m in messages]}")
+
+        raise AssertionError(f"Сообщение с текстом '{expected_text}' не получено за 5 секунд. Последние: {[m.text for m in messages]}")
 
     run_async(context, _wait())
 
@@ -4256,6 +4310,7 @@ def step_wait_for_new_message_text(context, text):
     async def _wait():
         import asyncio
 
+        expected_text = _resolve_context_placeholders(context, text)
         timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
         poll_sec = float(os.getenv("E2E_WAIT_NEW_MESSAGE_POLL_SEC", "1.0"))
         baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
@@ -4268,14 +4323,14 @@ def step_wait_for_new_message_text(context, text):
                 mid = int(getattr(msg, "id", 0) or 0)
                 if mid <= baseline_id:
                     continue
-                if msg.text and text.lower() in msg.text.lower():
+                if msg.text and expected_text.lower() in msg.text.lower():
                     context.last_response = msg
-                    logger.info("✓ Найдено новое сообщение: %r (mid=%s baseline=%s)", text, mid, baseline_id)
+                    logger.info("✓ Найдено новое сообщение: %r (mid=%s baseline=%s)", expected_text, mid, baseline_id)
                     return
             await asyncio.sleep(poll_sec)
         previews = [(m.id, (m.text or "")[:80].replace("\n", " ")) for m in last_messages[:5]]
         raise AssertionError(
-            f"Новое сообщение с текстом '{text}' не получено за {timeout_sec} секунд. "
+            f"Новое сообщение с текстом '{expected_text}' не получено за {timeout_sec} секунд. "
             f"baseline_id={baseline_id}, последние={previews}"
         )
 
@@ -4299,6 +4354,7 @@ def step_wait_for_new_message_after_baseline(context, text):
     async def _wait():
         import asyncio
 
+        expected_text = _resolve_context_placeholders(context, text)
         baseline_id = int(getattr(context, "baseline_message_id", 0) or 0)
         timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
         poll_sec = float(os.getenv("E2E_WAIT_NEW_MESSAGE_POLL_SEC", "1.0"))
@@ -4311,11 +4367,11 @@ def step_wait_for_new_message_after_baseline(context, text):
                 mid = int(getattr(msg, "id", 0) or 0)
                 if mid <= baseline_id:
                     continue
-                if msg.text and text.lower() in msg.text.lower():
+                if msg.text and expected_text.lower() in msg.text.lower():
                     context.last_response = msg
                     logger.info(
                         "✓ Найдено новое сообщение после baseline: %r (mid=%s baseline=%s)",
-                        text,
+                        expected_text,
                         mid,
                         baseline_id,
                     )
@@ -4323,11 +4379,77 @@ def step_wait_for_new_message_after_baseline(context, text):
             await asyncio.sleep(poll_sec)
         previews = [(m.id, (m.text or "")[:80].replace("\n", " ")) for m in last_messages[:5]]
         raise AssertionError(
-            f"Новое сообщение после baseline с текстом '{text}' не получено за {timeout_sec} секунд. "
+            f"Новое сообщение после baseline с текстом '{expected_text}' не получено за {timeout_sec} секунд. "
             f"baseline_id={baseline_id}, последние={previews}"
         )
 
     run_async(context, _wait())
+
+
+@then('текущий ответ содержит "{text}"')
+def step_current_response_contains(context, text):
+    expected_text = _resolve_context_placeholders(context, text)
+    msg = context.last_response
+    payload = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    if expected_text.lower() not in payload.lower():
+        raise AssertionError(f"Текущий ответ не содержит '{expected_text}'.\n\n{payload}")
+    logger.info("✓ Текущий ответ содержит %r", expected_text)
+
+
+@then("я запоминаю guide ops_run_id из текущего сообщения")
+def step_remember_guide_ops_run_id(context):
+    msg = context.last_response
+    payload = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    match = re.search(r"ops_run_id=(\d+)", payload)
+    if not match:
+        match = re.search(r"/guide_report\s+(\d+)", payload)
+    if not match:
+        raise AssertionError(f"Не удалось извлечь guide ops_run_id из сообщения:\n{payload}")
+    ops_run_id = int(match.group(1))
+    _set_context_value(context, "guide_ops_run_id", ops_run_id)
+    logger.info("✓ guide_ops_run_id=%s", ops_run_id)
+
+
+@then('я запоминаю первые "{count}" экскурсии из guide preview как контрольные')
+def step_remember_guide_preview_occurrences(context, count):
+    msg = context.last_response
+    payload = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    items = _parse_guide_preview_occurrences(payload)
+    want = int(count)
+    if len(items) < want:
+        raise AssertionError(
+            f"В guide preview найдено только {len(items)} карточек, ожидалось минимум {want}.\n\n{payload}"
+        )
+    picked = items[:want]
+    context.guide_control_occurrences = picked
+    for idx, item in enumerate(picked, start=1):
+        _set_context_value(context, f"guide_occurrence_{idx}", int(item["id"]))
+        _set_context_value(context, f"guide_title_{idx}", str(item["title"]))
+        _set_context_value(context, f"guide_date_{idx}", str(item["date"]))
+    logger.info("✓ Запомнили guide preview occurrences: %s", picked)
+
+
+@then('текущий ответ содержит заголовок контрольной экскурсии "{index}"')
+def step_current_response_contains_guide_title(context, index):
+    key = f"guide_title_{int(index)}"
+    expected_title = str(_resolve_context_placeholder(context, key))
+    msg = context.last_response
+    payload = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    if expected_title.lower() not in payload.lower():
+        raise AssertionError(f"Текущий ответ не содержит заголовок '{expected_title}'.\n\n{payload}")
+    logger.info("✓ Текущий ответ содержит guide title %s", expected_title)
+
+
+@then('в последнем сообщении чата есть заголовок контрольной экскурсии "{index}"')
+def step_last_chat_message_contains_guide_title(context, index):
+    msg = getattr(context, "last_chat_response", None)
+    payload = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    if not payload:
+        raise AssertionError("Нет сохранённого последнего сообщения чата для проверки")
+    expected_title = str(_resolve_context_placeholder(context, f"guide_title_{int(index)}"))
+    if expected_title.lower() not in payload.lower():
+        raise AssertionError(f"Последнее сообщение чата не содержит '{expected_title}'.\n\n{payload}")
+    logger.info("✓ Последнее сообщение чата содержит guide title %s", expected_title)
 
 
 @then("я пишу в лог количество отображенных событий")
@@ -4566,6 +4688,9 @@ def step_wait_long_operation(context, text):
             # still overridable via env for faster local runs.
             timeout_sec = int(os.getenv("E2E_TG_MONITOR_TIMEOUT_SEC", str(35 * 60)))
             poll_sec = float(os.getenv("E2E_TG_MONITOR_POLL_SEC", "4"))
+        elif "мониторинг экскурсий" in text_norm or "guide monitoring" in text_norm:
+            timeout_sec = int(os.getenv("E2E_GUIDE_MONITOR_TIMEOUT_SEC", str(35 * 60)))
+            poll_sec = float(os.getenv("E2E_GUIDE_MONITOR_POLL_SEC", "4"))
         elif any(tok in text_norm for tok in ["source parsing", "парсинг", "parse"]):
             timeout_sec = int(os.getenv("E2E_PARSE_TIMEOUT_SEC", str(35 * 60)))
             poll_sec = float(os.getenv("E2E_PARSE_POLL_SEC", "4"))
@@ -7684,6 +7809,7 @@ def step_wait_new_message_in_chat(context, chat_ref, text):
         import asyncio
 
         entity = await context.client.client.get_entity(chat_ref)
+        expected_text = _resolve_context_placeholders(context, text)
         baseline_id = int(getattr(getattr(context, "chat_baselines", {}), "get", lambda _k, _d=0: 0)(str(chat_ref), 0) or 0)
         timeout_sec = int(os.getenv("E2E_WAIT_NEW_MESSAGE_TIMEOUT_SEC", "180"))
         deadline = time.monotonic() + float(timeout_sec)
@@ -7696,18 +7822,19 @@ def step_wait_new_message_in_chat(context, chat_ref, text):
                 if mid <= baseline_id:
                     continue
                 payload = (msg.text or msg.caption or "")
-                if payload and text.lower() in payload.lower():
+                if payload and expected_text.lower() in payload.lower():
                     if not hasattr(context, "chat_baselines"):
                         context.chat_baselines = {}
                     context.chat_baselines[str(chat_ref)] = mid
+                    context.last_chat_response = msg
                     return
             await asyncio.sleep(2.0)
         raise AssertionError(
-            f"В чате {chat_ref} не найдено новое сообщение с текстом {text!r}. "
+            f"В чате {chat_ref} не найдено новое сообщение с текстом {expected_text!r}. "
             f"baseline_id={baseline_id}; recent={last_preview}"
         )
     run_async(context, _wait())
-    logger.info("✓ В чате %s появилось новое сообщение с текстом %r", chat_ref, text)
+    logger.info("✓ В чате %s появилось новое сообщение с текстом %r", chat_ref, _resolve_context_placeholders(context, text))
 
 
 @step('в чате "{chat_ref}" появилось новое медиа-сообщение')
@@ -7730,6 +7857,7 @@ def step_wait_new_media_message_in_chat(context, chat_ref):
                     if not hasattr(context, "chat_baselines"):
                         context.chat_baselines = {}
                     context.chat_baselines[str(chat_ref)] = mid
+                    context.last_chat_response = msg
                     return
             await asyncio.sleep(2.0)
         raise AssertionError(f"В чате {chat_ref} не найдено новое медиа-сообщение после baseline_id={baseline_id}")

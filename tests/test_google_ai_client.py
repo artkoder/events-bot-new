@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from google_ai.client import GoogleAIClient, ReserveResult, UsageInfo, RequestContext
+from google_ai.client import (
+    GoogleAIClient,
+    RequestContext,
+    ReserveResult,
+    UsageInfo,
+    _DEFAULT_ENV_CANDIDATE_CACHE,
+)
 from google_ai.exceptions import RateLimitError, ProviderError, ReservationError
 
 
@@ -102,6 +108,33 @@ class TestGoogleAIClient:
         assert mock_supabase.rpc.call_count >= 1
 
     @pytest.mark.asyncio
+    async def test_reserve_fallback_respects_custom_default_env_var(self, mock_supabase):
+        mock_supabase.rpc.return_value.execute.side_effect = Exception(
+            "PGRST202: Route POST:/rpc/google_ai_reserve not found"
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "GOOGLE_API_KEY2": "test-api-key-2",
+                "GOOGLE_AI_ALLOW_RESERVE_FALLBACK": "1",
+            },
+            clear=False,
+        ):
+            client = GoogleAIClient(
+                supabase_client=mock_supabase,
+                consumer="guide-test",
+                default_env_var_name="GOOGLE_API_KEY2",
+                dry_run=True,
+            )
+            response, _usage = await client.generate_content_async(
+                model="gemma-3-27b",
+                prompt="Test reserve fallback with custom env",
+            )
+
+        assert "[DRY RUN]" in response
+
+    @pytest.mark.asyncio
     async def test_reserve_rpc_missing_raises_when_fallback_disabled(self, mock_supabase):
         """Fallback can be explicitly disabled for strict environments."""
         mock_supabase.rpc.return_value.execute.side_effect = Exception(
@@ -192,6 +225,107 @@ class TestGoogleAIClient:
         assert third.key_alias == "recovered-key"
         assert reserve_calls == 2
         assert client._reserve_rpc_missing is False
+
+    @pytest.mark.asyncio
+    async def test_local_reserve_uses_custom_default_env_var(self):
+        client = GoogleAIClient(
+            supabase_client=None,
+            consumer="guide-test",
+            default_env_var_name="GOOGLE_API_KEY2",
+            dry_run=True,
+        )
+        ctx = RequestContext(
+            request_uid="req-local-custom-env",
+            consumer="guide-test",
+            account_name="guide",
+            model="gemma-3-27b",
+            reserved_tpm=1000,
+        )
+        reserve = await client._reserve(ctx, attempt_no=1, candidate_key_ids=None)
+        assert reserve.env_var_name == "GOOGLE_API_KEY2"
+
+    @pytest.mark.asyncio
+    async def test_reserve_scopes_to_default_env_metadata_when_candidates_not_provided(self):
+        _DEFAULT_ENV_CANDIDATE_CACHE.clear()
+        supabase = MagicMock()
+        keys_table = MagicMock()
+        keys_table.select.return_value = keys_table
+        keys_table.eq.return_value = keys_table
+        keys_table.in_.return_value = keys_table
+        keys_table.order.return_value = keys_table
+        keys_table.execute.return_value = MagicMock(
+            data=[
+                {"id": "generic-id", "env_var_name": "GOOGLE_API_KEY", "priority": 10},
+                {"id": "guide-id", "env_var_name": "GOOGLE_API_KEY2", "priority": 5},
+            ]
+        )
+        supabase.table.return_value = keys_table
+        supabase.rpc.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "ok": True,
+                    "api_key_id": "generic-id",
+                    "env_var_name": "GOOGLE_API_KEY",
+                    "key_alias": "generic",
+                    "minute_bucket": "2024-01-01T00:00:00Z",
+                    "day_bucket": "2024-01-01",
+                }
+            ]
+        )
+
+        client = GoogleAIClient(
+            supabase_client=supabase,
+            consumer="smart-update-test",
+            dry_run=True,
+        )
+        ctx = RequestContext(
+            request_uid="req-scope-default",
+            consumer="smart_update",
+            account_name="prod",
+            model="gemma-3-27b",
+            reserved_tpm=1000,
+        )
+        reserve = await client._reserve(ctx, attempt_no=1, candidate_key_ids=None)
+
+        assert reserve.api_key_id == "generic-id"
+        payload = supabase.rpc.call_args.args[1]
+        assert payload["p_candidate_key_ids"] == ["generic-id"]
+
+    @pytest.mark.asyncio
+    async def test_reserve_keeps_explicit_candidate_ids(self):
+        _DEFAULT_ENV_CANDIDATE_CACHE.clear()
+        supabase = MagicMock()
+        supabase.rpc.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "ok": True,
+                    "api_key_id": "explicit-id",
+                    "env_var_name": "GOOGLE_API_KEY2",
+                    "key_alias": "guide-explicit",
+                    "minute_bucket": "2024-01-01T00:00:00Z",
+                    "day_bucket": "2024-01-01",
+                }
+            ]
+        )
+
+        client = GoogleAIClient(
+            supabase_client=supabase,
+            consumer="guide-test",
+            default_env_var_name="GOOGLE_API_KEY",
+            dry_run=True,
+        )
+        ctx = RequestContext(
+            request_uid="req-explicit-candidates",
+            consumer="guide-test",
+            account_name="guide",
+            model="gemma-3-27b",
+            reserved_tpm=1000,
+        )
+        reserve = await client._reserve(ctx, attempt_no=1, candidate_key_ids=["explicit-id"])
+
+        assert reserve.api_key_id == "explicit-id"
+        payload = supabase.rpc.call_args.args[1]
+        assert payload["p_candidate_key_ids"] == ["explicit-id"]
 
     @pytest.mark.asyncio
     async def test_reserve_rpc_transient_error_retries_before_fallback(self):
