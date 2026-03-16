@@ -159,7 +159,7 @@ Guide digest не должен скатываться ни в regex-heavy шаб
 - public-identity resolution смотрит только на guide-like контекст (`мы с @...`, `гид @...`, `экскурсию проведёт @...`) и не должен автоматически превращать username из блока `запись / бронь / лс` в ещё одного гида;
 - если `guide_profile` уже знает canonical public имя, а occurrence-level `guide_names` хранит marketing alias / username того же человека (`Amber Fringilla` vs `Юлия Гришанова`), preview должен схлопывать это в одно public имя, а не показывать ложную plural-пару;
 - public `Локация` line теперь проходит через guide-specific alias table [guide-place-aliases.md](/workspaces/events-bot-new/docs/reference/guide-place-aliases.md), чтобы исторические или разговорные топонимы вроде `Роминта` не выходили в digest как будто это современный город;
-- если `Запись` в facts свелась к одному телефонному номеру, digest должен публиковать его как кликабельную `tel:` ссылку даже без отдельного `booking_url` от upstream extraction;
+- если `Запись` в facts свелась к одному телефонному номеру, digest должен публиковать его как plain compact number (`+79217101161`) без форматирующих пробелов: Telegram нативно делает такой номер tap-target, а HTML `tel:` ссылка в карточке может не давать ожидаемый UX;
 - если у occurrence нет даты, он может materialize-иться для inventory/template layer, но не считается digest-ready public card;
 - длина `digest_blurb` выбирается по плотности фактов (`1..3` предложения), а не по “богатству” исходного поста;
 - формулировка должна быть живой и интересной, но строго grounded:

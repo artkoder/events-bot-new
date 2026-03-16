@@ -92,7 +92,7 @@ def _html_link(label: object | None, url: str | None) -> str:
     return f'<a href="{html.escape(href, quote=True)}">{text}</a>'
 
 
-def _normalize_phone_link(raw: object | None) -> tuple[str, str] | None:
+def _normalize_phone_link(raw: object | None) -> tuple[str, str, str] | None:
     text = _meaningful_text(raw)
     if not text:
         return None
@@ -106,7 +106,8 @@ def _normalize_phone_link(raw: object | None) -> tuple[str, str] | None:
     if len(digits) != 11 or not digits.startswith("7"):
         return None
     display = f"+7 {digits[1:4]} {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
-    return display, f"tel:+{digits}"
+    compact = f"+{digits}"
+    return display, compact, f"tel:+{digits}"
 
 
 def _channel_label(row: Mapping[str, object]) -> str:
@@ -300,11 +301,19 @@ def format_occurrence_card(row: Mapping[str, object], *, index: int) -> str:
         lines.append(f"🎟 {_html_text(seats_text)}")
     booking_text = _meaningful_text(row.get("booking_line") or row.get("booking_text"))
     booking_url = _meaningful_text(row.get("booking_url"))
+    compact_phone_text = None
     if booking_text and not booking_url:
         phone_link = _normalize_phone_link(booking_text)
         if phone_link:
-            booking_text, booking_url = phone_link
-    if booking_text and booking_url:
+            booking_text, compact_phone_text, booking_url = phone_link
+    elif booking_text and booking_url and booking_url.startswith("tel:"):
+        phone_link = _normalize_phone_link(booking_text)
+        if phone_link:
+            _display_phone, compact_phone_text, _normalized_url = phone_link
+            booking_url = _normalized_url
+    if compact_phone_text:
+        lines.append(f"✍️ Запись: {_html_text(compact_phone_text)}")
+    elif booking_text and booking_url:
         lines.append(f"✍️ Запись: {_html_link(booking_text, booking_url)}")
     elif booking_url:
         lines.append(f'✍️ Запись: <a href="{html.escape(booking_url, quote=True)}">ссылка</a>')

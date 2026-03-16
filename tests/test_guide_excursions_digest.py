@@ -224,7 +224,24 @@ def test_build_digest_messages_links_phone_booking_without_explicit_url():
         }
     ]
     text = build_digest_messages(rows, family="new_occurrences")[0]
-    assert '✍️ Запись: <a href="tel:+79217101161">+7 921 710-11-61</a>' in text
+    assert "✍️ Запись: +79217101161" in text
+
+
+def test_build_digest_messages_renders_tel_booking_as_plain_compact_number():
+    rows = [
+        {
+            "id": 18,
+            "canonical_title": "Экскурсия по Светлогорску",
+            "source_title": "Народный экскурсовод",
+            "date": "2026-03-21",
+            "digest_blurb": "Прогулка по Светлогорску.",
+            "booking_text": "+7 921 710-11-61",
+            "booking_url": "tel:+79217101161",
+        }
+    ]
+    text = build_digest_messages(rows, family="new_occurrences")[0]
+    assert "✍️ Запись: +79217101161" in text
+    assert 'href="tel:+79217101161"' not in text
 
 
 def test_digest_writer_retry_after_parser_reads_provider_hint():
