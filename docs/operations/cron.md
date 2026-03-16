@@ -53,6 +53,10 @@ For admin-facing scheduled reports, the bot now resolves the target chat from th
 - **Telegram monitoring** – scheduled daily import from Telegram sources (channels/groups) via Kaggle when enabled.
 - **Guide excursions monitoring** – scheduled guide-only Kaggle scans when `ENABLE_GUIDE_EXCURSIONS_SCHEDULED=1`.
   - if `ENABLE_GUIDE_DIGEST_SCHEDULED=1`, the same successful `full` run immediately publishes `new_occurrences` after server-side import instead of using a separate cron slot.
+- **Video announce `/v - Тест завтра`** – optional scheduled automatic test-render when `ENABLE_V_TEST_TOMORROW_SCHEDULED=1`.
+  - uses the same `VideoAnnounceScenario.run_tomorrow_pipeline(... test_mode=True)` path as manual `/v`;
+  - renders up to `12` scenes and sends the result to the configured `test` channel, or falls back to the operator/superadmin chat if no `test` channel is configured;
+  - recommended default window: `21:20 Europe/Kaliningrad`, so it stays away from VK auto-import and leaves buffer before nightly Telegram monitoring.
 - **kaggle recovery** – resumes in-flight Kaggle jobs after restarts, including `tg_monitoring` and `guide_monitoring`.
 
 ## Health Checks
@@ -88,6 +92,9 @@ For admin-facing scheduled reports, the bot now resolves the target chat from th
 - `ENABLE_GUIDE_EXCURSIONS_SCHEDULED` – enable guide-only scheduled scans.
 - `GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL` / `GUIDE_EXCURSIONS_FULL_TIME_LOCAL` / `GUIDE_EXCURSIONS_TZ` – guide monitoring light/full schedule in local time zone.
 - `ENABLE_GUIDE_DIGEST_SCHEDULED` – after a successful scheduled `full` guide scan, automatically publish the `new_occurrences` digest in the same job instead of a separate cron slot.
+- `ENABLE_V_TEST_TOMORROW_SCHEDULED` – enable scheduled automatic `/v - Тест завтра`.
+- `V_TEST_TOMORROW_TIME_LOCAL` / `V_TEST_TOMORROW_TZ` – local schedule for automatic `/v - Тест завтра`.
+- `V_TEST_TOMORROW_PROFILE` – video profile key for the scheduled `/v` run (default: `default`).
 - `ENABLE_FESTIVAL_QUEUE` – enable festival queue schedule (disabled by default; next release keep off).
 - `FESTIVAL_QUEUE_TIMES_LOCAL` / `FESTIVAL_QUEUE_TZ` – festival queue schedule times (default `03:30,16:30` local).
 - `FESTIVAL_QUEUE_LIMIT` – optional limit of queue items per run.

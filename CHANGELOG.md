@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **CrumpleVideo / Scheduled Tomorrow Test**: added an optional scheduler job for fully automatic `🧪 /v - Тест завтра`, running the existing `VideoAnnounceScenario.run_tomorrow_pipeline(... test_mode=True)` flow at a configurable local-time slot and sending the finished video to the configured test channel or back to the operator/superadmin chat when no test channel is configured.
 - **Guide Excursions / Scheduled Auto-Publish**: scheduled guide monitoring can now auto-publish the `new_occurrences` digest immediately after a successful `full` scan/import when `ENABLE_GUIDE_DIGEST_SCHEDULED=1`, avoiding a separate digest cron slot and keeping publish tied to fresh Kaggle facts.
 - **Docs / Guide Kaggle Session Incident**: added a canonical postmortem for the March 16, 2026 Telegram session-boundary incident, documenting why `TELEGRAM_AUTH_BUNDLE_S22` and `TELEGRAM_AUTH_BUNDLE_E2E` are not interchangeable and what runtime/process guardrails now prevent a repeat.
 - **Guide Excursions / Source Seed Expansion**: added `@art_from_the_Baltic` to the canonical guide monitoring seed and casebook as a provisional `guide_project` source pending a fuller deep-scan review.

@@ -213,3 +213,55 @@ async def test_run_scheduled_guide_excursions_skips_autopublish_for_light_mode(t
     await scheduling._run_scheduled_guide_excursions(db, DummyBot(), mode="light")
 
     assert calls == ["run"]
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_video_tomorrow_test_uses_superadmin_identity(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class DummyBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            return None
+
+    captured: dict[str, object] = {}
+
+    async def fake_resolve_superadmin_chat_id(_db):
+        return 42
+
+    async def fake_run_tomorrow_pipeline(
+        self,
+        *,
+        profile_key="default",
+        selected_max=0,
+        test_mode=False,
+    ):
+        captured["chat_id"] = self.chat_id
+        captured["user_id"] = self.user_id
+        captured["profile_key"] = profile_key
+        captured["selected_max"] = selected_max
+        captured["test_mode"] = test_mode
+
+    monkeypatch.setattr(scheduling, "resolve_superadmin_chat_id", fake_resolve_superadmin_chat_id)
+
+    import video_announce.scenario as video_scenario
+
+    monkeypatch.setattr(
+        video_scenario.VideoAnnounceScenario,
+        "run_tomorrow_pipeline",
+        fake_run_tomorrow_pipeline,
+    )
+
+    await scheduling._run_scheduled_video_tomorrow_test(
+        db,
+        DummyBot(),
+        profile_key="default",
+    )
+
+    assert captured == {
+        "chat_id": 42,
+        "user_id": 42,
+        "profile_key": "default",
+        "selected_max": video_scenario.TOMORROW_TEST_MIN_POSTERS,
+        "test_mode": True,
+    }

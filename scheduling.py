@@ -112,6 +112,39 @@ async def _run_scheduled_guide_excursions(
             logging.exception("SCHED failed to notify admin about scheduled guide digest publish")
 
 
+async def _run_scheduled_video_tomorrow_test(
+    db,
+    bot,
+    *,
+    profile_key: str,
+) -> None:
+    from video_announce.scenario import (
+        TOMORROW_TEST_MIN_POSTERS,
+        VideoAnnounceScenario,
+    )
+
+    target_chat_id = await resolve_superadmin_chat_id(db)
+    if not target_chat_id or bot is None:
+        logging.warning(
+            "SCHED skipping video_tomorrow_test: missing target_chat_id=%s or bot=%s",
+            target_chat_id,
+            bot is not None,
+        )
+        return
+
+    scenario = VideoAnnounceScenario(
+        db,
+        bot,
+        chat_id=int(target_chat_id),
+        user_id=int(target_chat_id),
+    )
+    await scenario.run_tomorrow_pipeline(
+        profile_key=(profile_key or "default").strip() or "default",
+        selected_max=TOMORROW_TEST_MIN_POSTERS,
+        test_mode=True,
+    )
+
+
 def _cron_from_local(
     time_raw: str,
     tz_name: str,
@@ -1213,6 +1246,51 @@ def startup(
     else:
         logging.info("SCHED skipping guide_excursions (ENABLE_GUIDE_EXCURSIONS_SCHEDULED!=1)")
         _notify_admin_skip("guide_excursions", "ENABLE_GUIDE_EXCURSIONS_SCHEDULED!=1")
+
+    enable_video_tomorrow_test = _env_enabled(
+        "ENABLE_V_TEST_TOMORROW_SCHEDULED", default=False
+    )
+    if enable_video_tomorrow_test:
+        async def video_tomorrow_test_scheduler(
+            db_obj,
+            bot_obj,
+            *,
+            profile_key: str,
+            run_id: str | None = None,
+        ) -> None:
+            await _run_scheduled_video_tomorrow_test(
+                db_obj,
+                bot_obj,
+                profile_key=profile_key,
+            )
+
+        video_tz_name = os.getenv("V_TEST_TOMORROW_TZ", "Europe/Kaliningrad").strip()
+        video_time_raw = os.getenv("V_TEST_TOMORROW_TIME_LOCAL", "21:20").strip()
+        video_profile_key = (os.getenv("V_TEST_TOMORROW_PROFILE", "default") or "").strip() or "default"
+        video_hour, video_minute = _cron_from_local(
+            video_time_raw,
+            video_tz_name,
+            default_hour="21",
+            default_minute="20",
+            label="V_TEST_TOMORROW_TIME_LOCAL",
+        )
+        _register_job(
+            "video_tomorrow_test",
+            _job_wrapper("video_tomorrow_test", video_tomorrow_test_scheduler, notify_skip=_notify_admin_skip),
+            "cron",
+            id="video_tomorrow_test",
+            hour=video_hour,
+            minute=video_minute,
+            args=[db, bot],
+            kwargs={"profile_key": video_profile_key},
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    else:
+        logging.info("SCHED skipping video_tomorrow_test (ENABLE_V_TEST_TOMORROW_SCHEDULED!=1)")
+        _notify_admin_skip("video_tomorrow_test", "ENABLE_V_TEST_TOMORROW_SCHEDULED!=1")
 
     enable_general_stats = _env_enabled("ENABLE_GENERAL_STATS", default=False)
     if enable_general_stats:
