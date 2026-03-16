@@ -52,6 +52,7 @@ For admin-facing scheduled reports, the bot now resolves the target chat from th
   - events whose 3D preview was invalidated because the illustration set changed (Smart Update clears `preview_3d_url` when `photo_urls` change).
 - **Telegram monitoring** – scheduled daily import from Telegram sources (channels/groups) via Kaggle when enabled.
 - **Guide excursions monitoring** – scheduled guide-only Kaggle scans when `ENABLE_GUIDE_EXCURSIONS_SCHEDULED=1`.
+  - if `ENABLE_GUIDE_DIGEST_SCHEDULED=1`, the same successful `full` run immediately publishes `new_occurrences` after server-side import instead of using a separate cron slot.
 - **kaggle recovery** – resumes in-flight Kaggle jobs after restarts, including `tg_monitoring` and `guide_monitoring`.
 
 ## Health Checks
@@ -84,6 +85,9 @@ For admin-facing scheduled reports, the bot now resolves the target chat from th
 - `TELEGRAPH_CACHE_REGEN_AFTER_RUNS` – enqueue rebuilds after N consecutive failing sanitizer runs (default `2`).
 - `ENABLE_TG_MONITORING` – enable daily Telegram monitoring job.
 - `TG_MONITORING_TIME_LOCAL` / `TG_MONITORING_TZ` – Telegram monitoring schedule time in local time zone.
+- `ENABLE_GUIDE_EXCURSIONS_SCHEDULED` – enable guide-only scheduled scans.
+- `GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL` / `GUIDE_EXCURSIONS_FULL_TIME_LOCAL` / `GUIDE_EXCURSIONS_TZ` – guide monitoring light/full schedule in local time zone.
+- `ENABLE_GUIDE_DIGEST_SCHEDULED` – after a successful scheduled `full` guide scan, automatically publish the `new_occurrences` digest in the same job instead of a separate cron slot.
 - `ENABLE_FESTIVAL_QUEUE` – enable festival queue schedule (disabled by default; next release keep off).
 - `FESTIVAL_QUEUE_TIMES_LOCAL` / `FESTIVAL_QUEUE_TZ` – festival queue schedule times (default `03:30,16:30` local).
 - `FESTIVAL_QUEUE_LIMIT` – optional limit of queue items per run.

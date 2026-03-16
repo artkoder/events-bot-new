@@ -70,6 +70,48 @@ MONTHS_GEN = [
 ]
 
 
+async def _run_scheduled_guide_excursions(
+    db,
+    bot,
+    *,
+    mode: str,
+) -> None:
+    from guide_excursions.service import publish_guide_digest, run_guide_monitor
+
+    target_chat_id = await resolve_superadmin_chat_id(db)
+    result = await run_guide_monitor(
+        db,
+        bot,
+        chat_id=target_chat_id,
+        operator_id=None,
+        trigger="scheduled",
+        mode=mode,
+        send_progress=bool(target_chat_id),
+    )
+    auto_publish = _env_enabled("ENABLE_GUIDE_DIGEST_SCHEDULED", default=False)
+    if not auto_publish or mode != "full" or result.errors or bot is None:
+        return
+    publish_result = await publish_guide_digest(
+        db,
+        bot,
+        family="new_occurrences",
+        chat_id=target_chat_id,
+    )
+    if target_chat_id and publish_result.get("published"):
+        try:
+            await bot.send_message(
+                int(target_chat_id),
+                (
+                    "📣 Scheduled guide digest published\n"
+                    f"issue_id={publish_result.get('issue_id')}\n"
+                    f"target={publish_result.get('target_chat') or '—'}"
+                ),
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            logging.exception("SCHED failed to notify admin about scheduled guide digest publish")
+
+
 def _cron_from_local(
     time_raw: str,
     tz_name: str,
@@ -1105,8 +1147,6 @@ def startup(
 
     enable_guide_excursions = _env_enabled("ENABLE_GUIDE_EXCURSIONS_SCHEDULED", default=False)
     if enable_guide_excursions:
-        from guide_excursions.service import run_guide_monitor
-
         async def guide_excursions_scheduler(
             db_obj,
             bot_obj,
@@ -1114,15 +1154,10 @@ def startup(
             mode: str,
             run_id: str | None = None,
         ) -> None:
-            target_chat_id = await resolve_superadmin_chat_id(db_obj)
-            await run_guide_monitor(
+            await _run_scheduled_guide_excursions(
                 db_obj,
                 bot_obj,
-                chat_id=target_chat_id,
-                operator_id=None,
-                trigger="scheduled",
                 mode=mode,
-                send_progress=bool(target_chat_id),
             )
 
         guide_tz_name = os.getenv("GUIDE_EXCURSIONS_TZ", "Europe/Kaliningrad").strip()

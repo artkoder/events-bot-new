@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Guide Excursions / Scheduled Auto-Publish**: scheduled guide monitoring can now auto-publish the `new_occurrences` digest immediately after a successful `full` scan/import when `ENABLE_GUIDE_DIGEST_SCHEDULED=1`, avoiding a separate digest cron slot and keeping publish tied to fresh Kaggle facts.
 - **Docs / Guide Kaggle Session Incident**: added a canonical postmortem for the March 16, 2026 Telegram session-boundary incident, documenting why `TELEGRAM_AUTH_BUNDLE_S22` and `TELEGRAM_AUTH_BUNDLE_E2E` are not interchangeable and what runtime/process guardrails now prevent a repeat.
 - **Guide Excursions / Source Seed Expansion**: added `@art_from_the_Baltic` to the canonical guide monitoring seed and casebook as a provisional `guide_project` source pending a fuller deep-scan review.
 - **Guide Excursions / Guide Profile Enrichment**: added a separate Gemma-only `guide_profile` enrichment pass that materializes grounded public guide name/line, credentials, and expertise tags from `guide_source.about_text` plus sample excursion context into `guide_profile.summary_short` / `facts_rollup_json`.

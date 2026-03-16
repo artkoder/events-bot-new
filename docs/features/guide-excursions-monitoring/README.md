@@ -255,6 +255,7 @@ Guide digest не должен произвольно смешивать `про
 - `GUIDE_EXCURSIONS_LIGHT_TIMES_LOCAL=09:05,13:20`
 - `GUIDE_EXCURSIONS_FULL_TIME_LOCAL=20:10`
 - `GUIDE_EXCURSIONS_TZ=Europe/Kaliningrad`
+- `ENABLE_GUIDE_DIGEST_SCHEDULED=1` включает автопубликацию `new_occurrences` сразу после успешного scheduled `full` scan/import; отдельный cron для digest здесь намеренно не используется, чтобы не гадать длительность Kaggle run и не занимать ещё одно heavy-job окно.
 
 ## Основные entrypoints
 

@@ -129,3 +129,87 @@ async def test_job_wrapper_records_skipped_heavy_ops_run(tmp_path, monkeypatch):
     assert status == "skipped"
     assert details["skip_reason"] == "heavy_busy"
     assert details["blocked_by_kind"] == "tg_monitoring"
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_guide_excursions_autopublishes_after_success(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class DummyBot:
+        def __init__(self) -> None:
+            self.messages: list[tuple[int, str]] = []
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.messages.append((int(chat_id), str(text)))
+
+    bot = DummyBot()
+
+    class Result:
+        errors: list[str] = []
+
+    calls: list[tuple[str, object]] = []
+
+    async def fake_resolve_superadmin_chat_id(_db):
+        return 42
+
+    async def fake_run_guide_monitor(db_obj, bot_obj, *, chat_id, operator_id, trigger, mode, send_progress):
+        calls.append(("run", {"chat_id": chat_id, "trigger": trigger, "mode": mode, "send_progress": send_progress}))
+        return Result()
+
+    async def fake_publish_guide_digest(db_obj, bot_obj, *, family, chat_id, target_chat=None):
+        calls.append(("publish", {"family": family, "chat_id": chat_id, "target_chat": target_chat}))
+        return {"published": True, "issue_id": 9, "target_chat": "@keniggpt"}
+
+    monkeypatch.setenv("ENABLE_GUIDE_DIGEST_SCHEDULED", "1")
+    monkeypatch.setattr(scheduling, "resolve_superadmin_chat_id", fake_resolve_superadmin_chat_id)
+
+    import guide_excursions.service as guide_service
+
+    monkeypatch.setattr(guide_service, "run_guide_monitor", fake_run_guide_monitor)
+    monkeypatch.setattr(guide_service, "publish_guide_digest", fake_publish_guide_digest)
+
+    await scheduling._run_scheduled_guide_excursions(db, bot, mode="full")
+
+    assert calls[0][0] == "run"
+    assert calls[1][0] == "publish"
+    assert calls[1][1]["family"] == "new_occurrences"
+    assert any("Scheduled guide digest published" in text for _, text in bot.messages)
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_guide_excursions_skips_autopublish_for_light_mode(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class DummyBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            return None
+
+    class Result:
+        errors: list[str] = []
+
+    calls: list[str] = []
+
+    async def fake_resolve_superadmin_chat_id(_db):
+        return 42
+
+    async def fake_run_guide_monitor(db_obj, bot_obj, *, chat_id, operator_id, trigger, mode, send_progress):
+        calls.append("run")
+        return Result()
+
+    async def fake_publish_guide_digest(db_obj, bot_obj, *, family, chat_id, target_chat=None):
+        calls.append("publish")
+        return {"published": True}
+
+    monkeypatch.setenv("ENABLE_GUIDE_DIGEST_SCHEDULED", "1")
+    monkeypatch.setattr(scheduling, "resolve_superadmin_chat_id", fake_resolve_superadmin_chat_id)
+
+    import guide_excursions.service as guide_service
+
+    monkeypatch.setattr(guide_service, "run_guide_monitor", fake_run_guide_monitor)
+    monkeypatch.setattr(guide_service, "publish_guide_digest", fake_publish_guide_digest)
+
+    await scheduling._run_scheduled_guide_excursions(db, DummyBot(), mode="light")
+
+    assert calls == ["run"]
