@@ -106,6 +106,59 @@ async def test_resolve_scan_window_uses_bootstrap_horizon_for_first_full_run(tmp
 
 
 @pytest.mark.asyncio
+async def test_run_guide_monitor_uses_bootstrap_horizon_on_first_full_scan(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    captured: dict[str, int] = {}
+    results_path = tmp_path / "guide_excursions_results.json"
+    results_path.write_text("{}", encoding="utf-8")
+
+    async def _fake_run_guide_monitor_kaggle(db_obj, *, run_id, mode, limit, days_back, chat_id, status_callback):
+        captured["limit"] = int(limit)
+        captured["days_back"] = int(days_back)
+        return results_path, {"kernel_ref": "zigomaro/guide-excursions-monitor", "status": "complete"}
+
+    async def _fake_import_results_file(db_obj, *, results_path):
+        return (
+            {
+                "sources_scanned": 0,
+                "posts_scanned": 0,
+                "posts_prefiltered": 0,
+                "occurrences_created": 0,
+                "occurrences_updated": 0,
+                "templates_touched": 0,
+                "profiles_touched": 0,
+                "past_occurrences_skipped": 0,
+                "llm_ok": 0,
+                "llm_deferred": 0,
+                "llm_error": 0,
+                "errors": 0,
+                "duration_sec": 0,
+            },
+            [],
+            {"partial": False, "sources": [], "occurrence_changes": []},
+        )
+
+    monkeypatch.setattr(guide_service, "run_guide_monitor_kaggle", _fake_run_guide_monitor_kaggle)
+    monkeypatch.setattr(guide_service, "_import_results_file", _fake_import_results_file)
+
+    result = await guide_service.run_guide_monitor(
+        db,
+        bot=None,
+        chat_id=None,
+        operator_id=1,
+        trigger="test",
+        mode="full",
+        send_progress=False,
+    )
+
+    assert result.ops_run_id is not None
+    assert captured["limit"] == guide_service.GUIDE_SCAN_LIMIT_FULL
+    assert captured["days_back"] == guide_service.GUIDE_DAYS_BACK_BOOTSTRAP
+
+
+@pytest.mark.asyncio
 async def test_import_results_materializes_fact_pack_and_claims(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

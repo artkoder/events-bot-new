@@ -2596,7 +2596,7 @@ async def run_guide_monitor(
     errors: list[str] = []
     started_monotonic = time.monotonic()
     ops_run_id: int | None = None
-    limit, days_back = _light_or_full(mode)
+    limit, days_back = await _resolve_scan_window(db, mode)
     run_details: dict[str, Any] = {
         "mode": mode,
         "run_id": run_id,
