@@ -201,6 +201,7 @@ def test_build_digest_messages_demotes_operator_like_guide_line_to_organizer():
             "canonical_title": "Осетровая симфония",
             "source_title": "Экскурсии от «Профи-тур»",
             "source_kind": "excursion_operator",
+            "guide_profile_marketing_name": "Профи-тур",
             "date": "2026-03-22",
             "digest_blurb": "Дегустационная поездка с осетровыми специалитетами.",
             "guide_line": "Профи-тур: организация интересных экскурсий и путешествий по Калининграду",
@@ -208,7 +209,22 @@ def test_build_digest_messages_demotes_operator_like_guide_line_to_organizer():
     ]
     text = build_digest_messages(rows, family="new_occurrences")[0]
     assert "👤 Гид:" not in text
-    assert "🏢 Организатор:" in text
+    assert "🏢 Организатор: Профи-тур" in text
+
+
+def test_build_digest_messages_links_phone_booking_without_explicit_url():
+    rows = [
+        {
+            "id": 17,
+            "canonical_title": "Экскурсия по Ратсхофу",
+            "source_title": "Хранители руин",
+            "date": "2026-03-21",
+            "digest_blurb": "Прогулка по Ратсхофу.",
+            "booking_text": "+7 921 710-11-61",
+        }
+    ]
+    text = build_digest_messages(rows, family="new_occurrences")[0]
+    assert '✍️ Запись: <a href="tel:+79217101161">+7 921 710-11-61</a>' in text
 
 
 def test_digest_writer_retry_after_parser_reads_provider_hint():

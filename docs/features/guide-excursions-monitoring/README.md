@@ -154,10 +154,12 @@ Guide digest не должен скатываться ни в regex-heavy шаб
 - если occurrence уже несёт несколько `guide_names`, public shell должен показывать plural line `👥 Гиды: ...`, а не схлопывать карточку обратно до одного primary guide profile;
 - если надёжного конкретного гида нет, public shell не должен подменять организацию полем `Гид`; допускается отдельная строка `🏢 Организатор: ...`, а при слабой идентичности line лучше скрыть совсем;
 - если Gemma или profile-rollup всё же вернули operator-like строку (`Профи-тур`, `команда`, `организация экскурсий`) в `guide_line`, public render обязан деградировать её до `🏢 Организатор`, а не публиковать как персонального гида;
+- при такой деградации public shell должен предпочитать короткое grounded имя бренда/организатора (`marketing_name` / channel brand), а не публиковать длинную operator-bio строку под меткой `Организатор`;
 - перед рендером digest делает lightweight public-identity resolution для явно упомянутых в source post `@username`: если occurrence уже знает имя co-guide, но публичный Telegram-профиль даёт более полное ФИО по тому же человеку, для public line нужно показывать resolved version;
 - public-identity resolution смотрит только на guide-like контекст (`мы с @...`, `гид @...`, `экскурсию проведёт @...`) и не должен автоматически превращать username из блока `запись / бронь / лс` в ещё одного гида;
 - если `guide_profile` уже знает canonical public имя, а occurrence-level `guide_names` хранит marketing alias / username того же человека (`Amber Fringilla` vs `Юлия Гришанова`), preview должен схлопывать это в одно public имя, а не показывать ложную plural-пару;
 - public `Локация` line теперь проходит через guide-specific alias table [guide-place-aliases.md](/workspaces/events-bot-new/docs/reference/guide-place-aliases.md), чтобы исторические или разговорные топонимы вроде `Роминта` не выходили в digest как будто это современный город;
+- если `Запись` в facts свелась к одному телефонному номеру, digest должен публиковать его как кликабельную `tel:` ссылку даже без отдельного `booking_url` от upstream extraction;
 - если у occurrence нет даты, он может materialize-иться для inventory/template layer, но не считается digest-ready public card;
 - длина `digest_blurb` выбирается по плотности фактов (`1..3` предложения), а не по “богатству” исходного поста;
 - формулировка должна быть живой и интересной, но строго grounded:

@@ -92,6 +92,23 @@ def _html_link(label: object | None, url: str | None) -> str:
     return f'<a href="{html.escape(href, quote=True)}">{text}</a>'
 
 
+def _normalize_phone_link(raw: object | None) -> tuple[str, str] | None:
+    text = _meaningful_text(raw)
+    if not text:
+        return None
+    digits = re.sub(r"[^\d]", "", text)
+    if not digits:
+        return None
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 10:
+        digits = "7" + digits
+    if len(digits) != 11 or not digits.startswith("7"):
+        return None
+    display = f"+7 {digits[1:4]} {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    return display, f"tel:+{digits}"
+
+
 def _channel_label(row: Mapping[str, object]) -> str:
     source_title = collapse_ws(str(row.get("source_title") or ""))
     if source_title:
@@ -161,15 +178,20 @@ def _organizer_line(row: Mapping[str, object]) -> str | None:
     direct = _meaningful_text(row.get("organizer_line"))
     if direct:
         return direct
+    source_kind = collapse_ws(str(row.get("source_kind") or ""))
+    marketing_name = _meaningful_text(
+        row.get("guide_profile_marketing_name") or _profile_fact_value(row, "marketing_name")
+    )
+    if marketing_name and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
+        return marketing_name
+    source_title = _meaningful_text(row.get("source_title"))
+    if source_title and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
+        return source_title
     organizer_names = row.get("organizer_names") or _fact_pack_value(row, "organizer_names") or []
     if isinstance(organizer_names, list):
         names = [collapse_ws(str(item)) for item in organizer_names if collapse_ws(str(item))]
         if names:
             return ", ".join(names[:3])
-    source_kind = collapse_ws(str(row.get("source_kind") or ""))
-    source_title = collapse_ws(str(row.get("source_title") or ""))
-    if source_title and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
-        return source_title
     return None
 
 
@@ -221,7 +243,7 @@ def format_occurrence_card(row: Mapping[str, object], *, index: int) -> str:
         if not guide_line:
             guide_line = _guide_names_line(row)
         if _looks_organizer_identity(guide_line, row):
-            organizer_line = _meaningful_text(row.get("organizer_line")) or guide_line
+            organizer_line = _organizer_line(row) or guide_line
             guide_line = None
         else:
             organizer_line = _organizer_line(row)
@@ -278,6 +300,10 @@ def format_occurrence_card(row: Mapping[str, object], *, index: int) -> str:
         lines.append(f"🎟 {_html_text(seats_text)}")
     booking_text = _meaningful_text(row.get("booking_line") or row.get("booking_text"))
     booking_url = _meaningful_text(row.get("booking_url"))
+    if booking_text and not booking_url:
+        phone_link = _normalize_phone_link(booking_text)
+        if phone_link:
+            booking_text, booking_url = phone_link
     if booking_text and booking_url:
         lines.append(f"✍️ Запись: {_html_link(booking_text, booking_url)}")
     elif booking_url:

@@ -177,13 +177,22 @@ def _guide_line_seed(row: Mapping[str, Any]) -> str | None:
 
 
 def _organizer_line_seed(row: Mapping[str, Any]) -> str | None:
+    source_kind = collapse_ws(str(row.get("source_kind") or ""))
+    marketing_name = collapse_ws(
+        str(
+            row.get("guide_profile_marketing_name")
+            or _profile_fact_value(row, "marketing_name")
+            or ""
+        )
+    )
+    if marketing_name and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
+        return marketing_name
+    source_title = collapse_ws(str(row.get("source_title") or ""))
+    if source_title and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
+        return source_title
     organizer_names = _string_list(row.get("organizer_names"), limit=3)
     if organizer_names:
         return ", ".join(organizer_names)
-    source_title = collapse_ws(str(row.get("source_title") or ""))
-    source_kind = collapse_ws(str(row.get("source_kind") or ""))
-    if source_title and source_kind in {"organization_with_tours", "excursion_operator", "aggregator"}:
-        return source_title
     return None
 
 
