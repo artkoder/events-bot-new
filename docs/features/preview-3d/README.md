@@ -6,8 +6,10 @@
 
 - Ручной запуск супер-админом: `/3di`
 - Автозапуск по расписанию: `ENABLE_3DI_SCHEDULED=1`
-  - время: `THREEDI_TIMES_LOCAL` (default `05:30,15:15,17:15`)
+  - время: `THREEDI_TIMES_LOCAL` (default `07:15,15:15,17:15`)
   - таймзона: `THREEDI_TZ` (default `Europe/Kaliningrad`)
+
+Утренний слот специально сдвинут на `07:15`, чтобы дать ночному `/parse` больше буфера и реже терять scheduled `/3di` из-за общего heavy-job gate.
 
 ## Как работает pipeline
 

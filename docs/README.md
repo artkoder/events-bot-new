@@ -11,6 +11,10 @@
 
 - Архитектура: `docs/architecture/overview.md`
 - Эксплуатация: `docs/operations/` (как запускать/поддерживать)
+- Расписание / cron / scheduler routing: `docs/operations/cron.md`
+  - дефолты APScheduler: `scheduling.py`
+  - production overrides: `fly.toml` (`[env]`)
+  - локальный/env шаблон: `.env.example`
 - LLM: `docs/llm/` (промпты, формат запросов, классификатор тем)
 - Справочники: `docs/reference/` (локации, праздники, шаблоны)
 - Пайплайны/парсеры (каноника): `docs/features/source-parsing/` (в `docs/pipelines/` остаются redirect‑stub’ы для старых ссылок)

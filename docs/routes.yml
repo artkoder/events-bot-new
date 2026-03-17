@@ -11,6 +11,11 @@ sections:
   operations:
     commands: docs/operations/commands.md
     cron: docs/operations/cron.md
+    scheduler_routing:
+      docs: docs/operations/cron.md
+      scheduler_defaults: scheduling.py
+      production_env: fly.toml
+      local_env_template: .env.example
     e2e_testing: docs/operations/e2e-testing.md
     e2e_scenarios: docs/operations/e2e-scenarios.md
     release_smoke_smart_update: docs/operations/release-smoke-smart-update.md

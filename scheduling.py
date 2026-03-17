@@ -1148,7 +1148,7 @@ def startup(
                 run_id=run_id,
             )
 
-        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "05:30,15:15,17:15")
+        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "07:15,15:15,17:15")
         three_di_tz = os.getenv("THREEDI_TZ", "Europe/Kaliningrad")
         for idx, t in enumerate(three_di_times.split(",")):
             t = t.strip()
@@ -1157,8 +1157,8 @@ def startup(
             hour, minute = _cron_from_local(
                 t,
                 three_di_tz,
-                default_hour="5",
-                default_minute="30",
+                default_hour="7",
+                default_minute="15",
                 label="THREEDI_TIMES_LOCAL",
             )
             _register_job(

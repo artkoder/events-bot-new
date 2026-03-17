@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Docs / Scheduler Routing**: added explicit scheduler routing to `docs/README.md`, `docs/routes.yml`, and `docs/operations/cron.md`, so schedule changes now have a canonical path: policy in `docs/operations/cron.md`, APScheduler defaults in `scheduling.py`, production overrides in `fly.toml`, and local env examples in `.env.example`.
 - **CrumpleVideo / Scheduled Tomorrow Test**: added an optional scheduler job for fully automatic `🧪 /v - Тест завтра`, running the existing `VideoAnnounceScenario.run_tomorrow_pipeline(... test_mode=True)` flow at a configurable local-time slot and sending the finished video to the configured test channel or back to the operator/superadmin chat when no test channel is configured.
 - **Guide Excursions / Scheduled Auto-Publish**: scheduled guide monitoring can now auto-publish the `new_occurrences` digest immediately after a successful `full` scan/import when `ENABLE_GUIDE_DIGEST_SCHEDULED=1`, avoiding a separate digest cron slot and keeping publish tied to fresh Kaggle facts.
 - **Docs / Guide Kaggle Session Incident**: added a canonical postmortem for the March 16, 2026 Telegram session-boundary incident, documenting why `TELEGRAM_AUTH_BUNDLE_S22` and `TELEGRAM_AUTH_BUNDLE_E2E` are not interchangeable and what runtime/process guardrails now prevent a repeat.
@@ -85,6 +86,7 @@
 - **Add Event Watcher / Stall Guard**: `_watch_add_event_worker()` now updates `_ADD_EVENT_LAST_DEQUEUE_TS` through the intended module-level state instead of crashing with `UnboundLocalError`, so the queue watcher can keep restarting a stalled add-event worker instead of failing its own health check.
 
 ### Changed
+- **Scheduler / Morning Heavy Jobs**: moved the default scheduled morning `/3di` slot to `07:15 Europe/Kaliningrad` (`THREEDI_TIMES_LOCAL=07:15,15:15,17:15`) and aligned Fly production cron from the legacy `SOURCE_PARSING_TIME_LOCAL=02:15` / `THREEDI_TIMES_LOCAL=03:15,15:15` to `04:30` / `07:15,15:15`, so nightly `/parse` gets a larger head start and scheduled `/3di` is less likely to skip on the shared heavy-job guard.
 - **Guide Excursions Monitoring / Live E2E Coverage**: the canonical `guide_excursions` live scenario now walks the full operator path from `/start` and Kaggle scan to `/guide_report`, `/guide_runs`, `/guide_recent_changes`, `/guide_events`, and `/guide_facts`/`/guide_log` on multiple control excursions before publishing the digest to `@keniggpt`.
 - **Guide Excursions Monitoring / E2E LLM Counters**: the live `guide_excursions` scenario now also asserts completion/report LLM counters (`LLM ok/deferred/error`, `llm_ok`, `llm_deferred`) so the Telegram UI run proves actual Gemma activity, not just occurrence import side effects.
 - **Guide Excursions Monitoring / Full-Run E2E Timeout**: guide live E2E now treats `Мониторинг экскурсий завершён` as a dedicated long-running Kaggle operation with its own generous timeout envs (`E2E_GUIDE_MONITOR_TIMEOUT_SEC`, `E2E_GUIDE_MONITOR_POLL_SEC`) instead of the generic 5-minute fallback.

@@ -2,6 +2,22 @@
 
 The bot uses APScheduler to run periodic maintenance tasks on a fixed schedule.
 
+## Routing
+
+When you need to change or inspect a schedule, use this route first instead of searching the repo from scratch:
+
+- canonical ops doc and schedule policy: `docs/operations/cron.md`
+- APScheduler job registration and default times: `scheduling.py`
+- production schedule overrides for Fly: `fly.toml` (`[env]`)
+- local/dev env template: `.env.example`
+
+Rule of thumb:
+
+- if you need to understand *what* runs and *why*, start here in `docs/operations/cron.md`;
+- if you need to change fallback/default times in code, edit `scheduling.py`;
+- if you need to change current production timings, edit `fly.toml`;
+- if you need to keep local setup examples in sync, update `.env.example`.
+
 Some jobs are lightweight (seconds), but **Kaggle/LLM/rendering** jobs can take **minutes or hours** (e.g. Telegram monitoring via Kaggle, VK auto-import via Smart Update, `/parse`, `/3di`).
 
 To avoid parallel long-running operations (especially **manual** starts overlapping with **scheduled** ones), the scheduler uses a shared “heavy ops” gate:
@@ -24,7 +40,7 @@ Numbers below are from `ops_run` snapshots + local `/parse` logs (p50/p90/max). 
 Defaults were adjusted to reduce overlaps between the most common heavy jobs:
 
 - nightly source parsing: `SOURCE_PARSING_TIME_LOCAL=04:30` (was `02:15`)
-- `/3di` morning run: `THREEDI_TIMES_LOCAL=05:30,15:15,17:15` (was `03:15,15:15,17:15`)
+- `/3di` morning run: `THREEDI_TIMES_LOCAL=07:15,15:15,17:15` (was `05:30,15:15,17:15`; older default `03:15,15:15,17:15`)
 - VK auto-import: `VK_AUTO_IMPORT_TIMES_LOCAL=06:15,10:15,12:00,18:30` with `VK_AUTO_IMPORT_LIMIT=15` by default, so queue draining relies on cadence instead of oversized single runs and stays away from the `08:00` daily announcement window and late-evening monitoring.
 
 If you see skip notifications in admin chat often, spread the schedules further instead of switching to “wait”: skipping is a safety net, not a planning tool.
