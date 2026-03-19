@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Partner event notifications in the admin chat now include the first event photo plus Telegraph and VK links so operators know to review or edit the VK post.
 
 ### Fixed
 - **Bot Startup / Recent Imports**: Removed a duplicate `recent_imports_router` registration in `create_app()`, which crashed the production webhook process during startup and made the bot stop responding to commands.
